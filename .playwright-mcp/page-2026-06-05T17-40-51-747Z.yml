@@ -1,6 +1,6 @@
 - main [ref=e2]:
   - generic [ref=e3]:
-    - generic [ref=e4]: granuleishon
+    - generic [ref=e4]: grnsh
     - generic [ref=e5]: live granular synthesis
     - generic [ref=e6]:
       - button "▶ Start mic" [ref=e7] [cursor=pointer]

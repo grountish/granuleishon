@@ -1,4 +1,4 @@
-// granuleishon — main thread: mic capture, worklet setup, UI wiring.
+// grnsh — main thread: mic capture, worklet setup, UI wiring.
 
 let audioCtx = null;
 let node = null;
@@ -16,7 +16,7 @@ const REC = {
   processor: null,
   sink: null,
 };
-const PRESET_STORAGE_KEY = 'granuleishon-presets-v1';
+const PRESET_STORAGE_KEY = 'grnsh-presets-v1';
 const PRESET_SLOT_COUNT = 4;
 let presetSaveArmed = false;
 let presetStore = Array.from({ length: PRESET_SLOT_COUNT }, () => null);
@@ -102,7 +102,7 @@ function downloadRecording(blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `granuleishon-${stamp}.wav`;
+  a.download = `grnsh-${stamp}.wav`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -213,14 +213,20 @@ function stopRecording() {
   if (!REC.isRecording) return;
 
   if (REC.processor && fx?.output) {
-    try { fx.output.disconnect(REC.processor); } catch (e) {}
+    try {
+      fx.output.disconnect(REC.processor);
+    } catch (e) {}
   }
   if (REC.processor) {
-    try { REC.processor.disconnect(); } catch (e) {}
+    try {
+      REC.processor.disconnect();
+    } catch (e) {}
     REC.processor.onaudioprocess = null;
   }
   if (REC.sink) {
-    try { REC.sink.disconnect(); } catch (e) {}
+    try {
+      REC.sink.disconnect();
+    } catch (e) {}
   }
 
   const left = mergeFloat32(REC.left, REC.sampleCount);
@@ -456,9 +462,12 @@ function updateGenVizState(gi, { waveform, posX, sprayNorm, frozen }) {
   for (let x = 0; x < W; x++) {
     const left = x > 0 ? x - 1 : x;
     const right = x < W - 1 ? x + 1 : x;
-    state.scratchPeak[x] = state.targetPeak[left] * 0.22 + state.targetPeak[x] * 0.56 + state.targetPeak[right] * 0.22;
-    state.scratchTeal[x] = state.targetTeal[left] * 0.22 + state.targetTeal[x] * 0.56 + state.targetTeal[right] * 0.22;
-    state.scratchBass[x] = state.targetBass[left] * 0.22 + state.targetBass[x] * 0.56 + state.targetBass[right] * 0.22;
+    state.scratchPeak[x] =
+      state.targetPeak[left] * 0.22 + state.targetPeak[x] * 0.56 + state.targetPeak[right] * 0.22;
+    state.scratchTeal[x] =
+      state.targetTeal[left] * 0.22 + state.targetTeal[x] * 0.56 + state.targetTeal[right] * 0.22;
+    state.scratchBass[x] =
+      state.targetBass[left] * 0.22 + state.targetBass[x] * 0.56 + state.targetBass[right] * 0.22;
   }
   state.targetPeak.set(state.scratchPeak);
   state.targetTeal.set(state.scratchTeal);
@@ -713,8 +722,12 @@ function anyMicSourceSelected() {
 }
 
 function getGranularStatusText() {
-  const micCount = granularInputSource ? GRANULAR_SOURCES.filter((source) => source.mode === 'mic').length : 0;
-  const fileSources = GRANULAR_SOURCES.filter((source) => source.mode === 'file' && source.bufferData);
+  const micCount = granularInputSource
+    ? GRANULAR_SOURCES.filter((source) => source.mode === 'mic').length
+    : 0;
+  const fileSources = GRANULAR_SOURCES.filter(
+    (source) => source.mode === 'file' && source.bufferData,
+  );
   if (fileSources.length === 2) return '2 file sources';
   if (fileSources.length === 1 && micCount === 0) return `file: ${fileSources[0].fileName}`;
   if (fileSources.length > 0 && micCount > 0) return 'mic + file';
@@ -747,7 +760,10 @@ function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
   state[genIdx][key] = next;
   genControlBindings[genIdx].get(key)?.setValue(next);
   if (key === 'positionSec') {
-    const posX = Math.max(0, Math.min(1, 1 - next / Math.max(0.001, getGeneratorPositionMax(genIdx))));
+    const posX = Math.max(
+      0,
+      Math.min(1, 1 - next / Math.max(0.001, getGeneratorPositionMax(genIdx))),
+    );
     const vizState = genVizStates[genIdx];
     vizState.targetPosX = posX;
     if (!vizState.seeded) vizState.currentPosX = posX;
@@ -871,11 +887,13 @@ function makeKnob(p, initialValue, onInput) {
   let currentValue = initialValue;
   const getDecimals = () => (spec.step.toString().split('.')[1] || '').length;
   const toNorm = (v) => {
-    const rawToNorm = spec.toNorm || ((value) => (value - spec.min) / Math.max(0.0001, spec.max - spec.min));
+    const rawToNorm =
+      spec.toNorm || ((value) => (value - spec.min) / Math.max(0.0001, spec.max - spec.min));
     return clamp01(rawToNorm(v));
   };
   const toValue = (n) => {
-    const rawFromNorm = spec.fromNorm || ((value) => spec.min + clamp01(value) * (spec.max - spec.min));
+    const rawFromNorm =
+      spec.fromNorm || ((value) => spec.min + clamp01(value) * (spec.max - spec.min));
     return parseFloat((Math.round(rawFromNorm(n) / spec.step) * spec.step).toFixed(getDecimals()));
   };
 
@@ -962,7 +980,9 @@ function makeKnob(p, initialValue, onInput) {
     'wheel',
     (e) => {
       e.preventDefault();
-      const n = clamp01(norm - (Math.sign(e.deltaY) * spec.step) / Math.max(0.0001, spec.max - spec.min));
+      const n = clamp01(
+        norm - (Math.sign(e.deltaY) * spec.step) / Math.max(0.0001, spec.max - spec.min),
+      );
       renderNorm(n);
       currentValue = toValue(n);
       onInput(currentValue);
@@ -1848,7 +1868,8 @@ function applyFx(id, key, val) {
       fx.delay.dry.gain.value = 1 - val;
     }
   } else if (id === 'filter') {
-    if (key === 'cutoff') fx.filter.biquad.frequency.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'cutoff')
+      fx.filter.biquad.frequency.setTargetAtTime(val, audioCtx.currentTime, 0.02);
     if (key === 'q') fx.filter.biquad.Q.setTargetAtTime(val, audioCtx.currentTime, 0.02);
     if (key === 'mix') {
       fx.filter.wet.gain.value = val;
@@ -1876,7 +1897,8 @@ function applyFx(id, key, val) {
       fx.reverb.dry.gain.value = 1 - val;
     }
   } else if (id === 'limiter') {
-    if (key === 'threshold') fx.limiter.comp.threshold.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'threshold')
+      fx.limiter.comp.threshold.setTargetAtTime(val, audioCtx.currentTime, 0.02);
     if (key === 'release') fx.limiter.comp.release.setTargetAtTime(val, audioCtx.currentTime, 0.02);
     if (key === 'output') fx.limiter.output.gain.setTargetAtTime(val, audioCtx.currentTime, 0.02);
   }
@@ -1898,7 +1920,9 @@ function refreshLFOUI() {
   LFOS.forEach((lfo, lfoIdx) => {
     lfoControlBindings[lfoIdx].get('rate')?.setValue(lfo.rate);
     lfoControlBindings[lfoIdx].get('depth')?.setValue(lfo.depth);
-    lfoShapeButtons[lfoIdx].forEach((btn, shape) => btn.classList.toggle('active', lfo.shape === shape));
+    lfoShapeButtons[lfoIdx].forEach((btn, shape) =>
+      btn.classList.toggle('active', lfo.shape === shape),
+    );
   });
 }
 
@@ -1943,7 +1967,8 @@ function applyPreset(preset) {
     if (GEN3.nodes) {
       GEN3.nodes.gain.gain.setValueAtTime(GEN3.gain, audioCtx.currentTime);
       GEN3.activeNotes.forEach((entry) => {
-        if (entry?.source?.detune) entry.source.detune.setValueAtTime(GEN3.detune, audioCtx.currentTime);
+        if (entry?.source?.detune)
+          entry.source.detune.setValueAtTime(GEN3.detune, audioCtx.currentTime);
       });
       restartAllGen3Notes();
     }
@@ -2050,7 +2075,11 @@ function buildFxUI() {
     if (def.id === 'filter') {
       const modeRow = document.createElement('div');
       modeRow.className = 'fx-mode-row';
-      [['lowpass', 'LP'], ['highpass', 'HP'], ['bandpass', 'BP']].forEach(([mode, label]) => {
+      [
+        ['lowpass', 'LP'],
+        ['highpass', 'HP'],
+        ['bandpass', 'BP'],
+      ].forEach(([mode, label]) => {
         const btn = document.createElement('button');
         btn.className = 'fx-mode-btn' + (FX.filter.mode === mode ? ' active' : '');
         btn.textContent = label;
@@ -2143,7 +2172,9 @@ async function syncGranularSourceState(genIdx) {
   const source = getSourceState(genIdx);
   if (source.mode === 'file' && source.bufferData) {
     const workletBuffer = source.bufferData.slice();
-    node.port.postMessage({ type: 'set-gen-source-buffer', gen: genIdx, buffer: workletBuffer }, [workletBuffer.buffer]);
+    node.port.postMessage({ type: 'set-gen-source-buffer', gen: genIdx, buffer: workletBuffer }, [
+      workletBuffer.buffer,
+    ]);
   } else {
     node.port.postMessage({ type: 'set-gen-source-mode', gen: genIdx, mode: 'live' });
   }
@@ -2237,7 +2268,12 @@ function stop() {
   // Reset freeze state for both generators.
   clearFreezeStates({ send: false });
   for (let genIdx = 0; genIdx < 2; genIdx++) {
-    setSourceDurationSec(genIdx, getSourceState(genIdx).mode === 'file' ? getSourceState(genIdx).durationSec : LIVE_SOURCE_SECONDS);
+    setSourceDurationSec(
+      genIdx,
+      getSourceState(genIdx).mode === 'file'
+        ? getSourceState(genIdx).durationSec
+        : LIVE_SOURCE_SECONDS,
+    );
     refreshSourceModeUI(genIdx);
   }
 

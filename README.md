@@ -1,8 +1,8 @@
-# granuleishon
+# grnsh
 
 A live granular synthesizer for the web. It takes your **microphone** as the
 source, continuously records the last ~10 seconds into a circular buffer, and
-sprays short windowed *grains* read from that recent past — with control over
+sprays short windowed _grains_ read from that recent past — with control over
 grain size, density, position, pitch, stereo spread, and a **freeze** button.
 
 ## Run it
@@ -30,17 +30,17 @@ feedback. Make a sound and play with the controls.
 
 ## Parameters
 
-| Control       | What it does                                            |
-| ------------- | ------------------------------------------------------- |
-| Grain size    | Length of each grain (ms)                               |
-| Density       | Grains spawned per second                               |
-| Position      | How far behind "now" grains read from (s)               |
-| Spray         | Random scatter added to position (s)                    |
-| Pitch         | Per-grain transposition (semitones)                     |
-| Pitch jitter  | Random pitch spread per grain (semitones)               |
-| Stereo spread | How wide grains pan across the field                    |
-| Output gain   | Master level                                            |
-| Freeze        | Stop recording — granulate a frozen moment              |
+| Control       | What it does                               |
+| ------------- | ------------------------------------------ |
+| Grain size    | Length of each grain (ms)                  |
+| Density       | Grains spawned per second                  |
+| Position      | How far behind "now" grains read from (s)  |
+| Spray         | Random scatter added to position (s)       |
+| Pitch         | Per-grain transposition (semitones)        |
+| Pitch jitter  | Random pitch spread per grain (semitones)  |
+| Stereo spread | How wide grains pan across the field       |
+| Output gain   | Master level                               |
+| Freeze        | Stop recording — granulate a frozen moment |
 
 ## Ideas to extend later
 
