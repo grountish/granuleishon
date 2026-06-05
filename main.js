@@ -158,10 +158,21 @@ const state = [
 ];
 
 function sendParams(genIdx) {
-  if (node) node.port.postMessage({ type: 'params', gen: genIdx, value: state[genIdx] });
+  if (!node) return;
+  const effective = { ...state[genIdx] };
+  if (lfoMappings.size > 0) {
+    const scaled = currentLFOValue * LFO.depth;
+    lfoMappings.forEach(({ genIdx: gi, key, paramDef }) => {
+      if (gi !== genIdx) return;
+      const half = (paramDef.max - paramDef.min) * 0.5;
+      effective[key] = Math.max(paramDef.min, Math.min(paramDef.max,
+        effective[key] + scaled * half));
+    });
+  }
+  node.port.postMessage({ type: 'params', gen: genIdx, value: effective });
 }
 
-function makeControlRow(p, initialValue, onInput) {
+function makeControlRow(p, initialValue, onInput, lfoToggle = null) {
   const dec = (p.step.toString().split('.')[1] || '').length;
   const fmt = (v) => `${parseFloat(v.toFixed(dec))}${p.unit ? ' ' + p.unit : ''}`;
 
@@ -180,7 +191,18 @@ function makeControlRow(p, initialValue, onInput) {
   const label = document.createElement('label');
   label.textContent = p.label;
 
-  row.append(knob, label, valueEl);
+  if (lfoToggle !== null) {
+    const led = document.createElement('button');
+    led.className = 'lfo-led';
+    led.title = 'Toggle LFO modulation';
+    led.addEventListener('click', (e) => {
+      e.stopPropagation();
+      led.classList.toggle('active', lfoToggle());
+    });
+    row.append(knob, led, label, valueEl);
+  } else {
+    row.append(knob, label, valueEl);
+  }
   return row;
 }
 
@@ -325,7 +347,7 @@ function buildGeneratorPanel(genIdx) {
     rows.appendChild(makeControlRow(p, defaults[p.key], (v) => {
       state[genIdx][p.key] = v;
       sendParams(genIdx);
-    }));
+    }, () => toggleLFOMap(genIdx, p.key)));
   });
 
   panel.appendChild(rows);
@@ -374,6 +396,85 @@ const FX = {
 };
 
 let fx = null; // audio nodes, created in start(), nulled in stop()
+
+// ─── LFO ───────────────────────────────────────────────────────────────────
+
+const LFO = { rate: 1.0, shape: 'sine', depth: 0.3 };
+// lfoMappings: 'genIdx:paramKey' → { genIdx, key, paramDef }
+const lfoMappings = new Map();
+let lfoPhase = 0, lfoLastTs = 0, lfoAnimFrame = null, currentLFOValue = 0;
+
+function lfoStep(ts) {
+  const dt = lfoLastTs ? Math.min((ts - lfoLastTs) / 1000, 0.1) : 0;
+  lfoLastTs = ts;
+  lfoPhase += LFO.rate * dt;
+  while (lfoPhase >= 1) lfoPhase -= 1;
+  switch (LFO.shape) {
+    case 'sine':   currentLFOValue = Math.sin(2 * Math.PI * lfoPhase); break;
+    case 'tri':    currentLFOValue = 1 - 4 * Math.abs(lfoPhase - 0.5); break;
+    case 'square': currentLFOValue = lfoPhase < 0.5 ? 1 : -1; break;
+    case 'saw':    currentLFOValue = 2 * lfoPhase - 1; break;
+  }
+  if (lfoMappings.size > 0) {
+    const gens = new Set([...lfoMappings.values()].map(m => m.genIdx));
+    gens.forEach(gi => sendParams(gi));
+  }
+  lfoAnimFrame = requestAnimationFrame(lfoStep);
+}
+
+function startLFOLoop() {
+  if (lfoAnimFrame) return;
+  lfoLastTs = 0;
+  lfoAnimFrame = requestAnimationFrame(lfoStep);
+}
+
+function stopLFOLoop() {
+  if (lfoAnimFrame) { cancelAnimationFrame(lfoAnimFrame); lfoAnimFrame = null; }
+  currentLFOValue = 0;
+}
+
+function toggleLFOMap(genIdx, key) {
+  const mapKey = `${genIdx}:${key}`;
+  if (lfoMappings.has(mapKey)) {
+    lfoMappings.delete(mapKey);
+    sendParams(genIdx); // restore unmodulated value immediately
+    return false;
+  }
+  lfoMappings.set(mapKey, { genIdx, key, paramDef: PARAMS.find(p => p.key === key) });
+  return true;
+}
+
+function buildLFOSection() {
+  const section = document.createElement('div');
+  section.className = 'fx-section lfo-section';
+
+  const lbl = document.createElement('div');
+  lbl.className = 'fx-section-label';
+  lbl.textContent = 'LFO';
+  section.appendChild(lbl);
+
+  [{ key: 'rate',  label: 'Rate',  min: 0.05, max: 10, step: 0.05, unit: 'Hz' },
+   { key: 'depth', label: 'Depth', min: 0,    max: 1,  step: 0.01, unit: ''   }]
+    .forEach((p) => section.appendChild(makeControlRow(p, LFO[p.key], (v) => { LFO[p.key] = v; })));
+
+  // Shape selector
+  const shapeRow = document.createElement('div');
+  shapeRow.className = 'lfo-shapes';
+  [['sine', 'SIN'], ['tri', 'TRI'], ['square', 'SQR'], ['saw', 'SAW']].forEach(([shape, lbl]) => {
+    const btn = document.createElement('button');
+    btn.className = 'lfo-shape' + (LFO.shape === shape ? ' active' : '');
+    btn.textContent = lbl;
+    btn.addEventListener('click', () => {
+      LFO.shape = shape;
+      shapeRow.querySelectorAll('.lfo-shape').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    });
+    shapeRow.appendChild(btn);
+  });
+  section.appendChild(shapeRow);
+
+  return section;
+}
 
 function makeSatCurve(drive) {
   const n = 256;
@@ -491,6 +592,9 @@ function buildFxUI() {
   header.innerHTML = '<span class="col-title"><span class="col-dot"></span>FX Chain</span>';
   container.appendChild(header);
 
+  // LFO modulator first
+  container.appendChild(buildLFOSection());
+
   // One section per effect, stacked vertically
   FX_DEFS.forEach((def) => {
     const section = document.createElement('div');
@@ -543,6 +647,7 @@ async function start() {
 
     sendParams(0);
     sendParams(1);
+    startLFOLoop();
 
     started = true;
     startBtn.textContent = '■ Stop';
@@ -555,6 +660,7 @@ async function start() {
 }
 
 function stop() {
+  stopLFOLoop();
   if (micStream) micStream.getTracks().forEach((t) => t.stop());
   if (audioCtx) audioCtx.close();
   audioCtx = node = micStream = fx = null;

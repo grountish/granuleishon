@@ -308,6 +308,61 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 .knob--drag               { cursor: grabbing; opacity: 0.9; }
 .knob--drag .knob-body    { fill: #2a2a2a; }
 
+/* ── LFO LED (on generator knobs) ───────────────────────────── */
+
+.lfo-led {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  padding: 0;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, box-shadow 0.1s;
+}
+
+.lfo-led:hover   { border-color: var(--gen-accent); }
+
+.lfo-led.active  {
+  background:   var(--gen-accent);
+  border-color: var(--gen-accent);
+  box-shadow: 0 0 5px var(--gen-accent);
+}
+
+/* ── LFO section (in FX column) ─────────────────────────────── */
+
+.lfo-section {
+  --gen-accent:     #7aacdc;
+  --gen-accent-dim: #5590c0;
+}
+
+.lfo-section > .fx-section-label { color: #7aacdc; }
+
+.lfo-shapes {
+  display: flex;
+  gap: 2px;
+  padding: 5px 10px 8px;
+}
+
+.lfo-shape {
+  flex: 1;
+  font-size: 8px;
+  font-weight: 700;
+  padding: 4px 0;
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.lfo-shape:hover      { border-color: #7aacdc; color: var(--text); }
+.lfo-shape.active     { background: #7aacdc; border-color: #7aacdc; color: #0a1822; }
+
 /* ── FX sections ─────────────────────────────────────────────── */
 
 .fx-section { border-bottom: 1px solid var(--border); }
