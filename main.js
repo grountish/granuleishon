@@ -257,7 +257,7 @@ function normParam(value, min, max) {
 }
 
 function drawGenParamFeedback(c, gi, W, H, cx, sw) {
-  const params = state[gi];
+  const params = getEffectiveGeneratorParams(gi);
   if (!params) return;
   const densityNorm = normParam(params.density, 1, 100);
   const grainNorm = normParam(params.grainSizeMs, 5, 500);
@@ -664,8 +664,7 @@ function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
   if (send) sendParams(genIdx);
 }
 
-function sendParams(genIdx) {
-  if (!node) return;
+function getEffectiveGeneratorParams(genIdx) {
   const effective = { ...state[genIdx] };
   if (lfoMappings.size > 0) {
     lfoMappings.forEach(({ genIdx: gi, key, paramDef, lfoIdx }) => {
@@ -680,6 +679,12 @@ function sendParams(genIdx) {
       );
     });
   }
+  return effective;
+}
+
+function sendParams(genIdx) {
+  if (!node) return;
+  const effective = getEffectiveGeneratorParams(genIdx);
   node.port.postMessage({ type: 'params', gen: genIdx, value: effective });
 }
 
