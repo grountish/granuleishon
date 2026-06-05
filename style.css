@@ -361,8 +361,14 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   text-align: center;
 }
 
-/* FX row: smaller knob */
-#fx-chain .knob { width: 28px; height: 28px; }
+/* FX row: smaller knob, visually lowered without increasing panel height */
+#fx-chain .knob {
+  width: 28px;
+  height: 28px;
+  margin-bottom:2px;
+  transform: translateY(2px);
+  transform-origin: center;
+}
 
 /* ── Knob ────────────────────────────────────────────────────── */
 
