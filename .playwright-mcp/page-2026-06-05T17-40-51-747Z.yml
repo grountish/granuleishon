@@ -1,0 +1,225 @@
+- main [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e4]: granuleishon
+    - generic [ref=e5]: live granular synthesis
+    - generic [ref=e6]:
+      - button "▶ Start mic" [ref=e7] [cursor=pointer]
+      - generic [ref=e8]: idle
+  - generic [ref=e9]:
+    - generic [ref=e10]:
+      - generic [ref=e11]:
+        - generic [ref=e12]:
+          - generic [ref=e13]: Gen 1
+          - button "Freeze" [disabled] [ref=e15]
+        - generic [ref=e17]:
+          - generic [ref=e18]:
+            - img [ref=e19]
+            - button "Toggle LFO modulation" [ref=e24] [cursor=pointer]
+            - generic [ref=e25]: Grain size
+            - generic [ref=e26]: 120 ms
+          - generic [ref=e27]:
+            - img [ref=e28]
+            - button "Toggle LFO modulation" [ref=e33] [cursor=pointer]
+            - generic [ref=e34]: Density
+            - generic [ref=e35]: 20 /s
+          - generic [ref=e36]:
+            - img [ref=e37]
+            - button "Toggle LFO modulation" [ref=e42] [cursor=pointer]
+            - generic [ref=e43]: Position
+            - generic [ref=e44]: 0.5 s back
+          - generic [ref=e45]:
+            - img [ref=e46]
+            - button "Toggle LFO modulation" [ref=e51] [cursor=pointer]
+            - generic [ref=e52]: Spray
+            - generic [ref=e53]: 0.05 s
+          - generic [ref=e54]:
+            - img [ref=e55]
+            - button "Toggle LFO modulation" [ref=e60] [cursor=pointer]
+            - generic [ref=e61]: Pitch
+            - generic [ref=e62]: 0 st
+          - generic [ref=e63]:
+            - img [ref=e64]
+            - button "Toggle LFO modulation" [ref=e68] [cursor=pointer]
+            - generic [ref=e69]: Pitch jitter
+            - generic [ref=e70]: 0 st
+          - generic [ref=e71]:
+            - img [ref=e72]
+            - button "Toggle LFO modulation" [ref=e77] [cursor=pointer]
+            - generic [ref=e78]: Stereo spread
+            - generic [ref=e79]: "0.5"
+          - generic [ref=e80]:
+            - img [ref=e81]
+            - button "Toggle LFO modulation" [ref=e86] [cursor=pointer]
+            - generic [ref=e87]: Output gain
+            - generic [ref=e88]: "0.8"
+      - generic [ref=e89]:
+        - generic [ref=e90]:
+          - generic [ref=e91]: Gen 2
+          - button "Freeze" [disabled] [ref=e93]
+        - generic [ref=e95]:
+          - generic [ref=e96]:
+            - img [ref=e97]
+            - button "Toggle LFO modulation" [ref=e102] [cursor=pointer]
+            - generic [ref=e103]: Grain size
+            - generic [ref=e104]: 80 ms
+          - generic [ref=e105]:
+            - img [ref=e106]
+            - button "Toggle LFO modulation" [ref=e111] [cursor=pointer]
+            - generic [ref=e112]: Density
+            - generic [ref=e113]: 15 /s
+          - generic [ref=e114]:
+            - img [ref=e115]
+            - button "Toggle LFO modulation" [ref=e120] [cursor=pointer]
+            - generic [ref=e121]: Position
+            - generic [ref=e122]: 1.2 s back
+          - generic [ref=e123]:
+            - img [ref=e124]
+            - button "Toggle LFO modulation" [ref=e129] [cursor=pointer]
+            - generic [ref=e130]: Spray
+            - generic [ref=e131]: 0.1 s
+          - generic [ref=e132]:
+            - img [ref=e133]
+            - button "Toggle LFO modulation" [ref=e138] [cursor=pointer]
+            - generic [ref=e139]: Pitch
+            - generic [ref=e140]: 7 st
+          - generic [ref=e141]:
+            - img [ref=e142]
+            - button "Toggle LFO modulation" [ref=e147] [cursor=pointer]
+            - generic [ref=e148]: Pitch jitter
+            - generic [ref=e149]: 2 st
+          - generic [ref=e150]:
+            - img [ref=e151]
+            - button "Toggle LFO modulation" [ref=e156] [cursor=pointer]
+            - generic [ref=e157]: Stereo spread
+            - generic [ref=e158]: "0.7"
+          - generic [ref=e159]:
+            - img [ref=e160]
+            - button "Toggle LFO modulation" [ref=e165] [cursor=pointer]
+            - generic [ref=e166]: Output gain
+            - generic [ref=e167]: "0.6"
+      - generic [ref=e168]:
+        - generic [ref=e169]:
+          - generic [ref=e170]: Gen 3 · Osc
+          - generic [ref=e172]:
+            - button "SIN" [ref=e173] [cursor=pointer]
+            - button "TRI" [ref=e174] [cursor=pointer]
+            - button "SQR" [ref=e175] [cursor=pointer]
+            - button "SAW" [ref=e176] [cursor=pointer]
+            - button "NOI" [ref=e177] [cursor=pointer]
+        - generic [ref=e180]:
+          - generic [ref=e182]:
+            - button "C5" [ref=e183] [cursor=pointer]
+            - button "C#5" [ref=e184] [cursor=pointer]
+            - button "D5" [ref=e185] [cursor=pointer]
+            - button "D#5" [ref=e186] [cursor=pointer]
+            - button "E5" [ref=e187] [cursor=pointer]
+            - button "F5" [ref=e188] [cursor=pointer]
+            - button "F#5" [ref=e189] [cursor=pointer]
+            - button "G5" [ref=e190] [cursor=pointer]
+            - button "G#5" [ref=e191] [cursor=pointer]
+            - button "A5" [ref=e192] [cursor=pointer]
+            - button "A#5" [ref=e193] [cursor=pointer]
+            - button "B5" [ref=e194] [cursor=pointer]
+          - generic [ref=e196]:
+            - button "C4" [ref=e197] [cursor=pointer]
+            - button "C#4" [ref=e198] [cursor=pointer]
+            - button "D4" [ref=e199] [cursor=pointer]
+            - button "D#4" [ref=e200] [cursor=pointer]
+            - button "E4" [ref=e201] [cursor=pointer]
+            - button "F4" [ref=e202] [cursor=pointer]
+            - button "F#4" [ref=e203] [cursor=pointer]
+            - button "G4" [ref=e204] [cursor=pointer]
+            - button "G#4" [ref=e205] [cursor=pointer]
+            - button "A4" [ref=e206] [cursor=pointer]
+            - button "A#4" [ref=e207] [cursor=pointer]
+            - button "B4" [ref=e208] [cursor=pointer]
+          - generic [ref=e210]:
+            - button "C3" [ref=e211] [cursor=pointer]
+            - button "C#3" [ref=e212] [cursor=pointer]
+            - button "D3" [ref=e213] [cursor=pointer]
+            - button "D#3" [ref=e214] [cursor=pointer]
+            - button "E3" [ref=e215] [cursor=pointer]
+            - button "F3" [ref=e216] [cursor=pointer]
+            - button "F#3" [ref=e217] [cursor=pointer]
+            - button "G3" [ref=e218] [cursor=pointer]
+            - button "G#3" [ref=e219] [cursor=pointer]
+            - button "A3" [ref=e220] [cursor=pointer]
+            - button "A#3" [ref=e221] [cursor=pointer]
+            - button "B3" [ref=e222] [cursor=pointer]
+          - generic [ref=e224]:
+            - button "C2" [ref=e225] [cursor=pointer]
+            - button "C#2" [ref=e226] [cursor=pointer]
+            - button "D2" [ref=e227] [cursor=pointer]
+            - button "D#2" [ref=e228] [cursor=pointer]
+            - button "E2" [ref=e229] [cursor=pointer]
+            - button "F2" [ref=e230] [cursor=pointer]
+            - button "F#2" [ref=e231] [cursor=pointer]
+            - button "G2" [ref=e232] [cursor=pointer]
+            - button "G#2" [ref=e233] [cursor=pointer]
+            - button "A2" [ref=e234] [cursor=pointer]
+            - button "A#2" [ref=e235] [cursor=pointer]
+            - button "B2" [ref=e236] [cursor=pointer]
+        - generic [ref=e237]:
+          - generic [ref=e238]:
+            - img [ref=e239]
+            - generic [ref=e244]: Gain
+            - generic [ref=e245]: "0.5"
+          - generic [ref=e246]:
+            - img [ref=e247]
+            - generic [ref=e252]: Detune
+            - generic [ref=e253]: 0 ct
+    - generic [ref=e254]:
+      - generic [ref=e256]: FX Chain
+      - generic [ref=e258]:
+        - generic [ref=e259]: LFO
+        - generic [ref=e260]:
+          - img [ref=e261]
+          - generic [ref=e266]: Rate
+          - generic [ref=e267]: 1 Hz
+        - generic [ref=e268]:
+          - img [ref=e269]
+          - generic [ref=e274]: Depth
+          - generic [ref=e275]: "0.3"
+        - generic [ref=e276]:
+          - button "SIN" [ref=e277] [cursor=pointer]
+          - button "TRI" [ref=e278] [cursor=pointer]
+          - button "SQR" [ref=e279] [cursor=pointer]
+          - button "SAW" [ref=e280] [cursor=pointer]
+      - generic [ref=e281]:
+        - generic [ref=e282]: Delay
+        - generic [ref=e283]:
+          - img [ref=e284]
+          - generic [ref=e289]: Time
+          - generic [ref=e290]: 0.3 s
+        - generic [ref=e291]:
+          - img [ref=e292]
+          - generic [ref=e297]: Feedback
+          - generic [ref=e298]: "0.35"
+        - generic [ref=e299]:
+          - img [ref=e300]
+          - generic [ref=e304]: Mix
+          - generic [ref=e305]: "0"
+      - generic [ref=e306]:
+        - generic [ref=e307]: Saturation
+        - generic [ref=e308]:
+          - img [ref=e309]
+          - generic [ref=e314]: Drive
+          - generic [ref=e315]: "0.3"
+        - generic [ref=e316]:
+          - img [ref=e317]
+          - generic [ref=e321]: Mix
+          - generic [ref=e322]: "0"
+      - generic [ref=e323]:
+        - generic [ref=e324]: Reverb
+        - generic [ref=e325]:
+          - img [ref=e326]
+          - generic [ref=e331]: Size
+          - generic [ref=e332]: 2 s
+        - generic [ref=e333]:
+          - img [ref=e334]
+          - generic [ref=e339]: Decay
+          - generic [ref=e340]: "3"
+        - generic [ref=e341]:
+          - img [ref=e342]
+          - generic [ref=e346]: Mix
+          - generic [ref=e347]: "0"

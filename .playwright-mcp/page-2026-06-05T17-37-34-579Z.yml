@@ -1,0 +1,281 @@
+- main [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e4]: granuleishon
+    - generic [ref=e5]: live granular synthesis
+    - generic [ref=e6]:
+      - button "▶ Start mic" [ref=e7] [cursor=pointer]
+      - generic [ref=e8]: idle
+  - generic [ref=e9]:
+    - generic [ref=e10]:
+      - generic [ref=e11]:
+        - generic [ref=e12]:
+          - generic [ref=e13]: Gen 1
+          - button "Freeze" [disabled] [ref=e15]
+        - generic [ref=e17]:
+          - generic [ref=e18]:
+            - img [ref=e19]
+            - button "Toggle LFO modulation" [ref=e24] [cursor=pointer]
+            - generic [ref=e25]: Grain size
+            - generic [ref=e26]: 120 ms
+          - generic [ref=e27]:
+            - img [ref=e28]
+            - button "Toggle LFO modulation" [ref=e33] [cursor=pointer]
+            - generic [ref=e34]: Density
+            - generic [ref=e35]: 20 /s
+          - generic [ref=e36]:
+            - img [ref=e37]
+            - button "Toggle LFO modulation" [ref=e42] [cursor=pointer]
+            - generic [ref=e43]: Position
+            - generic [ref=e44]: 0.5 s back
+          - generic [ref=e45]:
+            - img [ref=e46]
+            - button "Toggle LFO modulation" [ref=e51] [cursor=pointer]
+            - generic [ref=e52]: Spray
+            - generic [ref=e53]: 0.05 s
+          - generic [ref=e54]:
+            - img [ref=e55]
+            - button "Toggle LFO modulation" [ref=e60] [cursor=pointer]
+            - generic [ref=e61]: Pitch
+            - generic [ref=e62]: 0 st
+          - generic [ref=e63]:
+            - img [ref=e64]
+            - button "Toggle LFO modulation" [ref=e68] [cursor=pointer]
+            - generic [ref=e69]: Pitch jitter
+            - generic [ref=e70]: 0 st
+          - generic [ref=e71]:
+            - img [ref=e72]
+            - button "Toggle LFO modulation" [ref=e77] [cursor=pointer]
+            - generic [ref=e78]: Stereo spread
+            - generic [ref=e79]: "0.5"
+          - generic [ref=e80]:
+            - img [ref=e81]
+            - button "Toggle LFO modulation" [ref=e86] [cursor=pointer]
+            - generic [ref=e87]: Output gain
+            - generic [ref=e88]: "0.8"
+      - generic [ref=e89]:
+        - generic [ref=e90]:
+          - generic [ref=e91]: Gen 2
+          - button "Freeze" [disabled] [ref=e93]
+        - generic [ref=e95]:
+          - generic [ref=e96]:
+            - img [ref=e97]
+            - button "Toggle LFO modulation" [ref=e102] [cursor=pointer]
+            - generic [ref=e103]: Grain size
+            - generic [ref=e104]: 80 ms
+          - generic [ref=e105]:
+            - img [ref=e106]
+            - button "Toggle LFO modulation" [ref=e111] [cursor=pointer]
+            - generic [ref=e112]: Density
+            - generic [ref=e113]: 15 /s
+          - generic [ref=e114]:
+            - img [ref=e115]
+            - button "Toggle LFO modulation" [ref=e120] [cursor=pointer]
+            - generic [ref=e121]: Position
+            - generic [ref=e122]: 1.2 s back
+          - generic [ref=e123]:
+            - img [ref=e124]
+            - button "Toggle LFO modulation" [ref=e129] [cursor=pointer]
+            - generic [ref=e130]: Spray
+            - generic [ref=e131]: 0.1 s
+          - generic [ref=e132]:
+            - img [ref=e133]
+            - button "Toggle LFO modulation" [ref=e138] [cursor=pointer]
+            - generic [ref=e139]: Pitch
+            - generic [ref=e140]: 7 st
+          - generic [ref=e141]:
+            - img [ref=e142]
+            - button "Toggle LFO modulation" [ref=e147] [cursor=pointer]
+            - generic [ref=e148]: Pitch jitter
+            - generic [ref=e149]: 2 st
+          - generic [ref=e150]:
+            - img [ref=e151]
+            - button "Toggle LFO modulation" [ref=e156] [cursor=pointer]
+            - generic [ref=e157]: Stereo spread
+            - generic [ref=e158]: "0.7"
+          - generic [ref=e159]:
+            - img [ref=e160]
+            - button "Toggle LFO modulation" [ref=e165] [cursor=pointer]
+            - generic [ref=e166]: Output gain
+            - generic [ref=e167]: "0.6"
+      - generic [ref=e168]:
+        - generic [ref=e169]:
+          - generic [ref=e170]: Gen 3 · Osc
+          - generic [ref=e172]:
+            - button "SIN" [ref=e173] [cursor=pointer]
+            - button "TRI" [ref=e174] [cursor=pointer]
+            - button "SQR" [ref=e175] [cursor=pointer]
+            - button "SAW" [ref=e176] [cursor=pointer]
+            - button "NOI" [ref=e177] [cursor=pointer]
+        - generic [ref=e180]:
+          - generic [ref=e181]:
+            - generic [ref=e182]: C5
+            - generic [ref=e183]:
+              - button "C" [ref=e184] [cursor=pointer]:
+                - generic: C
+              - button "C#" [ref=e185] [cursor=pointer]:
+                - generic: C#
+              - button "D" [ref=e186] [cursor=pointer]:
+                - generic: D
+              - button "D#" [ref=e187] [cursor=pointer]:
+                - generic: D#
+              - button "E" [ref=e188] [cursor=pointer]:
+                - generic: E
+              - button "F" [ref=e189] [cursor=pointer]:
+                - generic: F
+              - button "F#" [ref=e190] [cursor=pointer]:
+                - generic: F#
+              - button "G" [ref=e191] [cursor=pointer]:
+                - generic: G
+              - button "G#" [ref=e192] [cursor=pointer]:
+                - generic: G#
+              - button "A" [ref=e193] [cursor=pointer]:
+                - generic: A
+              - button "A#" [ref=e194] [cursor=pointer]:
+                - generic: A#
+              - button "B" [ref=e195] [cursor=pointer]:
+                - generic: B
+          - generic [ref=e196]:
+            - generic [ref=e197]: C4
+            - generic [ref=e198]:
+              - button "C" [ref=e199] [cursor=pointer]:
+                - generic: C
+              - button "C#" [ref=e200] [cursor=pointer]:
+                - generic: C#
+              - button "D" [ref=e201] [cursor=pointer]:
+                - generic: D
+              - button "D#" [ref=e202] [cursor=pointer]:
+                - generic: D#
+              - button "E" [ref=e203] [cursor=pointer]:
+                - generic: E
+              - button "F" [ref=e204] [cursor=pointer]:
+                - generic: F
+              - button "F#" [ref=e205] [cursor=pointer]:
+                - generic: F#
+              - button "G" [ref=e206] [cursor=pointer]:
+                - generic: G
+              - button "G#" [ref=e207] [cursor=pointer]:
+                - generic: G#
+              - button "A" [ref=e208] [cursor=pointer]:
+                - generic: A
+              - button "A#" [ref=e209] [cursor=pointer]:
+                - generic: A#
+              - button "B" [ref=e210] [cursor=pointer]:
+                - generic: B
+          - generic [ref=e211]:
+            - generic [ref=e212]: C3
+            - generic [ref=e213]:
+              - button "C" [ref=e214] [cursor=pointer]:
+                - generic: C
+              - button "C#" [ref=e215] [cursor=pointer]:
+                - generic: C#
+              - button "D" [ref=e216] [cursor=pointer]:
+                - generic: D
+              - button "D#" [ref=e217] [cursor=pointer]:
+                - generic: D#
+              - button "E" [ref=e218] [cursor=pointer]:
+                - generic: E
+              - button "F" [ref=e219] [cursor=pointer]:
+                - generic: F
+              - button "F#" [ref=e220] [cursor=pointer]:
+                - generic: F#
+              - button "G" [ref=e221] [cursor=pointer]:
+                - generic: G
+              - button "G#" [ref=e222] [cursor=pointer]:
+                - generic: G#
+              - button "A" [ref=e223] [cursor=pointer]:
+                - generic: A
+              - button "A#" [ref=e224] [cursor=pointer]:
+                - generic: A#
+              - button "B" [ref=e225] [cursor=pointer]:
+                - generic: B
+          - generic [ref=e226]:
+            - generic [ref=e227]: C2
+            - generic [ref=e228]:
+              - button "C" [ref=e229] [cursor=pointer]:
+                - generic: C
+              - button "C#" [ref=e230] [cursor=pointer]:
+                - generic: C#
+              - button "D" [ref=e231] [cursor=pointer]:
+                - generic: D
+              - button "D#" [ref=e232] [cursor=pointer]:
+                - generic: D#
+              - button "E" [ref=e233] [cursor=pointer]:
+                - generic: E
+              - button "F" [ref=e234] [cursor=pointer]:
+                - generic: F
+              - button "F#" [ref=e235] [cursor=pointer]:
+                - generic: F#
+              - button "G" [ref=e236] [cursor=pointer]:
+                - generic: G
+              - button "G#" [ref=e237] [cursor=pointer]:
+                - generic: G#
+              - button "A" [ref=e238] [cursor=pointer]:
+                - generic: A
+              - button "A#" [ref=e239] [cursor=pointer]:
+                - generic: A#
+              - button "B" [ref=e240] [cursor=pointer]:
+                - generic: B
+        - generic [ref=e241]:
+          - generic [ref=e242]:
+            - img [ref=e243]
+            - generic [ref=e248]: Gain
+            - generic [ref=e249]: "0.5"
+          - generic [ref=e250]:
+            - img [ref=e251]
+            - generic [ref=e256]: Detune
+            - generic [ref=e257]: 0 ct
+    - generic [ref=e258]:
+      - generic [ref=e260]: FX Chain
+      - generic [ref=e262]:
+        - generic [ref=e263]: LFO
+        - generic [ref=e264]:
+          - img [ref=e265]
+          - generic [ref=e270]: Rate
+          - generic [ref=e271]: 1 Hz
+        - generic [ref=e272]:
+          - img [ref=e273]
+          - generic [ref=e278]: Depth
+          - generic [ref=e279]: "0.3"
+        - generic [ref=e280]:
+          - button "SIN" [ref=e281] [cursor=pointer]
+          - button "TRI" [ref=e282] [cursor=pointer]
+          - button "SQR" [ref=e283] [cursor=pointer]
+          - button "SAW" [ref=e284] [cursor=pointer]
+      - generic [ref=e285]:
+        - generic [ref=e286]: Delay
+        - generic [ref=e287]:
+          - img [ref=e288]
+          - generic [ref=e293]: Time
+          - generic [ref=e294]: 0.3 s
+        - generic [ref=e295]:
+          - img [ref=e296]
+          - generic [ref=e301]: Feedback
+          - generic [ref=e302]: "0.35"
+        - generic [ref=e303]:
+          - img [ref=e304]
+          - generic [ref=e308]: Mix
+          - generic [ref=e309]: "0"
+      - generic [ref=e310]:
+        - generic [ref=e311]: Saturation
+        - generic [ref=e312]:
+          - img [ref=e313]
+          - generic [ref=e318]: Drive
+          - generic [ref=e319]: "0.3"
+        - generic [ref=e320]:
+          - img [ref=e321]
+          - generic [ref=e325]: Mix
+          - generic [ref=e326]: "0"
+      - generic [ref=e327]:
+        - generic [ref=e328]: Reverb
+        - generic [ref=e329]:
+          - img [ref=e330]
+          - generic [ref=e335]: Size
+          - generic [ref=e336]: 2 s
+        - generic [ref=e337]:
+          - img [ref=e338]
+          - generic [ref=e343]: Decay
+          - generic [ref=e344]: "3"
+        - generic [ref=e345]:
+          - img [ref=e346]
+          - generic [ref=e350]: Mix
+          - generic [ref=e351]: "0"

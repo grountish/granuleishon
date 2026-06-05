@@ -7,10 +7,10 @@ let started = false;
 
 // ─── Visualizer (per-generator) ────────────────────────────────────────────
 
-const genVizCanvases = [null, null];
-const genVizCtxs    = [null, null];
-const genVizW       = [0, 0];
-const genVizH       = [0, 0];
+const genVizCanvases = [null, null, null];
+const genVizCtxs    = [null, null, null];
+const genVizW       = [0, 0, 0];
+const genVizH       = [0, 0, 0];
 
 const GEN_VIZ = [
   { line: '#3cb870', spray: 'rgba(60,184,112,0.12)' },
@@ -161,9 +161,11 @@ function sendParams(genIdx) {
   if (!node) return;
   const effective = { ...state[genIdx] };
   if (lfoMappings.size > 0) {
-    const scaled = currentLFOValue * LFO.depth;
-    lfoMappings.forEach(({ genIdx: gi, key, paramDef }) => {
+    lfoMappings.forEach(({ genIdx: gi, key, paramDef, lfoIdx }) => {
       if (gi !== genIdx) return;
+      const lfo = LFOS[lfoIdx];
+      if (!lfo) return;
+      const scaled = lfo.currentValue * lfo.depth;
       const half = (paramDef.max - paramDef.min) * 0.5;
       effective[key] = Math.max(paramDef.min, Math.min(paramDef.max,
         effective[key] + scaled * half));
@@ -172,7 +174,19 @@ function sendParams(genIdx) {
   node.port.postMessage({ type: 'params', gen: genIdx, value: effective });
 }
 
-function makeControlRow(p, initialValue, onInput, lfoToggle = null) {
+function setLFOLedState(led, lfoIdx) {
+  led.classList.remove('active', 'lfo-1', 'lfo-2');
+  led.dataset.lfo = '';
+  led.textContent = '';
+  led.title = 'Map: unset';
+  if (lfoIdx === null) return;
+  led.classList.add('active', `lfo-${lfoIdx + 1}`);
+  led.dataset.lfo = `${lfoIdx + 1}`;
+  led.textContent = `${lfoIdx + 1}`;
+  led.title = `Map: LFO ${lfoIdx + 1}`;
+}
+
+function makeControlRow(p, initialValue, onInput, lfoCycle = null) {
   const dec = (p.step.toString().split('.')[1] || '').length;
   const fmt = (v) => `${parseFloat(v.toFixed(dec))}${p.unit ? ' ' + p.unit : ''}`;
 
@@ -191,13 +205,14 @@ function makeControlRow(p, initialValue, onInput, lfoToggle = null) {
   const label = document.createElement('label');
   label.textContent = p.label;
 
-  if (lfoToggle !== null) {
+  if (lfoCycle !== null) {
     const led = document.createElement('button');
     led.className = 'lfo-led';
-    led.title = 'Toggle LFO modulation';
+    led.type = 'button';
+    setLFOLedState(led, null);
     led.addEventListener('click', (e) => {
       e.stopPropagation();
-      led.classList.toggle('active', lfoToggle());
+      setLFOLedState(led, lfoCycle());
     });
     row.append(knob, led, label, valueEl);
   } else {
@@ -347,7 +362,7 @@ function buildGeneratorPanel(genIdx) {
     rows.appendChild(makeControlRow(p, defaults[p.key], (v) => {
       state[genIdx][p.key] = v;
       sendParams(genIdx);
-    }, () => toggleLFOMap(genIdx, p.key)));
+    }, () => cycleLFOMap(genIdx, p.key)));
   });
 
   panel.appendChild(rows);
@@ -358,6 +373,342 @@ function buildUI() {
   const container = document.getElementById('generators');
   container.appendChild(buildGeneratorPanel(0));
   container.appendChild(buildGeneratorPanel(1));
+  container.appendChild(buildOscPanel());
+}
+
+// ─── Gen 3: Oscillator ─────────────────────────────────────────────────────
+
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+// C2–B5 (MIDI 36–83), highest first so piano roll reads top=high
+const OSC_NOTES = [];
+for (let m = 83; m >= 36; m--) {
+  const oct = Math.floor(m / 12) - 1;
+  const name = NOTE_NAMES[m % 12];
+  OSC_NOTES.push({
+    midi: m,
+    label: `${name}${oct}`,
+    freq: 440 * Math.pow(2, (m - 69) / 12),
+    isBlack: [1,3,6,8,10].includes(m % 12),
+    isC: m % 12 === 0,
+  });
+}
+const OSC_NOTE_GRID = Array.from(
+  OSC_NOTES.reduce((octaves, note) => {
+    const oct = Math.floor(note.midi / 12) - 1;
+    if (!octaves.has(oct)) octaves.set(oct, []);
+    octaves.get(oct).push(note);
+    return octaves;
+  }, new Map())
+)
+  .sort((a, b) => b[0] - a[0])
+  .map(([octave, notes]) => ({ octave, notes: notes.slice().reverse() }));
+
+// activeNotes: Map<midi, { freq, source, envelope }>
+const GEN3 = {
+  type: 'sine',
+  gain: 0.5,
+  detune: 0,
+  attack: 0.02,
+  decay: 0.18,
+  sustain: 0.7,
+  release: 0.3,
+  activeNotes: new Map(),
+  releasingVoices: new Set(),
+  nodes: null,
+};
+let gen3ScopeFrame = null;
+const gen3NoteEls = new Map();
+
+function setGen3NoteActive(midi, active) {
+  gen3NoteEls.get(midi)?.classList.toggle('active', active);
+}
+
+function buildGen3Nodes() {
+  const ac = audioCtx;
+  const gain = ac.createGain();
+  gain.gain.setValueAtTime(GEN3.gain, ac.currentTime);
+  const analyser = ac.createAnalyser();
+  analyser.fftSize = 2048;
+  gain.connect(analyser);
+  analyser.connect(fx.input);
+  GEN3.nodes = { gain, analyser };
+}
+
+function clearGen3ReleaseTimer(voice) {
+  if (!voice?.releaseTimer) return;
+  clearTimeout(voice.releaseTimer);
+  voice.releaseTimer = null;
+}
+
+function stopGen3Voice(voice) {
+  if (!voice) return;
+  clearGen3ReleaseTimer(voice);
+  if (voice.source) {
+    try { voice.source.stop(); } catch(e) {}
+    voice.source.disconnect();
+    voice.source = null;
+  }
+  if (voice.envelope) {
+    voice.envelope.disconnect();
+    voice.envelope = null;
+  }
+}
+
+function createGen3SourceNode(freq) {
+  if (!GEN3.nodes) return null;
+  const ac = audioCtx;
+  let src;
+  if (GEN3.type === 'noise') {
+    const len = ac.sampleRate;
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    src = ac.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+  } else {
+    src = ac.createOscillator();
+    src.type = GEN3.type;
+    src.frequency.setValueAtTime(freq, ac.currentTime);
+    src.detune.setValueAtTime(GEN3.detune, ac.currentTime);
+  }
+  return src;
+}
+
+function applyGen3Envelope(envelope) {
+  const now = audioCtx.currentTime;
+  const attackEnd = now + GEN3.attack;
+  const decayEnd = attackEnd + GEN3.decay;
+
+  envelope.gain.cancelScheduledValues(now);
+  envelope.gain.setValueAtTime(0, now);
+
+  if (GEN3.attack > 0) envelope.gain.linearRampToValueAtTime(1, attackEnd);
+  else envelope.gain.setValueAtTime(1, now);
+
+  if (GEN3.decay > 0) envelope.gain.linearRampToValueAtTime(GEN3.sustain, decayEnd);
+  else envelope.gain.setValueAtTime(GEN3.sustain, attackEnd);
+}
+
+function createGen3Voice(freq) {
+  if (!GEN3.nodes) return { source: null, envelope: null, releaseTimer: null };
+  const source = createGen3SourceNode(freq);
+  const envelope = audioCtx.createGain();
+  envelope.gain.setValueAtTime(0, audioCtx.currentTime);
+  source.connect(envelope);
+  envelope.connect(GEN3.nodes.gain);
+  applyGen3Envelope(envelope);
+  source.start();
+  return { source, envelope, releaseTimer: null };
+}
+
+function releaseGen3Voice(voice) {
+  if (!voice?.source || !voice.envelope || !audioCtx) {
+    stopGen3Voice(voice);
+    return;
+  }
+
+  const now = audioCtx.currentTime;
+  const stopAfterMs = Math.max(0, GEN3.release * 1000) + 60;
+
+  clearGen3ReleaseTimer(voice);
+  if (voice.envelope.gain.cancelAndHoldAtTime) {
+    voice.envelope.gain.cancelAndHoldAtTime(now);
+  } else {
+    voice.envelope.gain.cancelScheduledValues(now);
+    voice.envelope.gain.setValueAtTime(Math.max(voice.envelope.gain.value, 0.0001), now);
+  }
+
+  if (GEN3.release > 0) voice.envelope.gain.linearRampToValueAtTime(0, now + GEN3.release);
+  else voice.envelope.gain.setValueAtTime(0, now);
+
+  GEN3.releasingVoices.add(voice);
+  voice.releaseTimer = setTimeout(() => {
+    GEN3.releasingVoices.delete(voice);
+    stopGen3Voice(voice);
+  }, stopAfterMs);
+}
+
+function addGen3Note(midi, freq) {
+  const entry = { freq, ...createGen3Voice(freq) };
+  GEN3.activeNotes.set(midi, entry);
+  setGen3NoteActive(midi, true);
+}
+
+function removeGen3Note(midi) {
+  const entry = GEN3.activeNotes.get(midi);
+  GEN3.activeNotes.delete(midi);
+  setGen3NoteActive(midi, false);
+  if (entry) releaseGen3Voice(entry);
+}
+
+function stopAllGen3Notes() {
+  GEN3.activeNotes.forEach(entry => {
+    stopGen3Voice(entry);
+  });
+  GEN3.releasingVoices.forEach((voice) => {
+    stopGen3Voice(voice);
+  });
+  GEN3.releasingVoices.clear();
+}
+
+function restartAllGen3Notes() {
+  if (!GEN3.nodes) return;
+  GEN3.releasingVoices.forEach((voice) => stopGen3Voice(voice));
+  GEN3.releasingVoices.clear();
+  GEN3.activeNotes.forEach((entry, midi) => {
+    stopGen3Voice(entry);
+    Object.assign(entry, createGen3Voice(entry.freq));
+  });
+}
+
+function drawGen3Scope() {
+  const c = genVizCtxs[2], W = genVizW[2], H = genVizH[2];
+  if (!c || !W || !H) return;
+  const mid = H / 2;
+  c.fillStyle = '#141414';
+  c.fillRect(0, 0, W, H);
+  c.fillStyle = '#252525';
+  c.fillRect(0, mid - 0.5, W, 1);
+
+  if (!GEN3.nodes?.analyser) return;
+  const analyser = GEN3.nodes.analyser;
+  const data = new Float32Array(analyser.frequencyBinCount);
+  analyser.getFloatTimeDomainData(data);
+
+  c.strokeStyle = (GEN3.activeNotes.size + GEN3.releasingVoices.size) > 0 ? '#40b8d0' : '#3a3a3a';
+  c.lineWidth = 1.5;
+  c.beginPath();
+  const N = data.length;
+  for (let x = 0; x < W; x++) {
+    const v = data[Math.floor(x * N / W)];
+    const y = mid - v * H * 0.44;
+    x === 0 ? c.moveTo(x, y) : c.lineTo(x, y);
+  }
+  c.stroke();
+}
+
+function gen3ScopeLoop() {
+  drawGen3Scope();
+  gen3ScopeFrame = requestAnimationFrame(gen3ScopeLoop);
+}
+function startGen3Scope() { if (!gen3ScopeFrame) gen3ScopeFrame = requestAnimationFrame(gen3ScopeLoop); }
+function stopGen3Scope()  { if (gen3ScopeFrame) { cancelAnimationFrame(gen3ScopeFrame); gen3ScopeFrame = null; } }
+
+function buildPianoRoll() {
+  const wrap = document.createElement('div');
+  wrap.className = 'piano-roll';
+
+  gen3NoteEls.clear();
+
+  OSC_NOTE_GRID.forEach(({ octave, notes }) => {
+    const row = document.createElement('div');
+    row.className = 'piano-row';
+
+    const cells = document.createElement('div');
+    cells.className = 'piano-row-cells';
+
+    notes.forEach(({ midi, label, freq, isBlack }) => {
+      const cell = document.createElement('button');
+      cell.type = 'button';
+      cell.className = `piano-cell ${isBlack ? 'black-key' : 'white-key'}`;
+      cell.dataset.midi = midi;
+      cell.title = label;
+
+      cell.addEventListener('click', () => {
+        if (GEN3.activeNotes.has(midi)) {
+          removeGen3Note(midi);
+          return;
+        }
+        if (GEN3.nodes) addGen3Note(midi, freq);
+        else {
+          GEN3.activeNotes.set(midi, { freq, source: null, envelope: null, releaseTimer: null });
+          setGen3NoteActive(midi, true);
+        }
+      });
+
+      if (GEN3.activeNotes.has(midi)) cell.classList.add('active');
+      gen3NoteEls.set(midi, cell);
+      cells.appendChild(cell);
+    });
+
+    row.appendChild(cells);
+    wrap.appendChild(row);
+  });
+  return wrap;
+}
+
+function buildOscPanel() {
+  const panel = document.createElement('div');
+  panel.className = 'generator gen-3';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'col-header';
+  const title = document.createElement('span');
+  title.className = 'col-title';
+  title.innerHTML = '<span class="col-dot"></span>Gen 3 · Osc';
+
+  const shapes = document.createElement('div');
+  shapes.className = 'osc-shapes';
+  [['sine','SIN'],['triangle','TRI'],['square','SQR'],['sawtooth','SAW'],['noise','NOI']].forEach(([type, lbl]) => {
+    const btn = document.createElement('button');
+    btn.className = 'osc-shape' + (GEN3.type === type ? ' active' : '');
+    btn.textContent = lbl;
+    btn.addEventListener('click', () => {
+      GEN3.type = type;
+      shapes.querySelectorAll('.osc-shape').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      restartAllGen3Notes();
+    });
+    shapes.appendChild(btn);
+  });
+  header.append(title, shapes);
+  panel.appendChild(header);
+
+  // Body: scope (4/5) + piano roll (1/5)
+  const body = document.createElement('div');
+  body.className = 'gen-3-body';
+
+  const scopeCanvas = document.createElement('canvas');
+  scopeCanvas.className = 'gen-viz gen-3-scope';
+  genVizCanvases[2] = scopeCanvas;
+  genVizCtxs[2] = scopeCanvas.getContext('2d');
+  new ResizeObserver(() => {
+    const dpr = window.devicePixelRatio || 1;
+    genVizW[2] = scopeCanvas.clientWidth;
+    genVizH[2] = scopeCanvas.clientHeight;
+    scopeCanvas.width  = genVizW[2] * dpr;
+    scopeCanvas.height = genVizH[2] * dpr;
+    genVizCtxs[2].setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawGenVizEmpty(2);
+  }).observe(scopeCanvas);
+
+  body.appendChild(scopeCanvas);
+  body.appendChild(buildPianoRoll());
+  panel.appendChild(body);
+
+  // Controls: gain + detune + ADSR
+  const rows = document.createElement('div');
+  rows.className = 'gen-controls';
+  [{ key: 'gain',    label: 'Gain',    min: 0,    max: 1,   step: 0.01, unit: '' },
+   { key: 'detune',  label: 'Detune',  min: -100, max: 100, step: 1,    unit: 'ct' },
+   { key: 'attack',  label: 'Attack',  min: 0,    max: 2,   step: 0.01, unit: 's' },
+   { key: 'decay',   label: 'Decay',   min: 0,    max: 2,   step: 0.01, unit: 's' },
+   { key: 'sustain', label: 'Sustain', min: 0,    max: 1,   step: 0.01, unit: '' },
+   { key: 'release', label: 'Release', min: 0,    max: 4,   step: 0.01, unit: 's' }]
+    .forEach((p) => rows.appendChild(makeControlRow(p, GEN3[p.key], (v) => {
+      GEN3[p.key] = v;
+      if (p.key === 'gain' && GEN3.nodes)
+        GEN3.nodes.gain.gain.setValueAtTime(v, audioCtx.currentTime);
+      if (p.key === 'detune' && GEN3.nodes)
+        GEN3.activeNotes.forEach(entry => {
+          if (entry?.source?.detune)
+            entry.source.detune.setValueAtTime(v, audioCtx.currentTime);
+        });
+    })));
+  panel.appendChild(rows);
+  return panel;
 }
 
 // ─── FX Chain ──────────────────────────────────────────────────────────────
@@ -399,22 +750,32 @@ let fx = null; // audio nodes, created in start(), nulled in stop()
 
 // ─── LFO ───────────────────────────────────────────────────────────────────
 
-const LFO = { rate: 1.0, shape: 'sine', depth: 0.3 };
-// lfoMappings: 'genIdx:paramKey' → { genIdx, key, paramDef }
+const LFOS = [
+  { label: 'LFO 1', rate: 1.0, shape: 'sine', depth: 0.3, phase: 0, currentValue: 0 },
+  { label: 'LFO 2', rate: 0.35, shape: 'tri', depth: 0.25, phase: 0, currentValue: 0 },
+];
+// lfoMappings: 'genIdx:paramKey' → { genIdx, key, paramDef, lfoIdx }
 const lfoMappings = new Map();
-let lfoPhase = 0, lfoLastTs = 0, lfoAnimFrame = null, currentLFOValue = 0;
+let lfoLastTs = 0, lfoAnimFrame = null;
+
+function getLFOValue(lfo) {
+  switch (lfo.shape) {
+    case 'sine':   return Math.sin(2 * Math.PI * lfo.phase);
+    case 'tri':    return 1 - 4 * Math.abs(lfo.phase - 0.5);
+    case 'square': return lfo.phase < 0.5 ? 1 : -1;
+    case 'saw':    return 2 * lfo.phase - 1;
+    default:       return 0;
+  }
+}
 
 function lfoStep(ts) {
   const dt = lfoLastTs ? Math.min((ts - lfoLastTs) / 1000, 0.1) : 0;
   lfoLastTs = ts;
-  lfoPhase += LFO.rate * dt;
-  while (lfoPhase >= 1) lfoPhase -= 1;
-  switch (LFO.shape) {
-    case 'sine':   currentLFOValue = Math.sin(2 * Math.PI * lfoPhase); break;
-    case 'tri':    currentLFOValue = 1 - 4 * Math.abs(lfoPhase - 0.5); break;
-    case 'square': currentLFOValue = lfoPhase < 0.5 ? 1 : -1; break;
-    case 'saw':    currentLFOValue = 2 * lfoPhase - 1; break;
-  }
+  LFOS.forEach((lfo) => {
+    lfo.phase += lfo.rate * dt;
+    while (lfo.phase >= 1) lfo.phase -= 1;
+    lfo.currentValue = getLFOValue(lfo);
+  });
   if (lfoMappings.size > 0) {
     const gens = new Set([...lfoMappings.values()].map(m => m.genIdx));
     gens.forEach(gi => sendParams(gi));
@@ -430,42 +791,53 @@ function startLFOLoop() {
 
 function stopLFOLoop() {
   if (lfoAnimFrame) { cancelAnimationFrame(lfoAnimFrame); lfoAnimFrame = null; }
-  currentLFOValue = 0;
+  LFOS.forEach((lfo) => {
+    lfo.phase = 0;
+    lfo.currentValue = 0;
+  });
 }
 
-function toggleLFOMap(genIdx, key) {
+function cycleLFOMap(genIdx, key) {
   const mapKey = `${genIdx}:${key}`;
-  if (lfoMappings.has(mapKey)) {
-    lfoMappings.delete(mapKey);
-    sendParams(genIdx); // restore unmodulated value immediately
-    return false;
+  const mapping = lfoMappings.get(mapKey);
+  if (!mapping) {
+    lfoMappings.set(mapKey, { genIdx, key, paramDef: PARAMS.find(p => p.key === key), lfoIdx: 0 });
+    sendParams(genIdx);
+    return 0;
   }
-  lfoMappings.set(mapKey, { genIdx, key, paramDef: PARAMS.find(p => p.key === key) });
-  return true;
+  if (mapping.lfoIdx === 0) {
+    mapping.lfoIdx = 1;
+    sendParams(genIdx);
+    return 1;
+  }
+  lfoMappings.delete(mapKey);
+  sendParams(genIdx);
+  return null;
 }
 
-function buildLFOSection() {
+function buildLFOSection(lfoIdx) {
+  const lfo = LFOS[lfoIdx];
   const section = document.createElement('div');
-  section.className = 'fx-section lfo-section';
+  section.className = `fx-section lfo-section lfo-section-${lfoIdx + 1}`;
 
   const lbl = document.createElement('div');
   lbl.className = 'fx-section-label';
-  lbl.textContent = 'LFO';
+  lbl.textContent = lfo.label;
   section.appendChild(lbl);
 
   [{ key: 'rate',  label: 'Rate',  min: 0.05, max: 10, step: 0.05, unit: 'Hz' },
    { key: 'depth', label: 'Depth', min: 0,    max: 1,  step: 0.01, unit: ''   }]
-    .forEach((p) => section.appendChild(makeControlRow(p, LFO[p.key], (v) => { LFO[p.key] = v; })));
+    .forEach((p) => section.appendChild(makeControlRow(p, lfo[p.key], (v) => { lfo[p.key] = v; })));
 
   // Shape selector
   const shapeRow = document.createElement('div');
   shapeRow.className = 'lfo-shapes';
   [['sine', 'SIN'], ['tri', 'TRI'], ['square', 'SQR'], ['saw', 'SAW']].forEach(([shape, lbl]) => {
     const btn = document.createElement('button');
-    btn.className = 'lfo-shape' + (LFO.shape === shape ? ' active' : '');
+    btn.className = 'lfo-shape' + (lfo.shape === shape ? ' active' : '');
     btn.textContent = lbl;
     btn.addEventListener('click', () => {
-      LFO.shape = shape;
+      lfo.shape = shape;
       shapeRow.querySelectorAll('.lfo-shape').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
     });
@@ -592,8 +964,8 @@ function buildFxUI() {
   header.innerHTML = '<span class="col-title"><span class="col-dot"></span>FX Chain</span>';
   container.appendChild(header);
 
-  // LFO modulator first
-  container.appendChild(buildLFOSection());
+  // LFO modulators first
+  LFOS.forEach((_, lfoIdx) => container.appendChild(buildLFOSection(lfoIdx)));
 
   // One section per effect, stacked vertically
   FX_DEFS.forEach((def) => {
@@ -637,9 +1009,14 @@ async function start() {
     });
 
     buildFxNodes();
+    buildGen3Nodes();
     source.connect(node);
     node.connect(fx.input);
     fx.output.connect(audioCtx.destination);
+    startGen3Scope();
+    GEN3.activeNotes.forEach((entry) => {
+      Object.assign(entry, createGen3Voice(entry.freq));
+    });
 
     node.port.onmessage = (e) => {
       if (e.data && e.data.type === 'viz') drawViz(e.data);
@@ -661,6 +1038,9 @@ async function start() {
 
 function stop() {
   stopLFOLoop();
+  stopGen3Scope();
+  stopAllGen3Notes();
+  GEN3.nodes = null;
   if (micStream) micStream.getTracks().forEach((t) => t.stop());
   if (audioCtx) audioCtx.close();
   audioCtx = node = micStream = fx = null;
@@ -678,6 +1058,7 @@ function stop() {
   document.getElementById('status').textContent = 'idle';
   drawGenVizEmpty(0);
   drawGenVizEmpty(1);
+  drawGenVizEmpty(2);
 }
 
 document.getElementById('startBtn').addEventListener('click', () => {

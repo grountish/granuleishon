@@ -310,23 +310,39 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 /* ── LFO LED (on generator knobs) ───────────────────────────── */
 
 .lfo-led {
-  width: 6px;
-  height: 6px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   border: 1px solid #3a3a3a;
   background: #1e1e1e;
   padding: 0;
+  display: grid;
+  place-items: center;
   flex-shrink: 0;
   cursor: pointer;
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1;
+  color: #081118;
   transition: background 0.1s, border-color 0.1s, box-shadow 0.1s;
 }
 
 .lfo-led:hover   { border-color: var(--gen-accent); }
 
 .lfo-led.active  {
-  background:   var(--gen-accent);
-  border-color: var(--gen-accent);
-  box-shadow: 0 0 5px var(--gen-accent);
+  box-shadow: 0 0 5px var(--lfo-led-glow, var(--gen-accent));
+}
+
+.lfo-led.lfo-1 {
+  --lfo-led-glow: #7aacdc;
+  background: #7aacdc;
+  border-color: #7aacdc;
+}
+
+.lfo-led.lfo-2 {
+  --lfo-led-glow: #6ed4a0;
+  background: #6ed4a0;
+  border-color: #6ed4a0;
 }
 
 /* ── LFO section (in FX column) ─────────────────────────────── */
@@ -336,7 +352,12 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   --gen-accent-dim: #5590c0;
 }
 
-.lfo-section > .fx-section-label { color: #7aacdc; }
+.lfo-section > .fx-section-label { color: var(--gen-accent); }
+
+.lfo-section-2 {
+  --gen-accent:     #6ed4a0;
+  --gen-accent-dim: #48ab79;
+}
 
 .lfo-shapes {
   display: flex;
@@ -379,3 +400,106 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   text-transform: uppercase;
   color: var(--muted);
 }
+
+/* ── Gen 3 Oscillator ────────────────────────────────────────── */
+
+.gen-3 {
+  --gen-accent:     #40b8d0;
+  --gen-accent-dim: #2d8fa0;
+}
+
+.gen-3-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.gen-3-scope {
+  flex: 4;
+  display: block;
+  min-width: 0;
+  background: #141414;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── Piano Roll ──────────────────────────────────────────────── */
+
+.piano-roll {
+  flex: 0 0 292px;
+  min-width: 292px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px;
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  background: #1a1f1f;
+}
+
+.piano-row {
+  flex: 0 0 auto;
+}
+
+.piano-row-cells {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.piano-cell {
+  min-width: 0;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  padding: 0;
+  display: block;
+  border: 1px solid #2a3332;
+  border-radius: 0;
+  background: #53605e;
+  color: #aeb8b6;
+  transition: background 0.08s, border-color 0.08s, color 0.08s;
+}
+
+.piano-row:nth-child(odd) .piano-cell.white-key  { background: #55615f; }
+.piano-row:nth-child(even) .piano-cell.white-key { background: #4d5857; }
+.piano-cell.black-key { background: #202928; border-color: #1a2322; color: #7b8784; }
+.piano-row:nth-child(even) .piano-cell.black-key { background: #252e2d; }
+
+.piano-cell:hover {
+  border-color: #6a7976;
+  background: #63706e;
+  color: #d8e1df;
+}
+
+.piano-cell.black-key:hover { background: #313c3a; }
+
+.piano-cell.active {
+  background: #40b8d0 !important;
+  border-color: #40b8d0 !important;
+  color: #061820 !important;
+}
+
+/* ── Osc shape selector (in Gen 3 header) ────────────────────── */
+
+.osc-shapes {
+  display: flex;
+  gap: 2px;
+}
+
+.osc-shape {
+  font-size: 8px;
+  font-weight: 700;
+  padding: 3px 6px;
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.osc-shape:hover  { border-color: #40b8d0; color: var(--text); }
+.osc-shape.active { background: #40b8d0; border-color: #40b8d0; color: #061820; }
