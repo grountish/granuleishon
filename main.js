@@ -3,9 +3,16 @@
 let audioCtx = null;
 let node = null;
 let micStream = null;
+let granularInputSource = null;
 let started = false;
 let granularModulePromise = null;
 let bitReducerModulePromise = null;
+const LIVE_SOURCE_SECONDS = 10;
+const SOURCE = {
+  mode: 'none',
+  durationSec: LIVE_SOURCE_SECONDS,
+  fileName: '',
+};
 const REC = {
   isRecording: false,
   left: [],
@@ -124,6 +131,10 @@ function savePresetStore() {
   } catch (e) {}
 }
 
+function getStartBtn() {
+  return document.getElementById('startBtn');
+}
+
 async function ensureAudioEngine() {
   if (!audioCtx) {
     audioCtx = new AudioContext();
@@ -217,7 +228,8 @@ function stopRecording() {
   REC.sink = null;
   REC.isRecording = false;
   refreshRecordButton();
-  setStatus(started ? 'running' : (audioCtx ? 'gen3 ready' : 'idle'));
+  if (started && SOURCE.mode === 'file') setStatus(`file: ${SOURCE.fileName}`);
+  else setStatus(started ? 'running' : audioCtx ? 'gen3 ready' : 'idle');
 }
 
 // ─── Visualizer (per-generator) ────────────────────────────────────────────
@@ -649,6 +661,40 @@ const gen3ShapeButtons = new Map();
 const filterModeButtons = new Map();
 const POSITION_PARAM = PARAMS.find((p) => p.key === 'positionSec');
 
+function setSourceDurationSec(durationSec) {
+  SOURCE.durationSec = Math.max(0.05, durationSec || LIVE_SOURCE_SECONDS);
+  POSITION_PARAM.max = SOURCE.durationSec;
+  for (let genIdx = 0; genIdx < 2; genIdx++) {
+    const clamped = Math.max(POSITION_PARAM.min, Math.min(POSITION_PARAM.max, state[genIdx].positionSec));
+    state[genIdx].positionSec = clamped;
+    genControlBindings[genIdx].get('positionSec')?.setValue(clamped);
+    const posX = Math.max(0, Math.min(1, 1 - clamped / Math.max(0.001, SOURCE.durationSec)));
+    const vizState = genVizStates[genIdx];
+    vizState.targetPosX = posX;
+    if (!vizState.seeded) vizState.currentPosX = posX;
+  }
+}
+
+function clearFreezeStates({ send = true } = {}) {
+  for (let genIdx = 0; genIdx < 2; genIdx++) {
+    state[genIdx].freeze = false;
+    genFreezeButtons[genIdx]?.classList.remove('active');
+    if (send) sendParams(genIdx);
+  }
+}
+
+function setGranularRunning(mode, fileName = '') {
+  SOURCE.mode = mode;
+  SOURCE.fileName = fileName;
+  started = true;
+  getStartBtn().textContent = '■ Stop';
+  document.querySelectorAll('.gen-freeze').forEach((btn) => (btn.disabled = false));
+  startLFOLoop();
+  startGenVizLoop();
+  if (mode === 'file') setStatus(`file: ${fileName}`);
+  else setStatus('running');
+}
+
 function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
   const param = PARAMS.find((p) => p.key === key);
   if (!param) return;
@@ -656,7 +702,7 @@ function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
   state[genIdx][key] = next;
   genControlBindings[genIdx].get(key)?.setValue(next);
   if (key === 'positionSec') {
-    const posX = Math.max(0, Math.min(1, 1 - next / 10));
+    const posX = Math.max(0, Math.min(1, 1 - next / Math.max(0.001, SOURCE.durationSec)));
     const vizState = genVizStates[genIdx];
     vizState.targetPosX = posX;
     if (!vizState.seeded) vizState.currentPosX = posX;
@@ -877,6 +923,7 @@ function buildGeneratorPanel(genIdx) {
   const defaults = GEN_DEFAULTS[genIdx];
   const panel = document.createElement('div');
   panel.className = `generator gen-${genIdx}`;
+  panel.classList.add('source-drop-target');
 
   // Column header
   const header = document.createElement('div');
@@ -938,6 +985,44 @@ function buildGeneratorPanel(genIdx) {
   vizCanvas.addEventListener('pointerup', endDrag);
   vizCanvas.addEventListener('pointercancel', endDrag);
   panel.appendChild(vizCanvas);
+
+  const dropOverlay = document.createElement('div');
+  dropOverlay.className = 'source-drop-overlay';
+  dropOverlay.textContent = 'Drop WAV Source';
+  panel.appendChild(dropOverlay);
+
+  let dragDepth = 0;
+  const clearDrag = () => {
+    dragDepth = 0;
+    panel.classList.remove('drag-over');
+  };
+  const hasFileDrag = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+  ['dragenter', 'dragover'].forEach((eventName) => {
+    panel.addEventListener(eventName, (e) => {
+      if (!hasFileDrag(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      if (eventName === 'dragenter') dragDepth += 1;
+      panel.classList.add('drag-over');
+    });
+  });
+  panel.addEventListener('dragleave', (e) => {
+    if (!hasFileDrag(e)) return;
+    e.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) panel.classList.remove('drag-over');
+  });
+  panel.addEventListener('drop', async (e) => {
+    if (!hasFileDrag(e)) return;
+    e.preventDefault();
+    clearDrag();
+    const file = [...(e.dataTransfer?.files || [])].find((f) => isSupportedGranularFile(f));
+    if (!file) {
+      setStatus('drop a .wav file');
+      return;
+    }
+    await loadGranularFile(file);
+  });
 
   // Control rows
   const rows = document.createElement('div');
@@ -1916,40 +2001,87 @@ function buildFxUI() {
 }
 
 async function start() {
-  const startBtn = document.getElementById('startBtn');
-
   try {
     setStatus('requesting mic…');
-    await ensureAudioEngine();
+    await ensureGranularEngine();
+    disconnectGranularInput({ stopTracks: true });
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     });
+    granularInputSource = audioCtx.createMediaStreamSource(micStream);
+    granularInputSource.connect(node);
+    node.port.postMessage({ type: 'use-live-input' });
+    setSourceDurationSec(LIVE_SOURCE_SECONDS);
+    clearFreezeStates({ send: false });
+    sendParams(0);
+    sendParams(1);
+    setGranularRunning('mic');
+  } catch (err) {
+    setStatus('error: ' + err.message);
+    console.error(err);
+  }
+}
 
-    await ensureGranularModule();
-
-    const source = audioCtx.createMediaStreamSource(micStream);
+async function ensureGranularEngine() {
+  await ensureAudioEngine();
+  await ensureGranularModule();
+  if (!node) {
     node = new AudioWorkletNode(audioCtx, 'granular-processor', {
       numberOfInputs: 1,
       numberOfOutputs: 1,
       outputChannelCount: [2],
     });
-
-    source.connect(node);
     node.connect(fx.input);
-
     node.port.onmessage = (e) => {
       if (e.data && e.data.type === 'viz') drawViz(e.data);
     };
-
     sendParams(0);
     sendParams(1);
-    startLFOLoop();
-    startGenVizLoop();
+  }
+  return node;
+}
 
-    started = true;
-    startBtn.textContent = '■ Stop';
-    document.querySelectorAll('.gen-freeze').forEach((btn) => (btn.disabled = false));
-    setStatus('running');
+function disconnectGranularInput({ stopTracks = false } = {}) {
+  if (granularInputSource) {
+    try {
+      granularInputSource.disconnect();
+    } catch (e) {}
+    granularInputSource = null;
+  }
+  if (stopTracks && micStream) {
+    micStream.getTracks().forEach((t) => t.stop());
+    micStream = null;
+  }
+}
+
+function isSupportedGranularFile(file) {
+  return !!file && /\.wav$/i.test(file.name || '');
+}
+
+function audioBufferToMono(audioBuffer) {
+  const mono = new Float32Array(audioBuffer.length);
+  const channelCount = Math.max(1, audioBuffer.numberOfChannels);
+  for (let ch = 0; ch < channelCount; ch++) {
+    const data = audioBuffer.getChannelData(ch);
+    for (let i = 0; i < mono.length; i++) mono[i] += data[i] / channelCount;
+  }
+  return mono;
+}
+
+async function loadGranularFile(file) {
+  try {
+    setStatus(`loading ${file.name}…`);
+    await ensureGranularEngine();
+    disconnectGranularInput({ stopTracks: true });
+    const bytes = await file.arrayBuffer();
+    const decoded = await audioCtx.decodeAudioData(bytes);
+    const mono = audioBufferToMono(decoded);
+    node.port.postMessage({ type: 'set-source-buffer', buffer: mono }, [mono.buffer]);
+    setSourceDurationSec(decoded.duration);
+    clearFreezeStates({ send: false });
+    sendParams(0);
+    sendParams(1);
+    setGranularRunning('file', file.name);
   } catch (err) {
     setStatus('error: ' + err.message);
     console.error(err);
@@ -1963,16 +2095,18 @@ function stop() {
   stopGen3Scope();
   stopAllGen3Notes();
   GEN3.nodes = null;
-  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  disconnectGranularInput({ stopTracks: true });
   if (audioCtx) audioCtx.close();
-  audioCtx = node = micStream = fx = null;
+  audioCtx = node = fx = null;
   granularModulePromise = null;
   bitReducerModulePromise = null;
+  SOURCE.mode = 'none';
+  SOURCE.fileName = '';
+  setSourceDurationSec(LIVE_SOURCE_SECONDS);
   started = false;
 
   // Reset freeze state for both generators.
-  state[0].freeze = false;
-  state[1].freeze = false;
+  clearFreezeStates({ send: false });
 
   document.getElementById('startBtn').textContent = '▶ Start mic';
   document.querySelectorAll('.gen-freeze').forEach((btn) => {
@@ -1991,12 +2125,20 @@ document.getElementById('startBtn').addEventListener('click', () => {
   started ? stop() : start();
 });
 
+['dragover', 'drop'].forEach((eventName) => {
+  window.addEventListener(eventName, (e) => {
+    if (!Array.from(e.dataTransfer?.types || []).includes('Files')) return;
+    e.preventDefault();
+  });
+});
+
 getRecordBtn()?.addEventListener('click', () => {
   REC.isRecording ? stopRecording() : startRecording();
 });
 
 loadPresetStore();
 buildUI();
+setSourceDurationSec(LIVE_SOURCE_SECONDS);
 buildFxUI();
 buildPresetUI();
 refreshRecordButton();

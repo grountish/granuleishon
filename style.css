@@ -225,10 +225,32 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  position: relative;
   background: var(--bg);
 }
 
 .generator + .generator { border-top: 1px solid var(--border); }
+
+.source-drop-overlay {
+  position: absolute;
+  inset: 28px 0 auto 0;
+  height: calc(100% - 28px);
+  display: grid;
+  place-items: center;
+  background: rgba(18, 20, 20, 0.78);
+  color: rgba(232, 239, 239, 0.9);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.source-drop-target.drag-over .source-drop-overlay {
+  opacity: 1;
+}
 
 .gen-0 { --gen-accent: var(--accent-0); --gen-accent-dim: var(--accent-0-dim); }
 .gen-1 { --gen-accent: var(--accent-1); --gen-accent-dim: var(--accent-1-dim); }
