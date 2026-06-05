@@ -261,8 +261,8 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 78px;
-  padding: 10px 4px 8px;
+  height: auto;      /* overrides base .control { height: 26px } */
+  padding: 12px 4px;
   gap: 5px;
   border-right: 1px solid #1e1e1e;
 }
@@ -283,9 +283,8 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   text-align: center;
 }
 
-/* FX row: smaller knob, taller row to fit it */
-#fx-chain .knob      { width: 28px; height: 28px; }
-#fx-chain .control   { height: 36px; }
+/* FX row: smaller knob */
+#fx-chain .knob { width: 28px; height: 28px; }
 
 /* ── Knob ────────────────────────────────────────────────────── */
 
