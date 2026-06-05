@@ -5,6 +5,7 @@ let node = null;
 let micStream = null;
 let started = false;
 let granularModulePromise = null;
+let bitReducerModulePromise = null;
 const REC = {
   isRecording: false,
   left: [],
@@ -126,6 +127,7 @@ function savePresetStore() {
 async function ensureAudioEngine() {
   if (!audioCtx) {
     audioCtx = new AudioContext();
+    await ensureFxModules();
     buildFxNodes();
     buildGen3Nodes();
     fx.output.connect(audioCtx.destination);
@@ -134,6 +136,14 @@ async function ensureAudioEngine() {
   if (!gen3ScopeFrame) startGen3Scope();
   if (!lfoAnimFrame) startLFOLoop();
   if (!started) setStatus('gen3 ready');
+}
+
+async function ensureFxModules() {
+  if (!audioCtx) return;
+  if (!bitReducerModulePromise) {
+    bitReducerModulePromise = audioCtx.audioWorklet.addModule('bit-reducer-processor.js');
+  }
+  await bitReducerModulePromise;
 }
 
 async function ensureGranularModule() {
@@ -1326,6 +1336,15 @@ const FX_DEFS = [
     ],
   },
   {
+    id: 'bitreduce',
+    label: 'Bit Reduce',
+    params: [
+      { key: 'bits', label: 'Bits', min: 1, max: 16, step: 1, value: 8, unit: '' },
+      { key: 'rate', label: 'Rate', min: 0.02, max: 1, step: 0.01, value: 1, unit: '' },
+      { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
+    ],
+  },
+  {
     id: 'sat',
     label: 'Saturation',
     params: [
@@ -1357,6 +1376,7 @@ const FX_DEFS = [
 const FX = {
   delay: { time: 0.3, feedback: 0.35, mix: 0 },
   filter: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 1 },
+  bitreduce: { bits: 8, rate: 1, mix: 0 },
   sat: { drive: 0.3, mix: 0 },
   reverb: { size: 2, decay: 3, mix: 0 },
   limiter: { threshold: -8, release: 0.12, output: 0.96 },
@@ -1564,6 +1584,27 @@ function buildFxNodes() {
   fltDry.connect(fltOut);
   fltWet.connect(fltOut);
 
+  // ─ Bit reducer ─
+  const bitIn = ac.createGain();
+  const bitDry = ac.createGain();
+  const bitWet = ac.createGain();
+  const bitNode = new AudioWorkletNode(ac, 'bit-reducer-processor', {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [2],
+    parameterData: {
+      bits: FX.bitreduce.bits,
+      rate: FX.bitreduce.rate,
+    },
+  });
+  const bitOut = ac.createGain();
+
+  bitIn.connect(bitDry);
+  bitIn.connect(bitNode);
+  bitNode.connect(bitWet);
+  bitDry.connect(bitOut);
+  bitWet.connect(bitOut);
+
   // ─ Saturation ─
   const satIn = ac.createGain();
   const satShaper = ac.createWaveShaper();
@@ -1601,9 +1642,10 @@ function buildFxNodes() {
   const masterOut = ac.createGain();
   masterOut.gain.setValueAtTime(FX.limiter.output, ac.currentTime);
 
-  // ─ Chain: granulator → delay → filter → saturation → reverb → limiter ─
+  // ─ Chain: granulator → delay → filter → bit reduce → saturation → reverb → limiter ─
   dlyOut.connect(fltIn);
-  fltOut.connect(satIn);
+  fltOut.connect(bitIn);
+  bitOut.connect(satIn);
   satOut.connect(rvbIn);
   rvbOut.connect(limiter);
   limiter.connect(masterOut);
@@ -1613,6 +1655,7 @@ function buildFxNodes() {
     output: masterOut,
     delay: { tap: dlyTap, fb: dlyFb, dry: dlyDry, wet: dlyWet },
     filter: { biquad: fltBiquad, dry: fltDry, wet: fltWet },
+    bitreduce: { node: bitNode, dry: bitDry, wet: bitWet },
     sat: { shaper: satShaper, dry: satDry, wet: satWet },
     reverb: { conv: rvbConv, dry: rvbDry, wet: rvbWet },
     limiter: { comp: limiter, output: masterOut },
@@ -1637,6 +1680,15 @@ function applyFx(id, key, val) {
     if (key === 'mix') {
       fx.filter.wet.gain.value = val;
       fx.filter.dry.gain.value = 1 - val;
+    }
+  } else if (id === 'bitreduce') {
+    if (key === 'bits')
+      fx.bitreduce.node.parameters.get('bits')?.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'rate')
+      fx.bitreduce.node.parameters.get('rate')?.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'mix') {
+      fx.bitreduce.wet.gain.value = val;
+      fx.bitreduce.dry.gain.value = 1 - val;
     }
   } else if (id === 'sat') {
     if (key === 'drive') fx.sat.shaper.curve = makeSatCurve(val);
@@ -1730,7 +1782,7 @@ function applyPreset(preset) {
     });
     applyAllFx();
     refreshFilterUI();
-    ['delay', 'filter', 'sat', 'reverb', 'limiter'].forEach((id) => {
+    ['delay', 'filter', 'bitreduce', 'sat', 'reverb', 'limiter'].forEach((id) => {
       Object.entries(FX[id]).forEach(([key, value]) => {
         if (key !== 'mode') fxControlBindings.get(`${id}:${key}`)?.setValue(value);
       });
@@ -1910,6 +1962,7 @@ function stop() {
   if (audioCtx) audioCtx.close();
   audioCtx = node = micStream = fx = null;
   granularModulePromise = null;
+  bitReducerModulePromise = null;
   started = false;
 
   // Reset freeze state for both generators.
