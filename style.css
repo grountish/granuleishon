@@ -56,6 +56,35 @@ main {
   letter-spacing: 0.05em;
 }
 
+.preset-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.preset-slots {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.preset-slot,
+.preset-save {
+  padding: 3px 7px;
+  font-size: 8px;
+}
+
+.preset-save.active {
+  background: #35506c;
+  border-color: #4e7ca8;
+  color: #bdd8f2;
+}
+
+.preset-slot.filled {
+  border-color: #4b5858;
+  color: #d0d8d8;
+}
+
 .transport {
   display: flex;
   align-items: center;
@@ -112,6 +141,30 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 .record-btn.active:hover {
   background: #a73e3e;
   border-color: #a73e3e;
+}
+
+.fx-mode-row {
+  display: flex;
+  gap: 2px;
+  padding: 5px 10px 8px;
+}
+
+.fx-mode-btn {
+  flex: 1;
+  font-size: 8px;
+  font-weight: 700;
+  padding: 4px 0;
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+}
+
+.fx-mode-btn.active {
+  background: var(--gen-accent);
+  border-color: var(--gen-accent);
+  color: #161006;
 }
 
 /* ── Workspace (3-column) ────────────────────────────────────── */
@@ -216,14 +269,18 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 
 .gen-freeze {
   font-size: 8px;
-  padding: 3px 7px;
-  color: var(--muted);
-  border-color: #3a3a3a;
-  text-transform: uppercase;
+  padding: 3px 8px;
+  color: #eff8ff;
+  border-color: #9dc0da;
+  background: #55646f;
   letter-spacing: 0.06em;
 }
 
-.gen-freeze:hover:not(:disabled) { color: var(--text); }
+.gen-freeze:hover:not(:disabled) {
+  color: #d7e3ec;
+  border-color: #6d8494;
+  background: #313a40;
+}
 
 .gen-freeze.active {
   background: #1a304a;

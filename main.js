@@ -13,6 +13,10 @@ const REC = {
   processor: null,
   sink: null,
 };
+const PRESET_STORAGE_KEY = 'granuleishon-presets-v1';
+const PRESET_SLOT_COUNT = 4;
+let presetSaveArmed = false;
+let presetStore = Array.from({ length: PRESET_SLOT_COUNT }, () => null);
 
 function getStatusEl() {
   return document.getElementById('status');
@@ -20,6 +24,14 @@ function getStatusEl() {
 
 function getRecordBtn() {
   return document.getElementById('recordBtn');
+}
+
+function getPresetSaveBtn() {
+  return document.getElementById('presetSaveBtn');
+}
+
+function getPresetSlotsEl() {
+  return document.getElementById('presetSlots');
 }
 
 function setStatus(text) {
@@ -92,6 +104,23 @@ function downloadRecording(blob) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function loadPresetStore() {
+  try {
+    const raw = localStorage.getItem(PRESET_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      presetStore = Array.from({ length: PRESET_SLOT_COUNT }, (_, i) => parsed[i] || null);
+    }
+  } catch (e) {}
+}
+
+function savePresetStore() {
+  try {
+    localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(presetStore));
+  } catch (e) {}
 }
 
 async function ensureAudioEngine() {
@@ -600,6 +629,14 @@ const GEN_DEFAULTS = [
 
 const state = [{ ...GEN_DEFAULTS[0] }, { ...GEN_DEFAULTS[1] }];
 const genControlBindings = [new Map(), new Map()];
+const genMapBindings = [new Map(), new Map()];
+const genFreezeButtons = [null, null];
+const gen3ControlBindings = new Map();
+const fxControlBindings = new Map();
+const lfoControlBindings = [new Map(), new Map()];
+const lfoShapeButtons = [new Map(), new Map()];
+const gen3ShapeButtons = new Map();
+const filterModeButtons = new Map();
 const POSITION_PARAM = PARAMS.find((p) => p.key === 'positionSec');
 
 function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
@@ -636,6 +673,22 @@ function sendParams(genIdx) {
   node.port.postMessage({ type: 'params', gen: genIdx, value: effective });
 }
 
+function refreshGeneratorUI(genIdx) {
+  PARAMS.forEach(({ key }) => {
+    genControlBindings[genIdx].get(key)?.setValue(state[genIdx][key]);
+  });
+  genFreezeButtons[genIdx]?.classList.toggle('active', !!state[genIdx].freeze);
+}
+
+function refreshLFOMappingUI() {
+  for (let genIdx = 0; genIdx < 2; genIdx++) {
+    PARAMS.forEach(({ key }) => {
+      const mapping = lfoMappings.get(`${genIdx}:${key}`);
+      genMapBindings[genIdx].get(key)?.setMapLFO(mapping ? mapping.lfoIdx : null);
+    });
+  }
+}
+
 function setLFOLedState(led, lfoIdx) {
   led.classList.remove('active', 'lfo-1', 'lfo-2');
   led.dataset.lfo = '';
@@ -666,9 +719,10 @@ function makeControlRow(p, initialValue, onInput, lfoCycle = null) {
 
   const label = document.createElement('label');
   label.textContent = p.label;
+  let led = null;
 
   if (lfoCycle !== null) {
-    const led = document.createElement('button');
+    led = document.createElement('button');
     led.className = 'lfo-led';
     led.type = 'button';
     setLFOLedState(led, null);
@@ -683,6 +737,9 @@ function makeControlRow(p, initialValue, onInput, lfoCycle = null) {
   row.setValue = (v) => {
     valueEl.textContent = fmt(v);
     knob.setValue(v);
+  };
+  row.setMapLFO = (lfoIdx) => {
+    if (led) setLFOLedState(led, lfoIdx);
   };
   return row;
 }
@@ -816,13 +873,14 @@ function buildGeneratorPanel(genIdx) {
 
   const freezeBtn = document.createElement('button');
   freezeBtn.className = 'gen-freeze';
-  freezeBtn.textContent = 'Freeze';
+  freezeBtn.textContent = 'Freeze ❄︎';
   freezeBtn.disabled = true;
   freezeBtn.addEventListener('click', () => {
     state[genIdx].freeze = !state[genIdx].freeze;
     freezeBtn.classList.toggle('active', state[genIdx].freeze);
     sendParams(genIdx);
   });
+  genFreezeButtons[genIdx] = freezeBtn;
 
   header.append(title, freezeBtn);
   panel.appendChild(header);
@@ -877,6 +935,7 @@ function buildGeneratorPanel(genIdx) {
       () => cycleLFOMap(genIdx, p.key),
     );
     genControlBindings[genIdx].set(p.key, control);
+    genMapBindings[genIdx].set(p.key, control);
     rows.appendChild(control);
   });
 
@@ -1190,6 +1249,7 @@ function buildOscPanel() {
       btn.classList.add('active');
       restartAllGen3Notes();
     });
+    gen3ShapeButtons.set(type, btn);
     shapes.appendChild(btn);
   });
   header.append(title, shapes);
@@ -1227,19 +1287,19 @@ function buildOscPanel() {
     { key: 'decay', label: 'Decay', min: 0, max: 2, step: 0.01, unit: 's' },
     { key: 'sustain', label: 'Sustain', min: 0, max: 1, step: 0.01, unit: '' },
     { key: 'release', label: 'Release', min: 0, max: 10, step: 0.01, unit: 's' },
-  ].forEach((p) =>
-    rows.appendChild(
-      makeControlRow(p, GEN3[p.key], (v) => {
-        GEN3[p.key] = v;
-        if (p.key === 'gain' && GEN3.nodes)
-          GEN3.nodes.gain.gain.setValueAtTime(v, audioCtx.currentTime);
-        if (p.key === 'detune' && GEN3.nodes)
-          GEN3.activeNotes.forEach((entry) => {
-            if (entry?.source?.detune) entry.source.detune.setValueAtTime(v, audioCtx.currentTime);
-          });
-      }),
-    ),
-  );
+  ].forEach((p) => {
+    const control = makeControlRow(p, GEN3[p.key], (v) => {
+      GEN3[p.key] = v;
+      if (p.key === 'gain' && GEN3.nodes)
+        GEN3.nodes.gain.gain.setValueAtTime(v, audioCtx.currentTime);
+      if (p.key === 'detune' && GEN3.nodes)
+        GEN3.activeNotes.forEach((entry) => {
+          if (entry?.source?.detune) entry.source.detune.setValueAtTime(v, audioCtx.currentTime);
+        });
+    });
+    gen3ControlBindings.set(p.key, control);
+    rows.appendChild(control);
+  });
   panel.appendChild(rows);
   return panel;
 }
@@ -1254,6 +1314,15 @@ const FX_DEFS = [
       { key: 'time', label: 'Time', min: 0, max: 1, step: 0.01, value: 0.3, unit: 's' },
       { key: 'feedback', label: 'Feedback', min: 0, max: 0.95, step: 0.01, value: 0.35, unit: '' },
       { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
+    ],
+  },
+  {
+    id: 'filter',
+    label: 'Filter',
+    params: [
+      { key: 'cutoff', label: 'Cutoff', min: 80, max: 14000, step: 10, unit: 'Hz' },
+      { key: 'q', label: 'Resonance', min: 0.1, max: 20, step: 0.1, unit: '' },
+      { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, unit: '' },
     ],
   },
   {
@@ -1273,13 +1342,24 @@ const FX_DEFS = [
       { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
     ],
   },
+  {
+    id: 'limiter',
+    label: 'Limiter',
+    params: [
+      { key: 'threshold', label: 'Threshold', min: -24, max: 0, step: 0.5, value: -8, unit: 'dB' },
+      { key: 'release', label: 'Release', min: 0.02, max: 0.5, step: 0.01, value: 0.12, unit: 's' },
+      { key: 'output', label: 'Output', min: 0.5, max: 1.2, step: 0.01, value: 0.96, unit: '' },
+    ],
+  },
 ];
 
 // Source of truth for FX state — applied to audio nodes when they exist.
 const FX = {
   delay: { time: 0.3, feedback: 0.35, mix: 0 },
+  filter: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 1 },
   sat: { drive: 0.3, mix: 0 },
   reverb: { size: 2, decay: 3, mix: 0 },
+  limiter: { threshold: -8, release: 0.12, output: 0.96 },
 };
 
 let fx = null; // audio nodes, created in start(), nulled in stop()
@@ -1389,13 +1469,13 @@ function buildLFOSection(lfoIdx) {
   [
     LFO_RATE_CONTROL,
     { key: 'depth', label: 'Depth', min: 0, max: 1, step: 0.01, unit: '' },
-  ].forEach((p) =>
-    section.appendChild(
-      makeControlRow(p, lfo[p.key], (v) => {
-        lfo[p.key] = v;
-      }),
-    ),
-  );
+  ].forEach((p) => {
+    const control = makeControlRow(p, lfo[p.key], (v) => {
+      lfo[p.key] = v;
+    });
+    lfoControlBindings[lfoIdx].set(p.key, control);
+    section.appendChild(control);
+  });
 
   // Shape selector
   const shapeRow = document.createElement('div');
@@ -1414,6 +1494,7 @@ function buildLFOSection(lfoIdx) {
       shapeRow.querySelectorAll('.lfo-shape').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
     });
+    lfoShapeButtons[lfoIdx].set(shape, btn);
     shapeRow.appendChild(btn);
   });
   section.appendChild(shapeRow);
@@ -1446,6 +1527,11 @@ function makeReverbIR() {
   return buf;
 }
 
+function applyFilterMode() {
+  if (!fx?.filter?.biquad) return;
+  fx.filter.biquad.type = FX.filter.mode;
+}
+
 function buildFxNodes() {
   const ac = audioCtx;
 
@@ -1464,6 +1550,19 @@ function buildFxNodes() {
   dlyTap.connect(dlyWet);
   dlyDry.connect(dlyOut);
   dlyWet.connect(dlyOut);
+
+  // ─ Filter ─
+  const fltIn = ac.createGain();
+  const fltDry = ac.createGain();
+  const fltWet = ac.createGain();
+  const fltBiquad = ac.createBiquadFilter();
+  const fltOut = ac.createGain();
+
+  fltIn.connect(fltDry);
+  fltIn.connect(fltBiquad);
+  fltBiquad.connect(fltWet);
+  fltDry.connect(fltOut);
+  fltWet.connect(fltOut);
 
   // ─ Saturation ─
   const satIn = ac.createGain();
@@ -1492,16 +1591,31 @@ function buildFxNodes() {
   rvbDry.connect(rvbOut);
   rvbWet.connect(rvbOut);
 
-  // ─ Chain: granulator → delay → saturation → reverb → destination ─
-  dlyOut.connect(satIn);
+  // ─ Master limiter ─
+  const limiter = ac.createDynamicsCompressor();
+  limiter.threshold.setValueAtTime(FX.limiter.threshold, ac.currentTime);
+  limiter.knee.setValueAtTime(0, ac.currentTime);
+  limiter.ratio.setValueAtTime(20, ac.currentTime);
+  limiter.attack.setValueAtTime(0.003, ac.currentTime);
+  limiter.release.setValueAtTime(FX.limiter.release, ac.currentTime);
+  const masterOut = ac.createGain();
+  masterOut.gain.setValueAtTime(FX.limiter.output, ac.currentTime);
+
+  // ─ Chain: granulator → delay → filter → saturation → reverb → limiter ─
+  dlyOut.connect(fltIn);
+  fltOut.connect(satIn);
   satOut.connect(rvbIn);
+  rvbOut.connect(limiter);
+  limiter.connect(masterOut);
 
   fx = {
     input: dlyIn,
-    output: rvbOut,
+    output: masterOut,
     delay: { tap: dlyTap, fb: dlyFb, dry: dlyDry, wet: dlyWet },
+    filter: { biquad: fltBiquad, dry: fltDry, wet: fltWet },
     sat: { shaper: satShaper, dry: satDry, wet: satWet },
     reverb: { conv: rvbConv, dry: rvbDry, wet: rvbWet },
+    limiter: { comp: limiter, output: masterOut },
   };
 
   applyAllFx();
@@ -1517,6 +1631,13 @@ function applyFx(id, key, val) {
       fx.delay.wet.gain.value = val;
       fx.delay.dry.gain.value = 1 - val;
     }
+  } else if (id === 'filter') {
+    if (key === 'cutoff') fx.filter.biquad.frequency.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'q') fx.filter.biquad.Q.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'mix') {
+      fx.filter.wet.gain.value = val;
+      fx.filter.dry.gain.value = 1 - val;
+    }
   } else if (id === 'sat') {
     if (key === 'drive') fx.sat.shaper.curve = makeSatCurve(val);
     if (key === 'mix') {
@@ -1529,11 +1650,159 @@ function applyFx(id, key, val) {
       fx.reverb.wet.gain.value = val;
       fx.reverb.dry.gain.value = 1 - val;
     }
+  } else if (id === 'limiter') {
+    if (key === 'threshold') fx.limiter.comp.threshold.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'release') fx.limiter.comp.release.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'output') fx.limiter.output.gain.setTargetAtTime(val, audioCtx.currentTime, 0.02);
   }
 }
 
 function applyAllFx() {
   FX_DEFS.forEach(({ id, params }) => params.forEach(({ key }) => applyFx(id, key, FX[id][key])));
+  applyFilterMode();
+}
+
+function refreshGen3UI() {
+  ['gain', 'detune', 'attack', 'decay', 'sustain', 'release'].forEach((key) => {
+    gen3ControlBindings.get(key)?.setValue(GEN3[key]);
+  });
+  gen3ShapeButtons.forEach((btn, type) => btn.classList.toggle('active', GEN3.type === type));
+}
+
+function refreshLFOUI() {
+  LFOS.forEach((lfo, lfoIdx) => {
+    lfoControlBindings[lfoIdx].get('rate')?.setValue(lfo.rate);
+    lfoControlBindings[lfoIdx].get('depth')?.setValue(lfo.depth);
+    lfoShapeButtons[lfoIdx].forEach((btn, shape) => btn.classList.toggle('active', lfo.shape === shape));
+  });
+}
+
+function refreshFilterUI() {
+  ['cutoff', 'q', 'mix'].forEach((key) => {
+    fxControlBindings.get(`filter:${key}`)?.setValue(FX.filter[key]);
+  });
+  filterModeButtons.forEach((btn, mode) => btn.classList.toggle('active', FX.filter.mode === mode));
+}
+
+function capturePreset() {
+  return {
+    gens: state.map((gen) => ({ ...gen })),
+    gen3: {
+      type: GEN3.type,
+      gain: GEN3.gain,
+      detune: GEN3.detune,
+      attack: GEN3.attack,
+      decay: GEN3.decay,
+      sustain: GEN3.sustain,
+      release: GEN3.release,
+    },
+    fx: JSON.parse(JSON.stringify(FX)),
+    lfos: LFOS.map(({ label, rate, shape, depth }) => ({ label, rate, shape, depth })),
+    mappings: [...lfoMappings.values()].map(({ genIdx, key, lfoIdx }) => ({ genIdx, key, lfoIdx })),
+  };
+}
+
+function applyPreset(preset) {
+  if (!preset) return;
+  preset.gens?.forEach((gen, genIdx) => {
+    PARAMS.forEach(({ key }) => {
+      if (typeof gen[key] === 'number') setGeneratorParam(genIdx, key, gen[key], { send: false });
+    });
+    if (typeof gen.freeze === 'boolean') state[genIdx].freeze = gen.freeze;
+    refreshGeneratorUI(genIdx);
+  });
+
+  if (preset.gen3) {
+    Object.assign(GEN3, preset.gen3);
+    refreshGen3UI();
+    if (GEN3.nodes) {
+      GEN3.nodes.gain.gain.setValueAtTime(GEN3.gain, audioCtx.currentTime);
+      GEN3.activeNotes.forEach((entry) => {
+        if (entry?.source?.detune) entry.source.detune.setValueAtTime(GEN3.detune, audioCtx.currentTime);
+      });
+      restartAllGen3Notes();
+    }
+  }
+
+  if (preset.fx) {
+    Object.keys(FX).forEach((id) => {
+      if (preset.fx[id]) Object.assign(FX[id], preset.fx[id]);
+    });
+    applyAllFx();
+    refreshFilterUI();
+    ['delay', 'filter', 'sat', 'reverb', 'limiter'].forEach((id) => {
+      Object.entries(FX[id]).forEach(([key, value]) => {
+        if (key !== 'mode') fxControlBindings.get(`${id}:${key}`)?.setValue(value);
+      });
+    });
+  }
+
+  if (preset.lfos) {
+    preset.lfos.forEach((saved, idx) => {
+      if (!LFOS[idx]) return;
+      LFOS[idx].rate = saved.rate;
+      LFOS[idx].shape = saved.shape;
+      LFOS[idx].depth = saved.depth;
+    });
+    refreshLFOUI();
+  }
+
+  lfoMappings.clear();
+  preset.mappings?.forEach(({ genIdx, key, lfoIdx }) => {
+    if (genIdx < 2 && PARAMS.some((p) => p.key === key) && (lfoIdx === 0 || lfoIdx === 1)) {
+      lfoMappings.set(`${genIdx}:${key}`, {
+        genIdx,
+        key,
+        paramDef: PARAMS.find((p) => p.key === key),
+        lfoIdx,
+      });
+    }
+  });
+  refreshLFOMappingUI();
+  sendParams(0);
+  sendParams(1);
+}
+
+function refreshPresetUI() {
+  const saveBtn = getPresetSaveBtn();
+  saveBtn?.classList.toggle('active', presetSaveArmed);
+  const slots = getPresetSlotsEl()?.querySelectorAll('.preset-slot') || [];
+  slots.forEach((slot, idx) => {
+    slot.classList.toggle('filled', !!presetStore[idx]);
+  });
+}
+
+function buildPresetUI() {
+  const slotsEl = getPresetSlotsEl();
+  if (!slotsEl) return;
+  slotsEl.textContent = '';
+  for (let i = 0; i < PRESET_SLOT_COUNT; i++) {
+    const btn = document.createElement('button');
+    btn.className = 'preset-slot';
+    btn.textContent = `P${i + 1}`;
+    btn.addEventListener('click', () => {
+      if (presetSaveArmed) {
+        presetStore[i] = capturePreset();
+        presetSaveArmed = false;
+        savePresetStore();
+        refreshPresetUI();
+        setStatus(`saved preset ${i + 1}`);
+        return;
+      }
+      if (!presetStore[i]) {
+        setStatus(`preset ${i + 1} empty`);
+        return;
+      }
+      applyPreset(presetStore[i]);
+      setStatus(`loaded preset ${i + 1}`);
+    });
+    slotsEl.appendChild(btn);
+  }
+  getPresetSaveBtn()?.addEventListener('click', () => {
+    presetSaveArmed = !presetSaveArmed;
+    refreshPresetUI();
+  });
+  refreshPresetUI();
 }
 
 function buildFxUI() {
@@ -1558,13 +1827,31 @@ function buildFxUI() {
     lbl.textContent = def.label;
     section.appendChild(lbl);
 
+    if (def.id === 'filter') {
+      const modeRow = document.createElement('div');
+      modeRow.className = 'fx-mode-row';
+      [['lowpass', 'LP'], ['highpass', 'HP'], ['bandpass', 'BP']].forEach(([mode, label]) => {
+        const btn = document.createElement('button');
+        btn.className = 'fx-mode-btn' + (FX.filter.mode === mode ? ' active' : '');
+        btn.textContent = label;
+        btn.addEventListener('click', () => {
+          FX.filter.mode = mode;
+          applyFilterMode();
+          refreshFilterUI();
+        });
+        filterModeButtons.set(mode, btn);
+        modeRow.appendChild(btn);
+      });
+      section.appendChild(modeRow);
+    }
+
     def.params.forEach((p) => {
-      section.appendChild(
-        makeControlRow(p, FX[def.id][p.key], (v) => {
-          FX[def.id][p.key] = v;
-          applyFx(def.id, p.key, v);
-        }),
-      );
+      const control = makeControlRow(p, FX[def.id][p.key], (v) => {
+        FX[def.id][p.key] = v;
+        applyFx(def.id, p.key, v);
+      });
+      fxControlBindings.set(`${def.id}:${p.key}`, control);
+      section.appendChild(control);
     });
 
     container.appendChild(section);
@@ -1650,6 +1937,8 @@ getRecordBtn()?.addEventListener('click', () => {
   REC.isRecording ? stopRecording() : startRecording();
 });
 
+loadPresetStore();
 buildUI();
 buildFxUI();
+buildPresetUI();
 refreshRecordButton();
