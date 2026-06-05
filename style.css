@@ -231,6 +231,34 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 
 .generator + .generator { border-top: 1px solid var(--border); }
 
+.gen-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.source-mode-row {
+  display: flex;
+  gap: 2px;
+}
+
+.source-mode-btn {
+  padding: 3px 6px;
+  font-size: 7px;
+  line-height: 1;
+}
+
+.source-mode-btn.active {
+  background: var(--gen-accent);
+  border-color: var(--gen-accent);
+  color: #121212;
+}
+
+.source-mode-btn.loaded:not(.active) {
+  border-color: var(--gen-accent);
+  color: var(--gen-accent);
+}
+
 .source-drop-overlay {
   position: absolute;
   inset: 28px 0 auto 0;

@@ -19,9 +19,6 @@ class GranularProcessor extends AudioWorkletProcessor {
     this.liveBuffer = new Float32Array(this.liveBufferLength);
     this.writePos = 0;
     this.filled = 0;
-    this.sourceMode = 'live';
-    this.sourceBuffer = this.liveBuffer;
-    this.sourceLength = this.liveBufferLength;
 
     // Two independent generators sharing the same source buffer.
     // freezeBuffer: pre-allocated snapshot copied from the active source on freeze.
@@ -32,14 +29,20 @@ class GranularProcessor extends AudioWorkletProcessor {
         grains: [],
         spawnCountdown: 0,
         frozenAt: null,
-        freezeBuffer: new Float32Array(this.sourceLength),
+        sourceMode: 'live',
+        sourceBuffer: null,
+        sourceLength: this.liveBufferLength,
+        freezeBuffer: new Float32Array(this.liveBufferLength),
       },
       {
         params: { ...DEFAULT_PARAMS },
         grains: [],
         spawnCountdown: 0,
         frozenAt: null,
-        freezeBuffer: new Float32Array(this.sourceLength),
+        sourceMode: 'live',
+        sourceBuffer: null,
+        sourceLength: this.liveBufferLength,
+        freezeBuffer: new Float32Array(this.liveBufferLength),
       },
     ];
 
@@ -52,49 +55,60 @@ class GranularProcessor extends AudioWorkletProcessor {
         const wasFreeze = gen.params.freeze;
         Object.assign(gen.params, e.data.value);
         if (!wasFreeze && gen.params.freeze) {
-          gen.frozenAt = this.sourceMode === 'live' ? this.writePos : this.sourceLength;
-          this.ensureFreezeBufferLength(gen, this.sourceLength);
-          gen.freezeBuffer.set(this.sourceBuffer);
+          const sourceBuffer = this.getGenSourceBuffer(gen);
+          const sourceLength = this.getGenSourceLength(gen);
+          gen.frozenAt = gen.sourceMode === 'live' ? this.writePos : sourceLength;
+          this.ensureFreezeBufferLength(gen, sourceLength);
+          gen.freezeBuffer.set(sourceBuffer);
         } else if (!gen.params.freeze) {
           gen.frozenAt = null;
         }
-      } else if (e.data.type === 'set-source-buffer' && e.data.buffer) {
-        this.setSourceBuffer(e.data.buffer);
-      } else if (e.data.type === 'use-live-input') {
-        this.useLiveInput();
+      } else if (e.data.type === 'set-gen-source-buffer' && e.data.buffer) {
+        this.setGenSourceBuffer(e.data.gen, e.data.buffer);
+      } else if (e.data.type === 'set-gen-source-mode') {
+        this.setGenSourceMode(e.data.gen, e.data.mode);
       }
     };
+  }
+
+  getGenSourceLength(gen) {
+    return Math.max(1, gen.sourceMode === 'live' ? this.liveBufferLength : gen.sourceLength || 1);
+  }
+
+  getGenSourceBuffer(gen) {
+    return gen.sourceMode === 'live' ? this.liveBuffer : gen.sourceBuffer || this.liveBuffer;
   }
 
   ensureFreezeBufferLength(gen, length) {
     if (gen.freezeBuffer.length !== length) gen.freezeBuffer = new Float32Array(length);
   }
 
-  clearGrainsAndFreeze() {
-    this.gens.forEach((gen) => {
-      gen.grains.length = 0;
-      gen.spawnCountdown = 0;
-      gen.frozenAt = null;
-      gen.params.freeze = false;
-      this.ensureFreezeBufferLength(gen, this.sourceLength);
-    });
+  clearGenState(gen) {
+    gen.grains.length = 0;
+    gen.spawnCountdown = 0;
+    gen.frozenAt = null;
+    gen.params.freeze = false;
+    this.ensureFreezeBufferLength(gen, this.getGenSourceLength(gen));
   }
 
-  setSourceBuffer(buffer) {
-    this.sourceMode = 'sample';
-    this.sourceBuffer = buffer;
-    this.sourceLength = buffer.length || 1;
-    this.clearGrainsAndFreeze();
+  setGenSourceBuffer(genIdx, buffer) {
+    const gen = this.gens[genIdx];
+    if (!gen) return;
+    gen.sourceMode = 'sample';
+    gen.sourceBuffer = buffer;
+    gen.sourceLength = buffer.length || 1;
+    this.clearGenState(gen);
   }
 
-  useLiveInput() {
-    this.sourceMode = 'live';
-    this.sourceBuffer = this.liveBuffer;
-    this.sourceLength = this.liveBufferLength;
-    this.writePos = 0;
-    this.filled = 0;
-    this.liveBuffer.fill(0);
-    this.clearGrainsAndFreeze();
+  setGenSourceMode(genIdx, mode) {
+    const gen = this.gens[genIdx];
+    if (!gen) return;
+    gen.sourceMode = mode === 'sample' ? 'sample' : 'live';
+    if (gen.sourceMode === 'live') {
+      gen.sourceBuffer = null;
+      gen.sourceLength = this.liveBufferLength;
+    }
+    this.clearGenState(gen);
   }
 
   spawnGrain(gen) {
@@ -104,10 +118,9 @@ class GranularProcessor extends AudioWorkletProcessor {
     const length = Math.max(1, Math.floor((p.grainSizeMs / 1000) * sampleRate));
     const posSamples = p.positionSec * sampleRate;
     const spray = Math.random() * p.spraySec * sampleRate;
-    const sourceLength = Math.max(1, this.sourceLength);
+    const sourceLength = this.getGenSourceLength(gen);
 
-    const anchor =
-      gen.frozenAt !== null ? gen.frozenAt : this.sourceMode === 'live' ? this.writePos : sourceLength;
+    const anchor = gen.frozenAt !== null ? gen.frozenAt : gen.sourceMode === 'live' ? this.writePos : sourceLength;
     let start = anchor - posSamples - spray;
     start = ((start % sourceLength) + sourceLength) % sourceLength;
 
@@ -125,14 +138,14 @@ class GranularProcessor extends AudioWorkletProcessor {
   _sendVizData() {
     const VIZ_N = 4096;
     const transferable = [];
-    const durationSec = Math.max(0.01, this.sourceLength / sampleRate);
 
     const gens = this.gens.map((gen) => {
       const frozen = gen.frozenAt !== null;
       // Frozen gens read from their snapshot so their waveform never changes.
-      const sourceBuf = frozen ? gen.freezeBuffer : this.sourceBuffer;
-      const sourceLength = Math.max(1, sourceBuf.length);
-      const refPos = this.sourceMode === 'live' ? (frozen ? gen.frozenAt : this.writePos) : 0;
+      const sourceBuf = frozen ? gen.freezeBuffer : this.getGenSourceBuffer(gen);
+      const sourceLength = frozen ? Math.max(1, gen.freezeBuffer.length) : this.getGenSourceLength(gen);
+      const durationSec = Math.max(0.01, sourceLength / sampleRate);
+      const refPos = gen.sourceMode === 'live' ? (frozen ? gen.frozenAt : this.writePos) : 0;
 
       const waveform = new Float32Array(VIZ_N);
       for (let i = 0; i < VIZ_N; i++) {
@@ -168,8 +181,7 @@ class GranularProcessor extends AudioWorkletProcessor {
     const blockSize = outL.length;
 
     for (let i = 0; i < blockSize; i++) {
-      // Buffer always records — freeze is per-generator, not per-buffer.
-      if (this.sourceMode === 'live' && inChannel) {
+      if (inChannel) {
         this.liveBuffer[this.writePos] = inChannel[i];
         this.writePos = (this.writePos + 1) % this.liveBufferLength;
         if (this.filled < this.liveBufferLength) this.filled++;
@@ -181,8 +193,8 @@ class GranularProcessor extends AudioWorkletProcessor {
       for (let gi = 0; gi < 2; gi++) {
         const gen = this.gens[gi];
         const spawnInterval = sampleRate / Math.max(0.01, gen.params.density);
-        const activeFilled = this.sourceMode === 'live' ? this.filled : this.sourceLength;
-        const sourceLength = Math.max(1, this.sourceLength);
+        const sourceLength = this.getGenSourceLength(gen);
+        const activeFilled = gen.sourceMode === 'live' ? this.filled : sourceLength;
 
         gen.spawnCountdown -= 1;
         while (gen.spawnCountdown <= 0) {
@@ -193,7 +205,7 @@ class GranularProcessor extends AudioWorkletProcessor {
         for (let g = 0; g < gen.grains.length; g++) {
           const grain = gen.grains[g];
           const win = 0.5 * (1 - Math.cos((2 * Math.PI * grain.phase) / grain.length));
-          const buf = gen.frozenAt !== null ? gen.freezeBuffer : this.sourceBuffer;
+          const buf = gen.frozenAt !== null ? gen.freezeBuffer : this.getGenSourceBuffer(gen);
           const s = this.readInterpolated(buf, grain.pos, sourceLength) * win;
           sumL += s * grain.gainL * gen.params.gain;
           sumR += s * grain.gainR * gen.params.gain;

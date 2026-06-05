@@ -8,11 +8,6 @@ let started = false;
 let granularModulePromise = null;
 let bitReducerModulePromise = null;
 const LIVE_SOURCE_SECONDS = 10;
-const SOURCE = {
-  mode: 'none',
-  durationSec: LIVE_SOURCE_SECONDS,
-  fileName: '',
-};
 const REC = {
   isRecording: false,
   left: [],
@@ -135,6 +130,19 @@ function getStartBtn() {
   return document.getElementById('startBtn');
 }
 
+function getIdleStartButtonLabel() {
+  return anyMicSourceSelected() ? '▶ Start mic' : '▶ Start';
+}
+
+function createGranularSourceState() {
+  return {
+    mode: 'mic',
+    durationSec: LIVE_SOURCE_SECONDS,
+    fileName: '',
+    bufferData: null,
+  };
+}
+
 async function ensureAudioEngine() {
   if (!audioCtx) {
     audioCtx = new AudioContext();
@@ -228,8 +236,7 @@ function stopRecording() {
   REC.sink = null;
   REC.isRecording = false;
   refreshRecordButton();
-  if (started && SOURCE.mode === 'file') setStatus(`file: ${SOURCE.fileName}`);
-  else setStatus(started ? 'running' : audioCtx ? 'gen3 ready' : 'idle');
+  setStatus(started ? getGranularStatusText() : audioCtx ? 'gen3 ready' : 'idle');
 }
 
 // ─── Visualizer (per-generator) ────────────────────────────────────────────
@@ -659,20 +666,38 @@ const lfoControlBindings = [new Map(), new Map()];
 const lfoShapeButtons = [new Map(), new Map()];
 const gen3ShapeButtons = new Map();
 const filterModeButtons = new Map();
+const genSourceModeButtons = [new Map(), new Map()];
 const POSITION_PARAM = PARAMS.find((p) => p.key === 'positionSec');
+const GRANULAR_SOURCES = [createGranularSourceState(), createGranularSourceState()];
 
-function setSourceDurationSec(durationSec) {
-  SOURCE.durationSec = Math.max(0.05, durationSec || LIVE_SOURCE_SECONDS);
-  POSITION_PARAM.max = SOURCE.durationSec;
-  for (let genIdx = 0; genIdx < 2; genIdx++) {
-    const clamped = Math.max(POSITION_PARAM.min, Math.min(POSITION_PARAM.max, state[genIdx].positionSec));
-    state[genIdx].positionSec = clamped;
-    genControlBindings[genIdx].get('positionSec')?.setValue(clamped);
-    const posX = Math.max(0, Math.min(1, 1 - clamped / Math.max(0.001, SOURCE.durationSec)));
-    const vizState = genVizStates[genIdx];
-    vizState.targetPosX = posX;
-    if (!vizState.seeded) vizState.currentPosX = posX;
-  }
+function getSourceState(genIdx) {
+  return GRANULAR_SOURCES[genIdx];
+}
+
+function getGeneratorPositionMax(genIdx) {
+  return Math.max(0.05, getSourceState(genIdx)?.durationSec || LIVE_SOURCE_SECONDS);
+}
+
+function getParamBounds(genIdx, key) {
+  const base = PARAMS.find((p) => p.key === key);
+  if (!base) return null;
+  if (key !== 'positionSec') return base;
+  return { ...base, max: getGeneratorPositionMax(genIdx) };
+}
+
+function setSourceDurationSec(genIdx, durationSec) {
+  const source = getSourceState(genIdx);
+  if (!source) return;
+  source.durationSec = Math.max(0.05, durationSec || LIVE_SOURCE_SECONDS);
+  const bounds = getParamBounds(genIdx, 'positionSec');
+  const clamped = Math.max(bounds.min, Math.min(bounds.max, state[genIdx].positionSec));
+  state[genIdx].positionSec = clamped;
+  genControlBindings[genIdx].get('positionSec')?.setConfig({ min: bounds.min, max: bounds.max });
+  genControlBindings[genIdx].get('positionSec')?.setValue(clamped);
+  const posX = Math.max(0, Math.min(1, 1 - clamped / Math.max(0.001, source.durationSec)));
+  const vizState = genVizStates[genIdx];
+  vizState.targetPosX = posX;
+  if (!vizState.seeded) vizState.currentPosX = posX;
 }
 
 function clearFreezeStates({ send = true } = {}) {
@@ -683,26 +708,46 @@ function clearFreezeStates({ send = true } = {}) {
   }
 }
 
-function setGranularRunning(mode, fileName = '') {
-  SOURCE.mode = mode;
-  SOURCE.fileName = fileName;
+function anyMicSourceSelected() {
+  return GRANULAR_SOURCES.some((source) => source.mode === 'mic');
+}
+
+function getGranularStatusText() {
+  const micCount = granularInputSource ? GRANULAR_SOURCES.filter((source) => source.mode === 'mic').length : 0;
+  const fileSources = GRANULAR_SOURCES.filter((source) => source.mode === 'file' && source.bufferData);
+  if (fileSources.length === 2) return '2 file sources';
+  if (fileSources.length === 1 && micCount === 0) return `file: ${fileSources[0].fileName}`;
+  if (fileSources.length > 0 && micCount > 0) return 'mic + file';
+  if (micCount > 0) return 'running';
+  return 'running';
+}
+
+function refreshSourceModeUI(genIdx) {
+  const mode = getSourceState(genIdx).mode;
+  genSourceModeButtons[genIdx].forEach((btn, key) => {
+    btn.classList.toggle('active', mode === key);
+    btn.classList.toggle('loaded', key === 'file' && !!getSourceState(genIdx).bufferData);
+  });
+  if (!started) getStartBtn().textContent = getIdleStartButtonLabel();
+}
+
+function setGranularRunning() {
   started = true;
   getStartBtn().textContent = '■ Stop';
   document.querySelectorAll('.gen-freeze').forEach((btn) => (btn.disabled = false));
   startLFOLoop();
   startGenVizLoop();
-  if (mode === 'file') setStatus(`file: ${fileName}`);
-  else setStatus('running');
+  setStatus(getGranularStatusText());
 }
 
 function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
-  const param = PARAMS.find((p) => p.key === key);
+  const param = getParamBounds(genIdx, key);
   if (!param) return;
   const next = Math.max(param.min, Math.min(param.max, value));
   state[genIdx][key] = next;
   genControlBindings[genIdx].get(key)?.setValue(next);
   if (key === 'positionSec') {
-    const posX = Math.max(0, Math.min(1, 1 - next / Math.max(0.001, SOURCE.durationSec)));
+    const posX = Math.max(0, Math.min(1, 1 - next / Math.max(0.001, getGeneratorPositionMax(genIdx))));
     const vizState = genVizStates[genIdx];
     vizState.targetPosX = posX;
     if (!vizState.seeded) vizState.currentPosX = posX;
@@ -713,9 +758,10 @@ function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
 function getEffectiveGeneratorParams(genIdx) {
   const effective = { ...state[genIdx] };
   if (lfoMappings.size > 0) {
-    lfoMappings.forEach(({ genIdx: gi, key, paramDef, lfoIdx }) => {
+    lfoMappings.forEach(({ genIdx: gi, key, lfoIdx }) => {
       if (gi !== genIdx) return;
       const lfo = LFOS[lfoIdx];
+      const paramDef = getParamBounds(genIdx, key);
       if (!lfo) return;
       const scaled = lfo.currentValue * lfo.depth;
       const half = (paramDef.max - paramDef.min) * 0.5;
@@ -799,6 +845,9 @@ function makeControlRow(p, initialValue, onInput, lfoCycle = null) {
     valueEl.textContent = fmt(v);
     knob.setValue(v);
   };
+  row.setConfig = (patch) => {
+    knob.setConfig?.(patch);
+  };
   row.setMapLFO = (lfoIdx) => {
     if (led) setLFOLedState(led, lfoIdx);
   };
@@ -818,12 +867,17 @@ function makeKnob(p, initialValue, onInput) {
     E = 135; // 7 o'clock → 5 o'clock (270° sweep)
   const clamp01 = (n) => Math.max(0, Math.min(1, n));
 
-  const decimals = (p.step.toString().split('.')[1] || '').length;
-  const rawToNorm = p.toNorm || ((v) => (v - p.min) / (p.max - p.min));
-  const rawFromNorm = p.fromNorm || ((n) => p.min + clamp01(n) * (p.max - p.min));
-  const toNorm = (v) => clamp01(rawToNorm(v));
-  const toValue = (n) =>
-    parseFloat((Math.round(rawFromNorm(n) / p.step) * p.step).toFixed(decimals));
+  let spec = { ...p };
+  let currentValue = initialValue;
+  const getDecimals = () => (spec.step.toString().split('.')[1] || '').length;
+  const toNorm = (v) => {
+    const rawToNorm = spec.toNorm || ((value) => (value - spec.min) / Math.max(0.0001, spec.max - spec.min));
+    return clamp01(rawToNorm(v));
+  };
+  const toValue = (n) => {
+    const rawFromNorm = spec.fromNorm || ((value) => spec.min + clamp01(value) * (spec.max - spec.min));
+    return parseFloat((Math.round(rawFromNorm(n) / spec.step) * spec.step).toFixed(getDecimals()));
+  };
 
   function polar(deg) {
     const rad = ((deg - 90) * Math.PI) / 180;
@@ -867,7 +921,7 @@ function makeKnob(p, initialValue, onInput) {
 
   let norm = toNorm(initialValue);
 
-  function render(n) {
+  function renderNorm(n) {
     norm = clamp01(n);
     const deg = S + norm * (E - S);
     valArc.setAttribute('d', norm < 0.005 ? '' : arc(S, deg));
@@ -877,7 +931,12 @@ function makeKnob(p, initialValue, onInput) {
     dot.setAttribute('cy', (cy + dr * Math.sin(rad)).toFixed(2));
   }
 
-  render(norm);
+  function renderValue(v) {
+    currentValue = Math.max(spec.min, Math.min(spec.max, v));
+    renderNorm(toNorm(currentValue));
+  }
+
+  renderNorm(norm);
 
   // Drag (up = increase, Shift = fine)
   let y0 = 0,
@@ -892,8 +951,9 @@ function makeKnob(p, initialValue, onInput) {
   svg.addEventListener('pointermove', (e) => {
     if (!svg.hasPointerCapture(e.pointerId)) return;
     const n = clamp01(n0 + (y0 - e.clientY) * (e.shiftKey ? 0.001 : 0.004));
-    render(n);
-    onInput(toValue(n));
+    renderNorm(n);
+    currentValue = toValue(n);
+    onInput(currentValue);
   });
   svg.addEventListener('pointerup', () => svg.classList.remove('knob--drag'));
 
@@ -902,20 +962,25 @@ function makeKnob(p, initialValue, onInput) {
     'wheel',
     (e) => {
       e.preventDefault();
-      const n = clamp01(norm - (Math.sign(e.deltaY) * p.step) / (p.max - p.min));
-      render(n);
-      onInput(toValue(n));
+      const n = clamp01(norm - (Math.sign(e.deltaY) * spec.step) / Math.max(0.0001, spec.max - spec.min));
+      renderNorm(n);
+      currentValue = toValue(n);
+      onInput(currentValue);
     },
     { passive: false },
   );
 
   // Double-click to reset to initial value
   svg.addEventListener('dblclick', () => {
-    render(toNorm(initialValue));
-    onInput(initialValue);
+    renderValue(initialValue);
+    onInput(Math.max(spec.min, Math.min(spec.max, initialValue)));
   });
 
-  svg.setValue = (v) => render(toNorm(v));
+  svg.setValue = (v) => renderValue(v);
+  svg.setConfig = (patch) => {
+    spec = { ...spec, ...patch };
+    renderValue(currentValue);
+  };
   return svg;
 }
 
@@ -933,6 +998,23 @@ function buildGeneratorPanel(genIdx) {
   title.className = 'col-title';
   title.innerHTML = `<span class="col-dot"></span>Gen ${genIdx + 1}`;
 
+  const sourceRow = document.createElement('div');
+  sourceRow.className = 'source-mode-row';
+  [
+    ['mic', 'Mic'],
+    ['file', 'File'],
+  ].forEach(([mode, label]) => {
+    const btn = document.createElement('button');
+    btn.className = 'source-mode-btn';
+    btn.type = 'button';
+    btn.textContent = label;
+    btn.addEventListener('click', async () => {
+      await setGeneratorSourceMode(genIdx, mode);
+    });
+    genSourceModeButtons[genIdx].set(mode, btn);
+    sourceRow.appendChild(btn);
+  });
+
   const freezeBtn = document.createElement('button');
   freezeBtn.className = 'gen-freeze';
   freezeBtn.textContent = 'Freeze ❄︎';
@@ -944,7 +1026,11 @@ function buildGeneratorPanel(genIdx) {
   });
   genFreezeButtons[genIdx] = freezeBtn;
 
-  header.append(title, freezeBtn);
+  const headerActions = document.createElement('div');
+  headerActions.className = 'gen-header-actions';
+  headerActions.append(sourceRow, freezeBtn);
+
+  header.append(title, headerActions);
   panel.appendChild(header);
 
   // Per-generator waveform canvas
@@ -965,7 +1051,8 @@ function buildGeneratorPanel(genIdx) {
   const updatePositionFromPointer = (clientX) => {
     const rect = vizCanvas.getBoundingClientRect();
     const normX = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
-    const next = POSITION_PARAM.min + (1 - normX) * (POSITION_PARAM.max - POSITION_PARAM.min);
+    const bounds = getParamBounds(genIdx, 'positionSec');
+    const next = bounds.min + (1 - normX) * (bounds.max - bounds.min);
     setGeneratorParam(genIdx, 'positionSec', next);
   };
   vizCanvas.addEventListener('pointerdown', (e) => {
@@ -1021,7 +1108,7 @@ function buildGeneratorPanel(genIdx) {
       setStatus('drop a .wav file');
       return;
     }
-    await loadGranularFile(file);
+    await loadGranularFile(genIdx, file);
   });
 
   // Control rows
@@ -1040,6 +1127,7 @@ function buildGeneratorPanel(genIdx) {
   });
 
   panel.appendChild(rows);
+  refreshSourceModeUI(genIdx);
   return panel;
 }
 
@@ -1491,7 +1579,7 @@ const LFO_RATE_CONTROL = {
   toNorm: (v) => Math.pow((v - 0.05) / (10 - 0.05), 1 / LFO_RATE_CURVE_EXP),
   fromNorm: (n) => 0.05 + Math.pow(Math.max(0, Math.min(1, n)), LFO_RATE_CURVE_EXP) * (10 - 0.05),
 };
-// lfoMappings: 'genIdx:paramKey' → { genIdx, key, paramDef, lfoIdx }
+// lfoMappings: 'genIdx:paramKey' → { genIdx, key, lfoIdx }
 const lfoMappings = new Map();
 let lfoLastTs = 0,
   lfoAnimFrame = null;
@@ -1547,12 +1635,7 @@ function cycleLFOMap(genIdx, key) {
   const mapKey = `${genIdx}:${key}`;
   const mapping = lfoMappings.get(mapKey);
   if (!mapping) {
-    lfoMappings.set(mapKey, {
-      genIdx,
-      key,
-      paramDef: PARAMS.find((p) => p.key === key),
-      lfoIdx: 0,
-    });
+    lfoMappings.set(mapKey, { genIdx, key, lfoIdx: 0 });
     sendParams(genIdx);
     return 0;
   }
@@ -1892,12 +1975,7 @@ function applyPreset(preset) {
   lfoMappings.clear();
   preset.mappings?.forEach(({ genIdx, key, lfoIdx }) => {
     if (genIdx < 2 && PARAMS.some((p) => p.key === key) && (lfoIdx === 0 || lfoIdx === 1)) {
-      lfoMappings.set(`${genIdx}:${key}`, {
-        genIdx,
-        key,
-        paramDef: PARAMS.find((p) => p.key === key),
-        lfoIdx,
-      });
+      lfoMappings.set(`${genIdx}:${key}`, { genIdx, key, lfoIdx });
     }
   });
   refreshLFOMappingUI();
@@ -2002,20 +2080,14 @@ function buildFxUI() {
 
 async function start() {
   try {
-    setStatus('requesting mic…');
     await ensureGranularEngine();
-    disconnectGranularInput({ stopTracks: true });
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    });
-    granularInputSource = audioCtx.createMediaStreamSource(micStream);
-    granularInputSource.connect(node);
-    node.port.postMessage({ type: 'use-live-input' });
-    setSourceDurationSec(LIVE_SOURCE_SECONDS);
-    clearFreezeStates({ send: false });
+    if (anyMicSourceSelected()) {
+      setStatus('requesting mic…');
+      await ensureMicInput();
+    }
     sendParams(0);
     sendParams(1);
-    setGranularRunning('mic');
+    setGranularRunning();
   } catch (err) {
     setStatus('error: ' + err.message);
     console.error(err);
@@ -2038,6 +2110,7 @@ async function ensureGranularEngine() {
     sendParams(0);
     sendParams(1);
   }
+  await syncGranularSourceStates();
   return node;
 }
 
@@ -2054,6 +2127,61 @@ function disconnectGranularInput({ stopTracks = false } = {}) {
   }
 }
 
+async function ensureMicInput() {
+  if (!node) await ensureGranularEngine();
+  if (granularInputSource && micStream) return;
+  disconnectGranularInput({ stopTracks: true });
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+  });
+  granularInputSource = audioCtx.createMediaStreamSource(micStream);
+  granularInputSource.connect(node);
+}
+
+async function syncGranularSourceState(genIdx) {
+  if (!node) return;
+  const source = getSourceState(genIdx);
+  if (source.mode === 'file' && source.bufferData) {
+    const workletBuffer = source.bufferData.slice();
+    node.port.postMessage({ type: 'set-gen-source-buffer', gen: genIdx, buffer: workletBuffer }, [workletBuffer.buffer]);
+  } else {
+    node.port.postMessage({ type: 'set-gen-source-mode', gen: genIdx, mode: 'live' });
+  }
+}
+
+async function syncGranularSourceStates() {
+  if (!node) return;
+  for (let genIdx = 0; genIdx < 2; genIdx++) {
+    await syncGranularSourceState(genIdx);
+  }
+}
+
+async function setGeneratorSourceMode(genIdx, mode) {
+  const source = getSourceState(genIdx);
+  if (!source) return;
+  if (mode === 'file') {
+    if (!source.bufferData) {
+      setStatus('drop a .wav file');
+      return;
+    }
+    source.mode = 'file';
+    setSourceDurationSec(genIdx, source.durationSec);
+    refreshSourceModeUI(genIdx);
+    await ensureGranularEngine();
+    await syncGranularSourceState(genIdx);
+  } else {
+    source.mode = 'mic';
+    setSourceDurationSec(genIdx, LIVE_SOURCE_SECONDS);
+    refreshSourceModeUI(genIdx);
+    await ensureMicInput();
+    await syncGranularSourceState(genIdx);
+  }
+  state[genIdx].freeze = false;
+  genFreezeButtons[genIdx]?.classList.remove('active');
+  sendParams(genIdx);
+  setGranularRunning();
+}
+
 function isSupportedGranularFile(file) {
   return !!file && /\.wav$/i.test(file.name || '');
 }
@@ -2068,20 +2196,24 @@ function audioBufferToMono(audioBuffer) {
   return mono;
 }
 
-async function loadGranularFile(file) {
+async function loadGranularFile(genIdx, file) {
   try {
     setStatus(`loading ${file.name}…`);
     await ensureGranularEngine();
-    disconnectGranularInput({ stopTracks: true });
     const bytes = await file.arrayBuffer();
     const decoded = await audioCtx.decodeAudioData(bytes);
     const mono = audioBufferToMono(decoded);
-    node.port.postMessage({ type: 'set-source-buffer', buffer: mono }, [mono.buffer]);
-    setSourceDurationSec(decoded.duration);
-    clearFreezeStates({ send: false });
-    sendParams(0);
-    sendParams(1);
-    setGranularRunning('file', file.name);
+    const source = getSourceState(genIdx);
+    source.mode = 'file';
+    source.fileName = file.name;
+    source.bufferData = mono;
+    setSourceDurationSec(genIdx, decoded.duration);
+    refreshSourceModeUI(genIdx);
+    await syncGranularSourceState(genIdx);
+    state[genIdx].freeze = false;
+    genFreezeButtons[genIdx]?.classList.remove('active');
+    sendParams(genIdx);
+    setGranularRunning();
   } catch (err) {
     setStatus('error: ' + err.message);
     console.error(err);
@@ -2100,15 +2232,16 @@ function stop() {
   audioCtx = node = fx = null;
   granularModulePromise = null;
   bitReducerModulePromise = null;
-  SOURCE.mode = 'none';
-  SOURCE.fileName = '';
-  setSourceDurationSec(LIVE_SOURCE_SECONDS);
   started = false;
 
   // Reset freeze state for both generators.
   clearFreezeStates({ send: false });
+  for (let genIdx = 0; genIdx < 2; genIdx++) {
+    setSourceDurationSec(genIdx, getSourceState(genIdx).mode === 'file' ? getSourceState(genIdx).durationSec : LIVE_SOURCE_SECONDS);
+    refreshSourceModeUI(genIdx);
+  }
 
-  document.getElementById('startBtn').textContent = '▶ Start mic';
+  document.getElementById('startBtn').textContent = getIdleStartButtonLabel();
   document.querySelectorAll('.gen-freeze').forEach((btn) => {
     btn.disabled = true;
     btn.classList.remove('active');
@@ -2138,7 +2271,9 @@ getRecordBtn()?.addEventListener('click', () => {
 
 loadPresetStore();
 buildUI();
-setSourceDurationSec(LIVE_SOURCE_SECONDS);
+setSourceDurationSec(0, LIVE_SOURCE_SECONDS);
+setSourceDurationSec(1, LIVE_SOURCE_SECONDS);
 buildFxUI();
 buildPresetUI();
 refreshRecordButton();
+getStartBtn().textContent = getIdleStartButtonLabel();
