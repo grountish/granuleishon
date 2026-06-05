@@ -4,6 +4,37 @@ let audioCtx = null;
 let node = null;
 let micStream = null;
 let started = false;
+let granularModulePromise = null;
+
+function getStatusEl() {
+  return document.getElementById('status');
+}
+
+function setStatus(text) {
+  const status = getStatusEl();
+  if (status) status.textContent = text;
+}
+
+async function ensureAudioEngine() {
+  if (!audioCtx) {
+    audioCtx = new AudioContext();
+    buildFxNodes();
+    buildGen3Nodes();
+    fx.output.connect(audioCtx.destination);
+  }
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  if (!gen3ScopeFrame) startGen3Scope();
+  if (!lfoAnimFrame) startLFOLoop();
+  if (!started) setStatus('gen3 ready');
+}
+
+async function ensureGranularModule() {
+  if (!audioCtx) await ensureAudioEngine();
+  if (!granularModulePromise) {
+    granularModulePromise = audioCtx.audioWorklet.addModule('granular-processor.js');
+  }
+  await granularModulePromise;
+}
 
 // ─── Visualizer (per-generator) ────────────────────────────────────────────
 
@@ -227,11 +258,14 @@ function makeKnob(p, initialValue, onInput) {
   const NS = 'http://www.w3.org/2000/svg';
   const VB = 40, cx = 20, cy = 20, r = 15, sw = 3;
   const S = -135, E = 135; // 7 o'clock → 5 o'clock (270° sweep)
+  const clamp01 = (n) => Math.max(0, Math.min(1, n));
 
   const decimals = (p.step.toString().split('.')[1] || '').length;
-  const toNorm  = (v) => (v - p.min) / (p.max - p.min);
+  const rawToNorm = p.toNorm || ((v) => (v - p.min) / (p.max - p.min));
+  const rawFromNorm = p.fromNorm || ((n) => p.min + clamp01(n) * (p.max - p.min));
+  const toNorm  = (v) => clamp01(rawToNorm(v));
   const toValue = (n) => parseFloat(
-    (Math.round((p.min + Math.max(0, Math.min(1, n)) * (p.max - p.min)) / p.step) * p.step)
+    (Math.round(rawFromNorm(n) / p.step) * p.step)
       .toFixed(decimals)
   );
 
@@ -275,7 +309,7 @@ function makeKnob(p, initialValue, onInput) {
   let norm = toNorm(initialValue);
 
   function render(n) {
-    norm = Math.max(0, Math.min(1, n));
+    norm = clamp01(n);
     const deg = S + norm * (E - S);
     valArc.setAttribute('d', norm < 0.005 ? '' : arc(S, deg));
     const dr = r - sw / 2 - 1.5, rad = (deg - 90) * Math.PI / 180;
@@ -295,7 +329,7 @@ function makeKnob(p, initialValue, onInput) {
   });
   svg.addEventListener('pointermove', (e) => {
     if (!svg.hasPointerCapture(e.pointerId)) return;
-    const n = Math.max(0, Math.min(1, n0 + (y0 - e.clientY) * (e.shiftKey ? 0.001 : 0.004)));
+    const n = clamp01(n0 + (y0 - e.clientY) * (e.shiftKey ? 0.001 : 0.004));
     render(n); onInput(toValue(n));
   });
   svg.addEventListener('pointerup', () => svg.classList.remove('knob--drag'));
@@ -303,7 +337,7 @@ function makeKnob(p, initialValue, onInput) {
   // Scroll wheel — one step per tick
   svg.addEventListener('wheel', (e) => {
     e.preventDefault();
-    const n = Math.max(0, Math.min(1, norm - Math.sign(e.deltaY) * p.step / (p.max - p.min)));
+    const n = clamp01(norm - Math.sign(e.deltaY) * p.step / (p.max - p.min));
     render(n); onInput(toValue(n));
   }, { passive: false });
 
@@ -379,9 +413,9 @@ function buildUI() {
 // ─── Gen 3: Oscillator ─────────────────────────────────────────────────────
 
 const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-// C2–B5 (MIDI 36–83), highest first so piano roll reads top=high
+// C1–B5 (MIDI 24–83), highest first so piano roll reads top=high
 const OSC_NOTES = [];
-for (let m = 83; m >= 36; m--) {
+for (let m = 83; m >= 24; m--) {
   const oct = Math.floor(m / 12) - 1;
   const name = NOTE_NAMES[m % 12];
   OSC_NOTES.push({
@@ -615,16 +649,13 @@ function buildPianoRoll() {
       cell.dataset.midi = midi;
       cell.title = label;
 
-      cell.addEventListener('click', () => {
+      cell.addEventListener('click', async () => {
         if (GEN3.activeNotes.has(midi)) {
           removeGen3Note(midi);
           return;
         }
+        await ensureAudioEngine();
         if (GEN3.nodes) addGen3Note(midi, freq);
-        else {
-          GEN3.activeNotes.set(midi, { freq, source: null, envelope: null, releaseTimer: null });
-          setGen3NoteActive(midi, true);
-        }
       });
 
       if (GEN3.activeNotes.has(midi)) cell.classList.add('active');
@@ -754,6 +785,17 @@ const LFOS = [
   { label: 'LFO 1', rate: 1.0, shape: 'sine', depth: 0.3, phase: 0, currentValue: 0 },
   { label: 'LFO 2', rate: 0.35, shape: 'tri', depth: 0.25, phase: 0, currentValue: 0 },
 ];
+const LFO_RATE_CURVE_EXP = 2.4;
+const LFO_RATE_CONTROL = {
+  key: 'rate',
+  label: 'Rate',
+  min: 0.05,
+  max: 10,
+  step: 0.05,
+  unit: 'Hz',
+  toNorm: (v) => Math.pow((v - 0.05) / (10 - 0.05), 1 / LFO_RATE_CURVE_EXP),
+  fromNorm: (n) => 0.05 + Math.pow(Math.max(0, Math.min(1, n)), LFO_RATE_CURVE_EXP) * (10 - 0.05),
+};
 // lfoMappings: 'genIdx:paramKey' → { genIdx, key, paramDef, lfoIdx }
 const lfoMappings = new Map();
 let lfoLastTs = 0, lfoAnimFrame = null;
@@ -825,8 +867,8 @@ function buildLFOSection(lfoIdx) {
   lbl.textContent = lfo.label;
   section.appendChild(lbl);
 
-  [{ key: 'rate',  label: 'Rate',  min: 0.05, max: 10, step: 0.05, unit: 'Hz' },
-   { key: 'depth', label: 'Depth', min: 0,    max: 1,  step: 0.01, unit: ''   }]
+  [LFO_RATE_CONTROL,
+   { key: 'depth', label: 'Depth', min: 0, max: 1, step: 0.01, unit: '' }]
     .forEach((p) => section.appendChild(makeControlRow(p, lfo[p.key], (v) => { lfo[p.key] = v; })));
 
   // Shape selector
@@ -990,16 +1032,15 @@ function buildFxUI() {
 
 async function start() {
   const startBtn = document.getElementById('startBtn');
-  const status = document.getElementById('status');
 
   try {
-    status.textContent = 'requesting mic…';
+    setStatus('requesting mic…');
+    await ensureAudioEngine();
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     });
 
-    audioCtx = new AudioContext();
-    await audioCtx.audioWorklet.addModule('granular-processor.js');
+    await ensureGranularModule();
 
     const source = audioCtx.createMediaStreamSource(micStream);
     node = new AudioWorkletNode(audioCtx, 'granular-processor', {
@@ -1008,15 +1049,8 @@ async function start() {
       outputChannelCount: [2],
     });
 
-    buildFxNodes();
-    buildGen3Nodes();
     source.connect(node);
     node.connect(fx.input);
-    fx.output.connect(audioCtx.destination);
-    startGen3Scope();
-    GEN3.activeNotes.forEach((entry) => {
-      Object.assign(entry, createGen3Voice(entry.freq));
-    });
 
     node.port.onmessage = (e) => {
       if (e.data && e.data.type === 'viz') drawViz(e.data);
@@ -1029,9 +1063,9 @@ async function start() {
     started = true;
     startBtn.textContent = '■ Stop';
     document.querySelectorAll('.gen-freeze').forEach((btn) => (btn.disabled = false));
-    status.textContent = 'running';
+    setStatus('running');
   } catch (err) {
-    status.textContent = 'error: ' + err.message;
+    setStatus('error: ' + err.message);
     console.error(err);
   }
 }
@@ -1044,6 +1078,7 @@ function stop() {
   if (micStream) micStream.getTracks().forEach((t) => t.stop());
   if (audioCtx) audioCtx.close();
   audioCtx = node = micStream = fx = null;
+  granularModulePromise = null;
   started = false;
 
   // Reset freeze state for both generators.
@@ -1055,7 +1090,7 @@ function stop() {
     btn.disabled = true;
     btn.classList.remove('active');
   });
-  document.getElementById('status').textContent = 'idle';
+  setStatus('idle');
   drawGenVizEmpty(0);
   drawGenVizEmpty(1);
   drawGenVizEmpty(2);
