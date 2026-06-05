@@ -39,17 +39,136 @@ async function ensureGranularModule() {
 // ─── Visualizer (per-generator) ────────────────────────────────────────────
 
 const genVizCanvases = [null, null, null];
-const genVizCtxs    = [null, null, null];
-const genVizW       = [0, 0, 0];
-const genVizH       = [0, 0, 0];
+const genVizCtxs = [null, null, null];
+const genVizW = [0, 0, 0];
+const genVizH = [0, 0, 0];
+const genVizStates = [0, 1].map(() => ({
+  seeded: false,
+  frozen: false,
+  currentPosX: 1,
+  targetPosX: 1,
+  currentSprayNorm: 0,
+  targetSprayNorm: 0,
+  currentPeak: null,
+  targetPeak: null,
+  currentTeal: null,
+  targetTeal: null,
+  currentBass: null,
+  targetBass: null,
+  scratchPeak: null,
+  scratchTeal: null,
+  scratchBass: null,
+}));
+let genVizFrame = null;
 
 const GEN_VIZ = [
   { line: '#3cb870', spray: 'rgba(60,184,112,0.12)' },
   { line: '#8b6ed4', spray: 'rgba(139,110,212,0.12)' },
 ];
+const GEN_VIZ_SMOOTH = { attack: 0.38, release: 0.16, motion: 0.24 };
+const GEN_VIZ_VIEW = { zoomOut: 3.2, peakMix: 0.6, rmsMix: 0.4 };
+
+function normParam(value, min, max) {
+  return Math.max(0, Math.min(1, (value - min) / (max - min)));
+}
+
+function drawGenParamFeedback(c, gi, W, H, cx, sw) {
+  const params = state[gi];
+  if (!params) return;
+  const densityNorm = normParam(params.density, 1, 100);
+  const grainNorm = normParam(params.grainSizeMs, 5, 500);
+  const spreadNorm = normParam(params.spread, 0, 1);
+  const gainNorm = normParam(params.gain, 0, 2);
+  const jitterNorm = normParam(params.pitchJitter, 0, 12);
+  const pitchNorm = params.pitch / 24;
+  const bodyHalf = 4 + grainNorm * 26;
+  const stereoHalf = bodyHalf + 6 + spreadNorm * 26;
+  const pitchLift = pitchNorm * (H * 0.18);
+  const markerX = Math.round(cx) + 0.5;
+  const centerY = H * 0.5 - pitchLift;
+  const densityBars = 2 + Math.round(densityNorm * 6);
+  const wingAlpha = 0.08 + gainNorm * 0.14;
+
+  c.save();
+
+  if (spreadNorm > 0.01) {
+    const wing = c.createLinearGradient(cx - stereoHalf, 0, cx + stereoHalf, 0);
+    wing.addColorStop(0, 'rgba(0,0,0,0)');
+    wing.addColorStop(0.5, `rgba(255,255,255,${wingAlpha})`);
+    wing.addColorStop(1, 'rgba(0,0,0,0)');
+    c.fillStyle = wing;
+    c.fillRect(cx - stereoHalf, centerY - 2.5, stereoHalf * 2, 5);
+  }
+
+  if (grainNorm > 0.01) {
+    c.strokeStyle = `rgba(255,255,255,${0.08 + grainNorm * 0.14})`;
+    c.lineWidth = 1;
+    c.strokeRect(cx - bodyHalf, centerY - H * 0.28, bodyHalf * 2, H * 0.56);
+  }
+
+  if (sw > 0.5) {
+    c.strokeStyle = `rgba(255,255,255,${0.06 + normParam(params.spraySec, 0, 2) * 0.16})`;
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(cx - sw, centerY);
+    c.lineTo(cx, centerY);
+    c.stroke();
+  }
+
+  if (jitterNorm > 0.01) {
+    c.strokeStyle = `rgba(255,255,255,${0.08 + jitterNorm * 0.16})`;
+    c.lineWidth = 1;
+    c.setLineDash([1.5, 2.5]);
+    c.beginPath();
+    c.moveTo(cx - bodyHalf - jitterNorm * 14, centerY - H * 0.18);
+    c.lineTo(cx + bodyHalf + jitterNorm * 14, centerY - H * 0.18);
+    c.moveTo(cx - bodyHalf - jitterNorm * 14, centerY + H * 0.18);
+    c.lineTo(cx + bodyHalf + jitterNorm * 14, centerY + H * 0.18);
+    c.stroke();
+    c.setLineDash([]);
+  }
+
+  c.strokeStyle = `rgba(255,255,255,${0.16 + gainNorm * 0.18})`;
+  c.lineWidth = 1;
+  for (let i = 0; i < densityBars; i++) {
+    const t = densityBars === 1 ? 0.5 : i / (densityBars - 1);
+    const x = cx - bodyHalf + t * bodyHalf * 2;
+    c.beginPath();
+    c.moveTo(x, centerY - 4 - densityNorm * 6);
+    c.lineTo(x, centerY + 4 + densityNorm * 6);
+    c.stroke();
+  }
+
+  if (Math.abs(pitchNorm) > 0.01) {
+    c.fillStyle = `rgba(255,255,255,${0.16 + Math.abs(pitchNorm) * 0.22})`;
+    c.beginPath();
+    if (pitchNorm > 0) {
+      c.moveTo(cx, centerY - H * 0.24 - 5);
+      c.lineTo(cx - 4, centerY - H * 0.24 + 1);
+      c.lineTo(cx + 4, centerY - H * 0.24 + 1);
+    } else {
+      c.moveTo(cx, centerY + H * 0.24 + 5);
+      c.lineTo(cx - 4, centerY + H * 0.24 - 1);
+      c.lineTo(cx + 4, centerY + H * 0.24 - 1);
+    }
+    c.closePath();
+    c.fill();
+  }
+
+  c.strokeStyle = GEN_VIZ[gi].line;
+  c.lineWidth = 1.5 + gainNorm * 1.5;
+  c.beginPath();
+  c.moveTo(markerX, centerY - H * 0.34);
+  c.lineTo(markerX, centerY + H * 0.34);
+  c.stroke();
+
+  c.restore();
+}
 
 function drawGenVizEmpty(gi) {
-  const c = genVizCtxs[gi], W = genVizW[gi], H = genVizH[gi];
+  const c = genVizCtxs[gi],
+    W = genVizW[gi],
+    H = genVizH[gi];
   if (!c || !W || !H) return;
   c.fillStyle = '#141414';
   c.fillRect(0, 0, W, H);
@@ -57,21 +176,143 @@ function drawGenVizEmpty(gi) {
   c.fillRect(0, H / 2 - 0.5, W, 1);
 }
 
-function drawGenViz(gi, { waveform, posX, sprayNorm, frozen }) {
-  const c = genVizCtxs[gi], W = genVizW[gi], H = genVizH[gi];
+function ensureGenVizState(gi) {
+  const state = genVizStates[gi];
+  const W = genVizW[gi];
+  if (!W) return null;
+  if (state.targetPeak && state.targetPeak.length === W) return state;
+  state.currentPeak = new Float32Array(W);
+  state.targetPeak = new Float32Array(W);
+  state.currentTeal = new Float32Array(W);
+  state.targetTeal = new Float32Array(W);
+  state.currentBass = new Float32Array(W);
+  state.targetBass = new Float32Array(W);
+  state.scratchPeak = new Float32Array(W);
+  state.scratchTeal = new Float32Array(W);
+  state.scratchBass = new Float32Array(W);
+  state.seeded = false;
+  return state;
+}
+
+function resetGenVizState(gi) {
+  const state = genVizStates[gi];
+  state.seeded = false;
+  state.frozen = false;
+  state.currentPosX = 1;
+  state.targetPosX = 1;
+  state.currentSprayNorm = 0;
+  state.targetSprayNorm = 0;
+  state.currentPeak = null;
+  state.targetPeak = null;
+  state.currentTeal = null;
+  state.targetTeal = null;
+  state.currentBass = null;
+  state.targetBass = null;
+  state.scratchPeak = null;
+  state.scratchTeal = null;
+  state.scratchBass = null;
+}
+
+function updateGenVizState(gi, { waveform, posX, sprayNorm, frozen }) {
+  const state = ensureGenVizState(gi);
+  const W = genVizW[gi],
+    H = genVizH[gi];
+  if (!state || !W || !H) return;
+  const N = waveform.length;
+  const maxH = H * 0.48;
+
+  state.frozen = frozen;
+  state.targetPosX = posX;
+  state.targetSprayNorm = sprayNorm;
+  state.targetPeak.fill(0);
+  state.targetTeal.fill(0);
+  state.targetBass.fill(0);
+  const binWidth = N / W;
+  const halfExtra = Math.max(1, Math.floor(binWidth * (GEN_VIZ_VIEW.zoomOut - 1) * 0.5));
+
+  for (let x = 0; x < W; x++) {
+    const i0 = Math.max(0, Math.floor((x * N) / W) - halfExtra);
+    const i1 = Math.min(N - 1, Math.floor(((x + 1) * N) / W) + 1 + halfExtra);
+    const n = Math.max(1, i1 - i0 + 1);
+    let peak = 0,
+      sumAbs = 0;
+    for (let i = i0; i <= i1; i++) {
+      const v = Math.abs(waveform[i]);
+      if (v > peak) peak = v;
+      sumAbs += v;
+    }
+    if (peak < 0.001) continue;
+    const rms = sumAbs / n;
+    const body = peak * GEN_VIZ_VIEW.peakMix + rms * GEN_VIZ_VIEW.rmsMix;
+    const p = Math.pow(body, 0.68) * maxH;
+    state.targetPeak[x] = p;
+    state.targetTeal[x] = p * 0.68;
+    state.targetBass[x] = Math.min(Math.pow(rms, 0.65) * maxH * 1.4, p * 0.48);
+  }
+
+  for (let x = 0; x < W; x++) {
+    const left = x > 0 ? x - 1 : x;
+    const right = x < W - 1 ? x + 1 : x;
+    state.scratchPeak[x] = state.targetPeak[left] * 0.22 + state.targetPeak[x] * 0.56 + state.targetPeak[right] * 0.22;
+    state.scratchTeal[x] = state.targetTeal[left] * 0.22 + state.targetTeal[x] * 0.56 + state.targetTeal[right] * 0.22;
+    state.scratchBass[x] = state.targetBass[left] * 0.22 + state.targetBass[x] * 0.56 + state.targetBass[right] * 0.22;
+  }
+  state.targetPeak.set(state.scratchPeak);
+  state.targetTeal.set(state.scratchTeal);
+  state.targetBass.set(state.scratchBass);
+
+  if (!state.seeded) {
+    state.currentPeak.set(state.targetPeak);
+    state.currentTeal.set(state.targetTeal);
+    state.currentBass.set(state.targetBass);
+    state.currentPosX = state.targetPosX;
+    state.currentSprayNorm = state.targetSprayNorm;
+    state.seeded = true;
+  }
+}
+
+function stepGenVizState(gi) {
+  const state = genVizStates[gi];
+  if (!state.seeded || !state.currentPeak) return;
+  const { attack, release, motion } = GEN_VIZ_SMOOTH;
+
+  for (let x = 0; x < state.currentPeak.length; x++) {
+    const peakTarget = state.targetPeak[x];
+    const tealTarget = state.targetTeal[x];
+    const bassTarget = state.targetBass[x];
+
+    state.currentPeak[x] +=
+      (peakTarget - state.currentPeak[x]) * (peakTarget > state.currentPeak[x] ? attack : release);
+    state.currentTeal[x] +=
+      (tealTarget - state.currentTeal[x]) * (tealTarget > state.currentTeal[x] ? attack : release);
+    state.currentBass[x] +=
+      (bassTarget - state.currentBass[x]) * (bassTarget > state.currentBass[x] ? attack : release);
+  }
+
+  state.currentPosX += (state.targetPosX - state.currentPosX) * motion;
+  state.currentSprayNorm += (state.targetSprayNorm - state.currentSprayNorm) * motion;
+}
+
+function renderGenViz(gi) {
+  const c = genVizCtxs[gi],
+    W = genVizW[gi],
+    H = genVizH[gi];
   if (!c || !W || !H) return;
+  const state = genVizStates[gi];
+  if (!state.seeded || !state.currentPeak) {
+    drawGenVizEmpty(gi);
+    return;
+  }
   const col = GEN_VIZ[gi];
   const mid = H / 2;
-  const N   = waveform.length;
-  const maxH = H * 0.48; // max waveform half-height
 
   // Background
-  c.fillStyle = frozen ? '#131824' : '#141414';
+  c.fillStyle = state.frozen ? '#131824' : '#141414';
   c.fillRect(0, 0, W, H);
 
   // Spray band (behind waveform)
-  const cx = posX * W;
-  const sw = sprayNorm * W;
+  const cx = state.currentPosX * W;
+  const sw = state.currentSprayNorm * W;
   if (sw > 0) {
     const g = c.createLinearGradient(cx - sw, 0, cx, 0);
     g.addColorStop(0, 'rgba(0,0,0,0)');
@@ -80,55 +321,40 @@ function drawGenViz(gi, { waveform, posX, sprayNorm, frozen }) {
     c.fillRect(cx - sw, 0, sw, H);
   }
 
-  // Compute per-column heights (one pass over data)
-  const pH = new Float32Array(W); // peak band
-  const tH = new Float32Array(W); // teal band
-  const yH = new Float32Array(W); // yellow/bass band
-
-  for (let x = 0; x < W; x++) {
-    const i0 = Math.floor(x * N / W);
-    const i1 = Math.min(N - 1, Math.floor((x + 1) * N / W) + 1);
-    const n  = Math.max(1, i1 - i0 + 1);
-    let peak = 0, sumAbs = 0;
-    for (let i = i0; i <= i1; i++) {
-      const v = Math.abs(waveform[i]);
-      if (v > peak) peak = v;
-      sumAbs += v;
-    }
-    if (peak < 0.001) continue;
-    const rms = sumAbs / n;
-    // Gamma 0.65: boosts quiet content, compresses peaks (like Traktor log scale)
-    const p = Math.pow(peak, 0.65) * maxH;
-    pH[x] = p;
-    tH[x] = p * 0.68;
-    yH[x] = Math.min(Math.pow(rms, 0.65) * maxH * 1.4, p * 0.48);
-  }
-
   // Blue — outer/peak layer (draw first, widest)
-  c.fillStyle = frozen ? '#3a52a0' : '#3490d8';
+  c.fillStyle = state.frozen ? '#3a52a0' : '#3490d8';
   c.beginPath();
-  for (let x = 0; x < W; x++) { if (pH[x] > 0.5) c.rect(x, mid - pH[x], 1, pH[x] * 2); }
+  for (let x = 0; x < W; x++) {
+    if (state.currentPeak[x] > 0.5)
+      c.rect(x, mid - state.currentPeak[x], 1, state.currentPeak[x] * 2);
+  }
   c.fill();
 
   // Teal — mid layer
-  c.fillStyle = frozen ? '#285e72' : '#16b8a8';
+  c.fillStyle = state.frozen ? '#285e72' : '#16b8a8';
   c.beginPath();
-  for (let x = 0; x < W; x++) { if (tH[x] > 0.5) c.rect(x, mid - tH[x], 1, tH[x] * 2); }
+  for (let x = 0; x < W; x++) {
+    if (state.currentTeal[x] > 0.5)
+      c.rect(x, mid - state.currentTeal[x], 1, state.currentTeal[x] * 2);
+  }
   c.fill();
 
   // Yellow — inner/bass layer (RMS-based, represents sustained low-freq content)
-  c.fillStyle = frozen ? '#6e5818' : '#c4a018';
+  c.fillStyle = state.frozen ? '#6e5818' : '#c4a018';
   c.beginPath();
-  for (let x = 0; x < W; x++) { if (yH[x] > 0.5) c.rect(x, mid - yH[x], 1, yH[x] * 2); }
+  for (let x = 0; x < W; x++) {
+    if (state.currentBass[x] > 0.5)
+      c.rect(x, mid - state.currentBass[x], 1, state.currentBass[x] * 2);
+  }
   c.fill();
 
   // Bright peak caps (1px line at top and bottom of each column)
-  c.fillStyle = frozen ? 'rgba(140,165,220,0.65)' : 'rgba(200,238,255,0.9)';
+  c.fillStyle = state.frozen ? 'rgba(140,165,220,0.65)' : 'rgba(200,238,255,0.9)';
   c.beginPath();
   for (let x = 0; x < W; x++) {
-    if (pH[x] > 2) {
-      c.rect(x, mid - pH[x],     1, 1);
-      c.rect(x, mid + pH[x] - 1, 1, 1);
+    if (state.currentPeak[x] > 2) {
+      c.rect(x, mid - state.currentPeak[x], 1, 1);
+      c.rect(x, mid + state.currentPeak[x] - 1, 1, 1);
     }
   }
   c.fill();
@@ -137,10 +363,12 @@ function drawGenViz(gi, { waveform, posX, sprayNorm, frozen }) {
   c.fillStyle = '#252525';
   c.fillRect(0, mid - 0.5, W, 1);
 
+  drawGenParamFeedback(c, gi, W, H, cx, sw);
+
   // Position marker
   c.strokeStyle = col.line;
   c.lineWidth = 1.5;
-  c.setLineDash(frozen ? [4, 3] : []);
+  c.setLineDash(state.frozen ? [4, 3] : []);
   c.beginPath();
   c.moveTo(Math.round(cx) + 0.5, 0);
   c.lineTo(Math.round(cx) + 0.5, H);
@@ -148,45 +376,84 @@ function drawGenViz(gi, { waveform, posX, sprayNorm, frozen }) {
   c.setLineDash([]);
 
   // Write-head (hidden when frozen)
-  if (!frozen) {
+  if (!state.frozen) {
     c.strokeStyle = 'rgba(255,255,255,0.1)';
     c.lineWidth = 1;
-    c.beginPath(); c.moveTo(W - 0.5, 0); c.lineTo(W - 0.5, H); c.stroke();
+    c.beginPath();
+    c.moveTo(W - 0.5, 0);
+    c.lineTo(W - 0.5, H);
+    c.stroke();
   }
 
   // FROZEN label
-  if (frozen) {
+  if (state.frozen) {
     c.fillStyle = 'rgba(120,150,230,0.75)';
     c.font = 'bold 8px ui-monospace, monospace';
     c.fillText('FROZEN', W - 47, 11);
   }
 }
 
+function genVizLoop() {
+  for (let gi = 0; gi < 2; gi++) {
+    stepGenVizState(gi);
+    renderGenViz(gi);
+  }
+  genVizFrame = requestAnimationFrame(genVizLoop);
+}
+
+function startGenVizLoop() {
+  if (!genVizFrame) genVizFrame = requestAnimationFrame(genVizLoop);
+}
+
+function stopGenVizLoop() {
+  if (genVizFrame) {
+    cancelAnimationFrame(genVizFrame);
+    genVizFrame = null;
+  }
+}
+
 function drawViz({ gens }) {
-  gens.forEach((genData, gi) => drawGenViz(gi, genData));
+  gens.forEach((genData, gi) => updateGenVizState(gi, genData));
 }
 
 const PARAMS = [
-  { key: 'grainSizeMs', label: 'Grain size', min: 5,   max: 500, step: 1,    unit: 'ms'     },
-  { key: 'density',     label: 'Density',    min: 1,   max: 100, step: 1,    unit: '/s'     },
-  { key: 'positionSec', label: 'Position',   min: 0,   max: 9,   step: 0.01, unit: 's back' },
-  { key: 'spraySec',    label: 'Spray',      min: 0,   max: 2,   step: 0.01, unit: 's'      },
-  { key: 'pitch',       label: 'Pitch',      min: -24, max: 24,  step: 1,    unit: 'st'     },
-  { key: 'pitchJitter', label: 'Pitch jitter', min: 0, max: 12,  step: 0.5,  unit: 'st'     },
-  { key: 'spread',      label: 'Stereo spread', min: 0, max: 1,  step: 0.01, unit: ''       },
-  { key: 'gain',        label: 'Output gain', min: 0,  max: 2,   step: 0.01, unit: ''       },
+  { key: 'grainSizeMs', label: 'Grain size', min: 5, max: 500, step: 1, unit: 'ms' },
+  { key: 'density', label: 'Density', min: 1, max: 100, step: 1, unit: '/s' },
+  { key: 'positionSec', label: 'Position', min: 0, max: 9, step: 0.01, unit: 's back' },
+  { key: 'spraySec', label: 'Spray', min: 0, max: 2, step: 0.01, unit: 's' },
+  { key: 'pitch', label: 'Pitch', min: -24, max: 24, step: 1, unit: 'st' },
+  { key: 'pitchJitter', label: 'Pitch jitter', min: 0, max: 12, step: 0.5, unit: 'st' },
+  { key: 'spread', label: 'Stereo spread', min: 0, max: 1, step: 0.01, unit: '' },
+  { key: 'gain', label: 'Output gain', min: 0, max: 2, step: 0.01, unit: '' },
 ];
 
 // Slightly different defaults for gen 1 so independence is immediately audible.
 const GEN_DEFAULTS = [
-  { grainSizeMs: 120, density: 20, positionSec: 0.5, spraySec: 0.05, pitch:  0, pitchJitter: 0, spread: 0.5, gain: 0.8, freeze: false },
-  { grainSizeMs:  80, density: 15, positionSec: 1.2, spraySec: 0.10, pitch:  7, pitchJitter: 2, spread: 0.7, gain: 0.6, freeze: false },
+  {
+    grainSizeMs: 120,
+    density: 20,
+    positionSec: 0.5,
+    spraySec: 0.05,
+    pitch: 0,
+    pitchJitter: 0,
+    spread: 0.5,
+    gain: 0.8,
+    freeze: false,
+  },
+  {
+    grainSizeMs: 80,
+    density: 15,
+    positionSec: 1.2,
+    spraySec: 0.1,
+    pitch: 7,
+    pitchJitter: 2,
+    spread: 0.7,
+    gain: 0.6,
+    freeze: false,
+  },
 ];
 
-const state = [
-  { ...GEN_DEFAULTS[0] },
-  { ...GEN_DEFAULTS[1] },
-];
+const state = [{ ...GEN_DEFAULTS[0] }, { ...GEN_DEFAULTS[1] }];
 
 function sendParams(genIdx) {
   if (!node) return;
@@ -198,8 +465,10 @@ function sendParams(genIdx) {
       if (!lfo) return;
       const scaled = lfo.currentValue * lfo.depth;
       const half = (paramDef.max - paramDef.min) * 0.5;
-      effective[key] = Math.max(paramDef.min, Math.min(paramDef.max,
-        effective[key] + scaled * half));
+      effective[key] = Math.max(
+        paramDef.min,
+        Math.min(paramDef.max, effective[key] + scaled * half),
+      );
     });
   }
   node.port.postMessage({ type: 'params', gen: genIdx, value: effective });
@@ -256,26 +525,30 @@ function makeControlRow(p, initialValue, onInput, lfoCycle = null) {
 
 function makeKnob(p, initialValue, onInput) {
   const NS = 'http://www.w3.org/2000/svg';
-  const VB = 40, cx = 20, cy = 20, r = 15, sw = 3;
-  const S = -135, E = 135; // 7 o'clock → 5 o'clock (270° sweep)
+  const VB = 40,
+    cx = 20,
+    cy = 20,
+    r = 15,
+    sw = 3;
+  const S = -135,
+    E = 135; // 7 o'clock → 5 o'clock (270° sweep)
   const clamp01 = (n) => Math.max(0, Math.min(1, n));
 
   const decimals = (p.step.toString().split('.')[1] || '').length;
   const rawToNorm = p.toNorm || ((v) => (v - p.min) / (p.max - p.min));
   const rawFromNorm = p.fromNorm || ((n) => p.min + clamp01(n) * (p.max - p.min));
-  const toNorm  = (v) => clamp01(rawToNorm(v));
-  const toValue = (n) => parseFloat(
-    (Math.round(rawFromNorm(n) / p.step) * p.step)
-      .toFixed(decimals)
-  );
+  const toNorm = (v) => clamp01(rawToNorm(v));
+  const toValue = (n) =>
+    parseFloat((Math.round(rawFromNorm(n) / p.step) * p.step).toFixed(decimals));
 
   function polar(deg) {
-    const rad = (deg - 90) * Math.PI / 180;
+    const rad = ((deg - 90) * Math.PI) / 180;
     return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
   }
   function arc(a, b) {
     if (b - a < 0.5) return '';
-    const [sx, sy] = polar(a), [ex, ey] = polar(b);
+    const [sx, sy] = polar(a),
+      [ex, ey] = polar(b);
     return `M${sx.toFixed(2)},${sy.toFixed(2)}A${r},${r},0,${b - a > 180 ? 1 : 0},1,${ex.toFixed(2)},${ey.toFixed(2)}`;
   }
 
@@ -297,7 +570,9 @@ function makeKnob(p, initialValue, onInput) {
   valArc.classList.add('knob-value');
 
   const body = document.createElementNS(NS, 'circle');
-  body.setAttribute('cx', cx); body.setAttribute('cy', cy); body.setAttribute('r', r - 5);
+  body.setAttribute('cx', cx);
+  body.setAttribute('cy', cy);
+  body.setAttribute('r', r - 5);
   body.classList.add('knob-body');
 
   const dot = document.createElementNS(NS, 'circle');
@@ -312,7 +587,8 @@ function makeKnob(p, initialValue, onInput) {
     norm = clamp01(n);
     const deg = S + norm * (E - S);
     valArc.setAttribute('d', norm < 0.005 ? '' : arc(S, deg));
-    const dr = r - sw / 2 - 1.5, rad = (deg - 90) * Math.PI / 180;
+    const dr = r - sw / 2 - 1.5,
+      rad = ((deg - 90) * Math.PI) / 180;
     dot.setAttribute('cx', (cx + dr * Math.cos(rad)).toFixed(2));
     dot.setAttribute('cy', (cy + dr * Math.sin(rad)).toFixed(2));
   }
@@ -320,29 +596,40 @@ function makeKnob(p, initialValue, onInput) {
   render(norm);
 
   // Drag (up = increase, Shift = fine)
-  let y0 = 0, n0 = 0;
+  let y0 = 0,
+    n0 = 0;
   svg.addEventListener('pointerdown', (e) => {
     e.preventDefault();
-    y0 = e.clientY; n0 = norm;
+    y0 = e.clientY;
+    n0 = norm;
     svg.setPointerCapture(e.pointerId);
     svg.classList.add('knob--drag');
   });
   svg.addEventListener('pointermove', (e) => {
     if (!svg.hasPointerCapture(e.pointerId)) return;
     const n = clamp01(n0 + (y0 - e.clientY) * (e.shiftKey ? 0.001 : 0.004));
-    render(n); onInput(toValue(n));
+    render(n);
+    onInput(toValue(n));
   });
   svg.addEventListener('pointerup', () => svg.classList.remove('knob--drag'));
 
   // Scroll wheel — one step per tick
-  svg.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    const n = clamp01(norm - Math.sign(e.deltaY) * p.step / (p.max - p.min));
-    render(n); onInput(toValue(n));
-  }, { passive: false });
+  svg.addEventListener(
+    'wheel',
+    (e) => {
+      e.preventDefault();
+      const n = clamp01(norm - (Math.sign(e.deltaY) * p.step) / (p.max - p.min));
+      render(n);
+      onInput(toValue(n));
+    },
+    { passive: false },
+  );
 
   // Double-click to reset to initial value
-  svg.addEventListener('dblclick', () => { render(toNorm(initialValue)); onInput(initialValue); });
+  svg.addEventListener('dblclick', () => {
+    render(toNorm(initialValue));
+    onInput(initialValue);
+  });
 
   return svg;
 }
@@ -382,9 +669,10 @@ function buildGeneratorPanel(genIdx) {
     const dpr = window.devicePixelRatio || 1;
     genVizW[genIdx] = vizCanvas.clientWidth;
     genVizH[genIdx] = vizCanvas.clientHeight;
-    vizCanvas.width  = genVizW[genIdx] * dpr;
+    vizCanvas.width = genVizW[genIdx] * dpr;
     vizCanvas.height = genVizH[genIdx] * dpr;
     genVizCtxs[genIdx].setTransform(dpr, 0, 0, dpr, 0, 0);
+    resetGenVizState(genIdx);
     drawGenVizEmpty(genIdx);
   }).observe(vizCanvas);
   panel.appendChild(vizCanvas);
@@ -393,10 +681,17 @@ function buildGeneratorPanel(genIdx) {
   const rows = document.createElement('div');
   rows.className = 'gen-controls';
   PARAMS.forEach((p) => {
-    rows.appendChild(makeControlRow(p, defaults[p.key], (v) => {
-      state[genIdx][p.key] = v;
-      sendParams(genIdx);
-    }, () => cycleLFOMap(genIdx, p.key)));
+    rows.appendChild(
+      makeControlRow(
+        p,
+        defaults[p.key],
+        (v) => {
+          state[genIdx][p.key] = v;
+          sendParams(genIdx);
+        },
+        () => cycleLFOMap(genIdx, p.key),
+      ),
+    );
   });
 
   panel.appendChild(rows);
@@ -412,7 +707,7 @@ function buildUI() {
 
 // ─── Gen 3: Oscillator ─────────────────────────────────────────────────────
 
-const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 // C1–B5 (MIDI 24–83), highest first so piano roll reads top=high
 const OSC_NOTES = [];
 for (let m = 83; m >= 24; m--) {
@@ -422,7 +717,7 @@ for (let m = 83; m >= 24; m--) {
     midi: m,
     label: `${name}${oct}`,
     freq: 440 * Math.pow(2, (m - 69) / 12),
-    isBlack: [1,3,6,8,10].includes(m % 12),
+    isBlack: [1, 3, 6, 8, 10].includes(m % 12),
     isC: m % 12 === 0,
   });
 }
@@ -432,7 +727,7 @@ const OSC_NOTE_GRID = Array.from(
     if (!octaves.has(oct)) octaves.set(oct, []);
     octaves.get(oct).push(note);
     return octaves;
-  }, new Map())
+  }, new Map()),
 )
   .sort((a, b) => b[0] - a[0])
   .map(([octave, notes]) => ({ octave, notes: notes.slice().reverse() }));
@@ -442,10 +737,10 @@ const GEN3 = {
   type: 'sine',
   gain: 0.5,
   detune: 0,
-  attack: 0.02,
+  attack: 0.3,
   decay: 0.18,
   sustain: 0.7,
-  release: 0.3,
+  release: 0.5,
   activeNotes: new Map(),
   releasingVoices: new Set(),
   nodes: null,
@@ -478,7 +773,9 @@ function stopGen3Voice(voice) {
   if (!voice) return;
   clearGen3ReleaseTimer(voice);
   if (voice.source) {
-    try { voice.source.stop(); } catch(e) {}
+    try {
+      voice.source.stop();
+    } catch (e) {}
     voice.source.disconnect();
     voice.source = null;
   }
@@ -577,7 +874,7 @@ function removeGen3Note(midi) {
 }
 
 function stopAllGen3Notes() {
-  GEN3.activeNotes.forEach(entry => {
+  GEN3.activeNotes.forEach((entry) => {
     stopGen3Voice(entry);
   });
   GEN3.releasingVoices.forEach((voice) => {
@@ -597,7 +894,9 @@ function restartAllGen3Notes() {
 }
 
 function drawGen3Scope() {
-  const c = genVizCtxs[2], W = genVizW[2], H = genVizH[2];
+  const c = genVizCtxs[2],
+    W = genVizW[2],
+    H = genVizH[2];
   if (!c || !W || !H) return;
   const mid = H / 2;
   c.fillStyle = '#141414';
@@ -610,12 +909,12 @@ function drawGen3Scope() {
   const data = new Float32Array(analyser.frequencyBinCount);
   analyser.getFloatTimeDomainData(data);
 
-  c.strokeStyle = (GEN3.activeNotes.size + GEN3.releasingVoices.size) > 0 ? '#40b8d0' : '#3a3a3a';
+  c.strokeStyle = GEN3.activeNotes.size + GEN3.releasingVoices.size > 0 ? '#40b8d0' : '#3a3a3a';
   c.lineWidth = 1.5;
   c.beginPath();
   const N = data.length;
   for (let x = 0; x < W; x++) {
-    const v = data[Math.floor(x * N / W)];
+    const v = data[Math.floor((x * N) / W)];
     const y = mid - v * H * 0.44;
     x === 0 ? c.moveTo(x, y) : c.lineTo(x, y);
   }
@@ -626,8 +925,15 @@ function gen3ScopeLoop() {
   drawGen3Scope();
   gen3ScopeFrame = requestAnimationFrame(gen3ScopeLoop);
 }
-function startGen3Scope() { if (!gen3ScopeFrame) gen3ScopeFrame = requestAnimationFrame(gen3ScopeLoop); }
-function stopGen3Scope()  { if (gen3ScopeFrame) { cancelAnimationFrame(gen3ScopeFrame); gen3ScopeFrame = null; } }
+function startGen3Scope() {
+  if (!gen3ScopeFrame) gen3ScopeFrame = requestAnimationFrame(gen3ScopeLoop);
+}
+function stopGen3Scope() {
+  if (gen3ScopeFrame) {
+    cancelAnimationFrame(gen3ScopeFrame);
+    gen3ScopeFrame = null;
+  }
+}
 
 function buildPianoRoll() {
   const wrap = document.createElement('div');
@@ -682,13 +988,19 @@ function buildOscPanel() {
 
   const shapes = document.createElement('div');
   shapes.className = 'osc-shapes';
-  [['sine','SIN'],['triangle','TRI'],['square','SQR'],['sawtooth','SAW'],['noise','NOI']].forEach(([type, lbl]) => {
+  [
+    ['sine', 'SIN'],
+    ['triangle', 'TRI'],
+    ['square', 'SQR'],
+    ['sawtooth', 'SAW'],
+    ['noise', 'NOI'],
+  ].forEach(([type, lbl]) => {
     const btn = document.createElement('button');
     btn.className = 'osc-shape' + (GEN3.type === type ? ' active' : '');
     btn.textContent = lbl;
     btn.addEventListener('click', () => {
       GEN3.type = type;
-      shapes.querySelectorAll('.osc-shape').forEach(b => b.classList.remove('active'));
+      shapes.querySelectorAll('.osc-shape').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
       restartAllGen3Notes();
     });
@@ -709,7 +1021,7 @@ function buildOscPanel() {
     const dpr = window.devicePixelRatio || 1;
     genVizW[2] = scopeCanvas.clientWidth;
     genVizH[2] = scopeCanvas.clientHeight;
-    scopeCanvas.width  = genVizW[2] * dpr;
+    scopeCanvas.width = genVizW[2] * dpr;
     scopeCanvas.height = genVizH[2] * dpr;
     genVizCtxs[2].setTransform(dpr, 0, 0, dpr, 0, 0);
     drawGenVizEmpty(2);
@@ -722,22 +1034,26 @@ function buildOscPanel() {
   // Controls: gain + detune + ADSR
   const rows = document.createElement('div');
   rows.className = 'gen-controls';
-  [{ key: 'gain',    label: 'Gain',    min: 0,    max: 1,   step: 0.01, unit: '' },
-   { key: 'detune',  label: 'Detune',  min: -100, max: 100, step: 1,    unit: 'ct' },
-   { key: 'attack',  label: 'Attack',  min: 0,    max: 2,   step: 0.01, unit: 's' },
-   { key: 'decay',   label: 'Decay',   min: 0,    max: 2,   step: 0.01, unit: 's' },
-   { key: 'sustain', label: 'Sustain', min: 0,    max: 1,   step: 0.01, unit: '' },
-   { key: 'release', label: 'Release', min: 0,    max: 4,   step: 0.01, unit: 's' }]
-    .forEach((p) => rows.appendChild(makeControlRow(p, GEN3[p.key], (v) => {
-      GEN3[p.key] = v;
-      if (p.key === 'gain' && GEN3.nodes)
-        GEN3.nodes.gain.gain.setValueAtTime(v, audioCtx.currentTime);
-      if (p.key === 'detune' && GEN3.nodes)
-        GEN3.activeNotes.forEach(entry => {
-          if (entry?.source?.detune)
-            entry.source.detune.setValueAtTime(v, audioCtx.currentTime);
-        });
-    })));
+  [
+    { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, unit: '' },
+    { key: 'detune', label: 'Detune', min: -100, max: 100, step: 1, unit: 'ct' },
+    { key: 'attack', label: 'Attack', min: 0, max: 10, step: 0.01, unit: 's' },
+    { key: 'decay', label: 'Decay', min: 0, max: 2, step: 0.01, unit: 's' },
+    { key: 'sustain', label: 'Sustain', min: 0, max: 1, step: 0.01, unit: '' },
+    { key: 'release', label: 'Release', min: 0, max: 10, step: 0.01, unit: 's' },
+  ].forEach((p) =>
+    rows.appendChild(
+      makeControlRow(p, GEN3[p.key], (v) => {
+        GEN3[p.key] = v;
+        if (p.key === 'gain' && GEN3.nodes)
+          GEN3.nodes.gain.gain.setValueAtTime(v, audioCtx.currentTime);
+        if (p.key === 'detune' && GEN3.nodes)
+          GEN3.activeNotes.forEach((entry) => {
+            if (entry?.source?.detune) entry.source.detune.setValueAtTime(v, audioCtx.currentTime);
+          });
+      }),
+    ),
+  );
   panel.appendChild(rows);
   return panel;
 }
@@ -746,35 +1062,38 @@ function buildOscPanel() {
 
 const FX_DEFS = [
   {
-    id: 'delay', label: 'Delay',
+    id: 'delay',
+    label: 'Delay',
     params: [
-      { key: 'time',     label: 'Time',     min: 0,   max: 1,    step: 0.01, value: 0.30, unit: 's' },
-      { key: 'feedback', label: 'Feedback', min: 0,   max: 0.95, step: 0.01, value: 0.35, unit: ''  },
-      { key: 'mix',      label: 'Mix',      min: 0,   max: 1,    step: 0.01, value: 0,    unit: ''  },
+      { key: 'time', label: 'Time', min: 0, max: 1, step: 0.01, value: 0.3, unit: 's' },
+      { key: 'feedback', label: 'Feedback', min: 0, max: 0.95, step: 0.01, value: 0.35, unit: '' },
+      { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
     ],
   },
   {
-    id: 'sat', label: 'Saturation',
+    id: 'sat',
+    label: 'Saturation',
     params: [
       { key: 'drive', label: 'Drive', min: 0, max: 1, step: 0.01, value: 0.3, unit: '' },
-      { key: 'mix',   label: 'Mix',   min: 0, max: 1, step: 0.01, value: 0,   unit: '' },
+      { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
     ],
   },
   {
-    id: 'reverb', label: 'Reverb',
+    id: 'reverb',
+    label: 'Reverb',
     params: [
-      { key: 'size',  label: 'Size',  min: 0.1, max: 5, step: 0.1,  value: 2,   unit: 's' },
-      { key: 'decay', label: 'Decay', min: 0.5, max: 8, step: 0.1,  value: 3,   unit: ''  },
-      { key: 'mix',   label: 'Mix',   min: 0,   max: 1, step: 0.01, value: 0,   unit: ''  },
+      { key: 'size', label: 'Size', min: 0.1, max: 5, step: 0.1, value: 2, unit: 's' },
+      { key: 'decay', label: 'Decay', min: 0.5, max: 8, step: 0.1, value: 3, unit: '' },
+      { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
     ],
   },
 ];
 
 // Source of truth for FX state — applied to audio nodes when they exist.
 const FX = {
-  delay:  { time: 0.30, feedback: 0.35, mix: 0 },
-  sat:    { drive: 0.3,  mix: 0 },
-  reverb: { size: 2,    decay: 3,       mix: 0 },
+  delay: { time: 0.3, feedback: 0.35, mix: 0 },
+  sat: { drive: 0.3, mix: 0 },
+  reverb: { size: 2, decay: 3, mix: 0 },
 };
 
 let fx = null; // audio nodes, created in start(), nulled in stop()
@@ -798,15 +1117,21 @@ const LFO_RATE_CONTROL = {
 };
 // lfoMappings: 'genIdx:paramKey' → { genIdx, key, paramDef, lfoIdx }
 const lfoMappings = new Map();
-let lfoLastTs = 0, lfoAnimFrame = null;
+let lfoLastTs = 0,
+  lfoAnimFrame = null;
 
 function getLFOValue(lfo) {
   switch (lfo.shape) {
-    case 'sine':   return Math.sin(2 * Math.PI * lfo.phase);
-    case 'tri':    return 1 - 4 * Math.abs(lfo.phase - 0.5);
-    case 'square': return lfo.phase < 0.5 ? 1 : -1;
-    case 'saw':    return 2 * lfo.phase - 1;
-    default:       return 0;
+    case 'sine':
+      return Math.sin(2 * Math.PI * lfo.phase);
+    case 'tri':
+      return 1 - 4 * Math.abs(lfo.phase - 0.5);
+    case 'square':
+      return lfo.phase < 0.5 ? 1 : -1;
+    case 'saw':
+      return 2 * lfo.phase - 1;
+    default:
+      return 0;
   }
 }
 
@@ -819,8 +1144,8 @@ function lfoStep(ts) {
     lfo.currentValue = getLFOValue(lfo);
   });
   if (lfoMappings.size > 0) {
-    const gens = new Set([...lfoMappings.values()].map(m => m.genIdx));
-    gens.forEach(gi => sendParams(gi));
+    const gens = new Set([...lfoMappings.values()].map((m) => m.genIdx));
+    gens.forEach((gi) => sendParams(gi));
   }
   lfoAnimFrame = requestAnimationFrame(lfoStep);
 }
@@ -832,7 +1157,10 @@ function startLFOLoop() {
 }
 
 function stopLFOLoop() {
-  if (lfoAnimFrame) { cancelAnimationFrame(lfoAnimFrame); lfoAnimFrame = null; }
+  if (lfoAnimFrame) {
+    cancelAnimationFrame(lfoAnimFrame);
+    lfoAnimFrame = null;
+  }
   LFOS.forEach((lfo) => {
     lfo.phase = 0;
     lfo.currentValue = 0;
@@ -843,7 +1171,12 @@ function cycleLFOMap(genIdx, key) {
   const mapKey = `${genIdx}:${key}`;
   const mapping = lfoMappings.get(mapKey);
   if (!mapping) {
-    lfoMappings.set(mapKey, { genIdx, key, paramDef: PARAMS.find(p => p.key === key), lfoIdx: 0 });
+    lfoMappings.set(mapKey, {
+      genIdx,
+      key,
+      paramDef: PARAMS.find((p) => p.key === key),
+      lfoIdx: 0,
+    });
     sendParams(genIdx);
     return 0;
   }
@@ -867,20 +1200,32 @@ function buildLFOSection(lfoIdx) {
   lbl.textContent = lfo.label;
   section.appendChild(lbl);
 
-  [LFO_RATE_CONTROL,
-   { key: 'depth', label: 'Depth', min: 0, max: 1, step: 0.01, unit: '' }]
-    .forEach((p) => section.appendChild(makeControlRow(p, lfo[p.key], (v) => { lfo[p.key] = v; })));
+  [
+    LFO_RATE_CONTROL,
+    { key: 'depth', label: 'Depth', min: 0, max: 1, step: 0.01, unit: '' },
+  ].forEach((p) =>
+    section.appendChild(
+      makeControlRow(p, lfo[p.key], (v) => {
+        lfo[p.key] = v;
+      }),
+    ),
+  );
 
   // Shape selector
   const shapeRow = document.createElement('div');
   shapeRow.className = 'lfo-shapes';
-  [['sine', 'SIN'], ['tri', 'TRI'], ['square', 'SQR'], ['saw', 'SAW']].forEach(([shape, lbl]) => {
+  [
+    ['sine', 'SIN'],
+    ['tri', 'TRI'],
+    ['square', 'SQR'],
+    ['saw', 'SAW'],
+  ].forEach(([shape, lbl]) => {
     const btn = document.createElement('button');
     btn.className = 'lfo-shape' + (lfo.shape === shape ? ' active' : '');
     btn.textContent = lbl;
     btn.addEventListener('click', () => {
       lfo.shape = shape;
-      shapeRow.querySelectorAll('.lfo-shape').forEach(b => b.classList.remove('active'));
+      shapeRow.querySelectorAll('.lfo-shape').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
     });
     shapeRow.appendChild(btn);
@@ -919,23 +1264,23 @@ function buildFxNodes() {
   const ac = audioCtx;
 
   // ─ Delay (feedback loop) ─
-  const dlyIn  = ac.createGain();
+  const dlyIn = ac.createGain();
   const dlyDry = ac.createGain();
   const dlyWet = ac.createGain();
   const dlyTap = ac.createDelay(2.0);
-  const dlyFb  = ac.createGain();
+  const dlyFb = ac.createGain();
   const dlyOut = ac.createGain();
 
   dlyIn.connect(dlyDry);
   dlyIn.connect(dlyTap);
   dlyTap.connect(dlyFb);
-  dlyFb.connect(dlyTap);   // feedback loop
+  dlyFb.connect(dlyTap); // feedback loop
   dlyTap.connect(dlyWet);
   dlyDry.connect(dlyOut);
   dlyWet.connect(dlyOut);
 
   // ─ Saturation ─
-  const satIn     = ac.createGain();
+  const satIn = ac.createGain();
   const satShaper = ac.createWaveShaper();
   satShaper.oversample = '4x';
   const satDry = ac.createGain();
@@ -949,11 +1294,11 @@ function buildFxNodes() {
   satWet.connect(satOut);
 
   // ─ Reverb ─
-  const rvbIn   = ac.createGain();
+  const rvbIn = ac.createGain();
   const rvbConv = ac.createConvolver();
-  const rvbDry  = ac.createGain();
-  const rvbWet  = ac.createGain();
-  const rvbOut  = ac.createGain();
+  const rvbDry = ac.createGain();
+  const rvbWet = ac.createGain();
+  const rvbOut = ac.createGain();
 
   rvbIn.connect(rvbDry);
   rvbIn.connect(rvbConv);
@@ -966,10 +1311,10 @@ function buildFxNodes() {
   satOut.connect(rvbIn);
 
   fx = {
-    input:  dlyIn,
+    input: dlyIn,
     output: rvbOut,
-    delay:  { tap: dlyTap, fb: dlyFb, dry: dlyDry, wet: dlyWet },
-    sat:    { shaper: satShaper, dry: satDry, wet: satWet },
+    delay: { tap: dlyTap, fb: dlyFb, dry: dlyDry, wet: dlyWet },
+    sat: { shaper: satShaper, dry: satDry, wet: satWet },
     reverb: { conv: rvbConv, dry: rvbDry, wet: rvbWet },
   };
 
@@ -979,22 +1324,30 @@ function buildFxNodes() {
 function applyFx(id, key, val) {
   if (!fx) return;
   if (id === 'delay') {
-    if (key === 'time')     fx.delay.tap.delayTime.setTargetAtTime(val, audioCtx.currentTime, 0.02);
-    if (key === 'feedback') fx.delay.fb.gain.setTargetAtTime(Math.min(0.98, val), audioCtx.currentTime, 0.02);
-    if (key === 'mix')      { fx.delay.wet.gain.value = val; fx.delay.dry.gain.value = 1 - val; }
+    if (key === 'time') fx.delay.tap.delayTime.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'feedback')
+      fx.delay.fb.gain.setTargetAtTime(Math.min(0.98, val), audioCtx.currentTime, 0.02);
+    if (key === 'mix') {
+      fx.delay.wet.gain.value = val;
+      fx.delay.dry.gain.value = 1 - val;
+    }
   } else if (id === 'sat') {
-    if (key === 'drive')    fx.sat.shaper.curve = makeSatCurve(val);
-    if (key === 'mix')      { fx.sat.wet.gain.value = val; fx.sat.dry.gain.value = 1 - val; }
+    if (key === 'drive') fx.sat.shaper.curve = makeSatCurve(val);
+    if (key === 'mix') {
+      fx.sat.wet.gain.value = val;
+      fx.sat.dry.gain.value = 1 - val;
+    }
   } else if (id === 'reverb') {
     if (key === 'size' || key === 'decay') fx.reverb.conv.buffer = makeReverbIR();
-    if (key === 'mix')                     { fx.reverb.wet.gain.value = val; fx.reverb.dry.gain.value = 1 - val; }
+    if (key === 'mix') {
+      fx.reverb.wet.gain.value = val;
+      fx.reverb.dry.gain.value = 1 - val;
+    }
   }
 }
 
 function applyAllFx() {
-  FX_DEFS.forEach(({ id, params }) =>
-    params.forEach(({ key }) => applyFx(id, key, FX[id][key]))
-  );
+  FX_DEFS.forEach(({ id, params }) => params.forEach(({ key }) => applyFx(id, key, FX[id][key])));
 }
 
 function buildFxUI() {
@@ -1020,10 +1373,12 @@ function buildFxUI() {
     section.appendChild(lbl);
 
     def.params.forEach((p) => {
-      section.appendChild(makeControlRow(p, FX[def.id][p.key], (v) => {
-        FX[def.id][p.key] = v;
-        applyFx(def.id, p.key, v);
-      }));
+      section.appendChild(
+        makeControlRow(p, FX[def.id][p.key], (v) => {
+          FX[def.id][p.key] = v;
+          applyFx(def.id, p.key, v);
+        }),
+      );
     });
 
     container.appendChild(section);
@@ -1059,6 +1414,7 @@ async function start() {
     sendParams(0);
     sendParams(1);
     startLFOLoop();
+    startGenVizLoop();
 
     started = true;
     startBtn.textContent = '■ Stop';
@@ -1072,6 +1428,7 @@ async function start() {
 
 function stop() {
   stopLFOLoop();
+  stopGenVizLoop();
   stopGen3Scope();
   stopAllGen3Notes();
   GEN3.nodes = null;
@@ -1091,6 +1448,8 @@ function stop() {
     btn.classList.remove('active');
   });
   setStatus('idle');
+  resetGenVizState(0);
+  resetGenVizState(1);
   drawGenVizEmpty(0);
   drawGenVizEmpty(1);
   drawGenVizEmpty(2);
