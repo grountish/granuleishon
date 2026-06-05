@@ -1,0 +1,327 @@
+:root {
+  --bg:          #1c1c1c;
+  --surface:     #242424;
+  --surface-2:   #2c2c2c;
+  --border:      #3a3a3a;
+  --text:        #c8c8c8;
+  --muted:       #5a5a5a;
+  --accent-0:    #3cb870;
+  --accent-0-dim:#2d9458;
+  --accent-1:    #8b6ed4;
+  --accent-1-dim:#6e52b0;
+  --accent-fx:   #d4892a;
+  --accent-fx-dim:#ae6e1c;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; overflow: hidden; }
+
+body {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+main {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Header ──────────────────────────────────────────────────── */
+
+.header-bar {
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.logo {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--accent-0);
+}
+
+.tagline {
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.status {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* ── Buttons ─────────────────────────────────────────────────── */
+
+button {
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s;
+}
+
+button:hover:not(:disabled) {
+  border-color: #5a5a5a;
+  background: #343434;
+}
+
+button:disabled { opacity: 0.3; cursor: not-allowed; }
+
+button.primary {
+  background: var(--accent-0);
+  color: #0a180e;
+  border-color: var(--accent-0);
+  font-weight: 700;
+}
+
+button.primary:hover { background: var(--accent-0-dim); border-color: var(--accent-0-dim); }
+
+/* ── Workspace (3-column) ────────────────────────────────────── */
+
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+#generators {
+  flex: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+}
+
+#fx-chain {
+  flex: 1;
+  min-width: 220px;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background: var(--bg);
+  /* FX column uses amber accent throughout */
+  --gen-accent:     var(--accent-fx);
+  --gen-accent-dim: var(--accent-fx-dim);
+}
+
+/* ── Per-generator waveform canvas ──────────────────────────── */
+
+.gen-viz {
+  display: block;
+  width: 100%;
+  flex: 1;
+  min-height: 40px;
+  background: #141414;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── Generator panels ────────────────────────────────────────── */
+
+.generator {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.generator + .generator { border-top: 1px solid var(--border); }
+
+.gen-0 { --gen-accent: var(--accent-0); --gen-accent-dim: var(--accent-0-dim); }
+.gen-1 { --gen-accent: var(--accent-1); --gen-accent-dim: var(--accent-1-dim); }
+
+/* ── Column headers (shared by generators and FX) ────────────── */
+
+.col-header {
+  height: 28px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.col-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--gen-accent);
+}
+
+.col-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--gen-accent);
+  flex-shrink: 0;
+}
+
+/* ── Freeze button ───────────────────────────────────────────── */
+
+.gen-freeze {
+  font-size: 8px;
+  padding: 3px 7px;
+  color: var(--muted);
+  border-color: #3a3a3a;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.gen-freeze:hover:not(:disabled) { color: var(--text); }
+
+.gen-freeze.active {
+  background: #1a304a;
+  border-color: #4a78b8;
+  color: #82aee4;
+}
+
+/* ── Control rows (FX / shared base) ────────────────────────── */
+
+.fx-section { flex-shrink: 0; }
+
+.control {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  gap: 8px;
+}
+
+.control:hover { background: var(--surface-2); }
+
+.control label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  width: 74px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+  user-select: none;
+}
+
+.control .value {
+  font-size: 9px;
+  color: var(--gen-accent);
+  width: 48px;
+  text-align: right;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Generator controls: horizontal strip of vertical columns ── */
+
+.gen-controls {
+  display: flex;
+  flex-direction: row;
+  flex-shrink: 0;
+  border-top: none;
+}
+
+.generator .control {
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 78px;
+  padding: 10px 4px 8px;
+  gap: 5px;
+  border-right: 1px solid #1e1e1e;
+}
+
+.generator .control:last-child { border-right: none; }
+
+.generator .control label {
+  width: auto;
+  text-align: center;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.generator .control .value {
+  width: auto;
+  text-align: center;
+}
+
+/* FX row: smaller knob, taller row to fit it */
+#fx-chain .knob      { width: 28px; height: 28px; }
+#fx-chain .control   { height: 36px; }
+
+/* ── Knob ────────────────────────────────────────────────────── */
+
+.knob {
+  display: block;
+  width: 38px;
+  height: 38px;
+  cursor: grab;
+  flex-shrink: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.knob-track  { stroke: #2e2e2e; }
+.knob-value  { stroke: var(--gen-accent); }
+.knob-dot    { fill: var(--gen-accent); }
+.knob-body   { fill: #1e1e1e; stroke: #383838; stroke-width: 1; }
+
+.knob:hover .knob-body    { fill: #252525; }
+.knob--drag               { cursor: grabbing; opacity: 0.9; }
+.knob--drag .knob-body    { fill: #2a2a2a; }
+
+/* ── FX sections ─────────────────────────────────────────────── */
+
+.fx-section { border-bottom: 1px solid var(--border); }
+
+.fx-section-label {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
