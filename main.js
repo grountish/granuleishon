@@ -454,6 +454,23 @@ const GEN_DEFAULTS = [
 ];
 
 const state = [{ ...GEN_DEFAULTS[0] }, { ...GEN_DEFAULTS[1] }];
+const genControlBindings = [new Map(), new Map()];
+const POSITION_PARAM = PARAMS.find((p) => p.key === 'positionSec');
+
+function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
+  const param = PARAMS.find((p) => p.key === key);
+  if (!param) return;
+  const next = Math.max(param.min, Math.min(param.max, value));
+  state[genIdx][key] = next;
+  genControlBindings[genIdx].get(key)?.setValue(next);
+  if (key === 'positionSec') {
+    const posX = Math.max(0, Math.min(1, 1 - next / 10));
+    const vizState = genVizStates[genIdx];
+    vizState.targetPosX = posX;
+    if (!vizState.seeded) vizState.currentPosX = posX;
+  }
+  if (send) sendParams(genIdx);
+}
 
 function sendParams(genIdx) {
   if (!node) return;
@@ -518,6 +535,10 @@ function makeControlRow(p, initialValue, onInput, lfoCycle = null) {
   } else {
     row.append(knob, label, valueEl);
   }
+  row.setValue = (v) => {
+    valueEl.textContent = fmt(v);
+    knob.setValue(v);
+  };
   return row;
 }
 
@@ -631,6 +652,7 @@ function makeKnob(p, initialValue, onInput) {
     onInput(initialValue);
   });
 
+  svg.setValue = (v) => render(toNorm(v));
   return svg;
 }
 
@@ -675,23 +697,42 @@ function buildGeneratorPanel(genIdx) {
     resetGenVizState(genIdx);
     drawGenVizEmpty(genIdx);
   }).observe(vizCanvas);
+  const updatePositionFromPointer = (clientX) => {
+    const rect = vizCanvas.getBoundingClientRect();
+    const normX = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+    const next = POSITION_PARAM.min + (1 - normX) * (POSITION_PARAM.max - POSITION_PARAM.min);
+    setGeneratorParam(genIdx, 'positionSec', next);
+  };
+  vizCanvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    vizCanvas.setPointerCapture(e.pointerId);
+    vizCanvas.classList.add('dragging');
+    updatePositionFromPointer(e.clientX);
+  });
+  vizCanvas.addEventListener('pointermove', (e) => {
+    if (!vizCanvas.hasPointerCapture(e.pointerId)) return;
+    updatePositionFromPointer(e.clientX);
+  });
+  const endDrag = (e) => {
+    if (vizCanvas.hasPointerCapture(e.pointerId)) vizCanvas.releasePointerCapture(e.pointerId);
+    vizCanvas.classList.remove('dragging');
+  };
+  vizCanvas.addEventListener('pointerup', endDrag);
+  vizCanvas.addEventListener('pointercancel', endDrag);
   panel.appendChild(vizCanvas);
 
   // Control rows
   const rows = document.createElement('div');
   rows.className = 'gen-controls';
   PARAMS.forEach((p) => {
-    rows.appendChild(
-      makeControlRow(
-        p,
-        defaults[p.key],
-        (v) => {
-          state[genIdx][p.key] = v;
-          sendParams(genIdx);
-        },
-        () => cycleLFOMap(genIdx, p.key),
-      ),
+    const control = makeControlRow(
+      p,
+      defaults[p.key],
+      (v) => setGeneratorParam(genIdx, p.key, v),
+      () => cycleLFOMap(genIdx, p.key),
     );
+    genControlBindings[genIdx].set(p.key, control);
+    rows.appendChild(control);
   });
 
   panel.appendChild(rows);

@@ -143,6 +143,15 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   border-bottom: 1px solid var(--border);
 }
 
+.gen-0 .gen-viz,
+.gen-1 .gen-viz {
+  cursor: ew-resize;
+}
+
+.gen-viz.dragging {
+  cursor: ew-resize;
+}
+
 /* ── Generator panels ────────────────────────────────────────── */
 
 .generator {
