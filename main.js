@@ -5,14 +5,93 @@ let node = null;
 let micStream = null;
 let started = false;
 let granularModulePromise = null;
+const REC = {
+  isRecording: false,
+  left: [],
+  right: [],
+  sampleCount: 0,
+  processor: null,
+  sink: null,
+};
 
 function getStatusEl() {
   return document.getElementById('status');
 }
 
+function getRecordBtn() {
+  return document.getElementById('recordBtn');
+}
+
 function setStatus(text) {
   const status = getStatusEl();
   if (status) status.textContent = text;
+}
+
+function refreshRecordButton() {
+  const btn = getRecordBtn();
+  if (!btn) return;
+  btn.classList.toggle('active', REC.isRecording);
+  btn.textContent = REC.isRecording ? 'Stop Rec' : 'Rec';
+}
+
+function mergeFloat32(chunks, sampleCount) {
+  const merged = new Float32Array(sampleCount);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return merged;
+}
+
+function encodeWav(left, right, sampleRate) {
+  const frameCount = Math.min(left.length, right.length);
+  const bytesPerSample = 2;
+  const blockAlign = 2 * bytesPerSample;
+  const dataSize = frameCount * blockAlign;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  function writeString(offset, value) {
+    for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
+  }
+
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 2, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  for (let i = 0; i < frameCount; i++) {
+    const l = Math.max(-1, Math.min(1, left[i]));
+    const r = Math.max(-1, Math.min(1, right[i]));
+    view.setInt16(offset, l < 0 ? l * 0x8000 : l * 0x7fff, true);
+    view.setInt16(offset + 2, r < 0 ? r * 0x8000 : r * 0x7fff, true);
+    offset += 4;
+  }
+
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function downloadRecording(blob) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `granuleishon-${stamp}.wav`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 async function ensureAudioEngine() {
@@ -34,6 +113,72 @@ async function ensureGranularModule() {
     granularModulePromise = audioCtx.audioWorklet.addModule('granular-processor.js');
   }
   await granularModulePromise;
+}
+
+async function startRecording() {
+  if (REC.isRecording) return;
+  await ensureAudioEngine();
+  if (!fx?.output || !audioCtx) return;
+
+  REC.left = [];
+  REC.right = [];
+  REC.sampleCount = 0;
+
+  const processor = audioCtx.createScriptProcessor(4096, 2, 2);
+  const sink = audioCtx.createGain();
+  sink.gain.value = 0;
+
+  processor.onaudioprocess = (e) => {
+    const input = e.inputBuffer;
+    const output = e.outputBuffer;
+    const inL = input.getChannelData(0);
+    const inR = input.numberOfChannels > 1 ? input.getChannelData(1) : inL;
+    output.getChannelData(0).set(inL);
+    output.getChannelData(1).set(inR);
+    REC.left.push(new Float32Array(inL));
+    REC.right.push(new Float32Array(inR));
+    REC.sampleCount += inL.length;
+  };
+
+  fx.output.connect(processor);
+  processor.connect(sink);
+  sink.connect(audioCtx.destination);
+
+  REC.processor = processor;
+  REC.sink = sink;
+  REC.isRecording = true;
+  refreshRecordButton();
+  setStatus('recording');
+}
+
+function stopRecording() {
+  if (!REC.isRecording) return;
+
+  if (REC.processor && fx?.output) {
+    try { fx.output.disconnect(REC.processor); } catch (e) {}
+  }
+  if (REC.processor) {
+    try { REC.processor.disconnect(); } catch (e) {}
+    REC.processor.onaudioprocess = null;
+  }
+  if (REC.sink) {
+    try { REC.sink.disconnect(); } catch (e) {}
+  }
+
+  const left = mergeFloat32(REC.left, REC.sampleCount);
+  const right = mergeFloat32(REC.right, REC.sampleCount);
+  if (REC.sampleCount > 0 && audioCtx) {
+    downloadRecording(encodeWav(left, right, audioCtx.sampleRate));
+  }
+
+  REC.left = [];
+  REC.right = [];
+  REC.sampleCount = 0;
+  REC.processor = null;
+  REC.sink = null;
+  REC.isRecording = false;
+  refreshRecordButton();
+  setStatus(started ? 'running' : (audioCtx ? 'gen3 ready' : 'idle'));
 }
 
 // ─── Visualizer (per-generator) ────────────────────────────────────────────
@@ -1468,6 +1613,7 @@ async function start() {
 }
 
 function stop() {
+  stopRecording();
   stopLFOLoop();
   stopGenVizLoop();
   stopGen3Scope();
@@ -1500,5 +1646,10 @@ document.getElementById('startBtn').addEventListener('click', () => {
   started ? stop() : start();
 });
 
+getRecordBtn()?.addEventListener('click', () => {
+  REC.isRecording ? stopRecording() : startRecording();
+});
+
 buildUI();
 buildFxUI();
+refreshRecordButton();

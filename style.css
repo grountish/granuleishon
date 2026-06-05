@@ -102,6 +102,18 @@ button.primary {
 
 button.primary:hover { background: var(--accent-0-dim); border-color: var(--accent-0-dim); }
 
+.record-btn.active {
+  background: #c44a4a;
+  border-color: #c44a4a;
+  color: #210909;
+  font-weight: 700;
+}
+
+.record-btn.active:hover {
+  background: #a73e3e;
+  border-color: #a73e3e;
+}
+
 /* ── Workspace (3-column) ────────────────────────────────────── */
 
 .workspace {
