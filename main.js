@@ -1961,15 +1961,83 @@ function setTransportBpm(value, { refresh = true } = {}) {
   refreshLFOUI();
 }
 
+function initTempoDrag() {
+  const tempoBox = document.querySelector('.tempo-box');
+  const bpmInput = getBpmInput();
+  if (!tempoBox) return;
+
+  let startY = 0;
+  let startBpm = TRANSPORT.bpm;
+  let dragging = false;
+
+  tempoBox.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    if (bpmInput && e.target === bpmInput) return;
+    e.preventDefault();
+    startY = e.clientY;
+    startBpm = TRANSPORT.bpm;
+    dragging = true;
+    tempoBox.classList.add('dragging');
+    tempoBox.setPointerCapture(e.pointerId);
+  });
+
+  tempoBox.addEventListener('pointermove', (e) => {
+    if (!dragging || !tempoBox.hasPointerCapture(e.pointerId)) return;
+    const sensitivity = e.shiftKey ? 0.1 : 0.35;
+    const nextBpm = startBpm + (startY - e.clientY) * sensitivity;
+    setTransportBpm(nextBpm);
+  });
+
+  const endDrag = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    tempoBox.classList.remove('dragging');
+    if (tempoBox.hasPointerCapture(e.pointerId)) tempoBox.releasePointerCapture(e.pointerId);
+  };
+
+  tempoBox.addEventListener('pointerup', endDrag);
+  tempoBox.addEventListener('pointercancel', endDrag);
+}
+
+function createFxSection(label, className = '') {
+  const section = document.createElement('div');
+  section.className = `fx-section${className ? ' ' + className : ''}`;
+
+  const header = document.createElement('button');
+  header.className = 'fx-section-label';
+  header.type = 'button';
+
+  const title = document.createElement('span');
+  title.className = 'fx-section-label-text';
+  title.textContent = label;
+
+  const toggle = document.createElement('span');
+  toggle.className = 'fx-section-toggle';
+  toggle.textContent = '−';
+
+  const content = document.createElement('div');
+  content.className = 'fx-section-content';
+
+  const setCollapsed = (collapsed) => {
+    section.classList.toggle('collapsed', collapsed);
+    header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    toggle.textContent = collapsed ? '+' : '−';
+  };
+
+  header.addEventListener('click', () => {
+    setCollapsed(!section.classList.contains('collapsed'));
+  });
+
+  header.append(title, toggle);
+  section.append(header, content);
+  setCollapsed(false);
+
+  return { section, content, setCollapsed };
+}
+
 function buildLFOSection(lfoIdx) {
   const lfo = LFOS[lfoIdx];
-  const section = document.createElement('div');
-  section.className = `fx-section lfo-section lfo-section-${lfoIdx + 1}`;
-
-  const lbl = document.createElement('div');
-  lbl.className = 'fx-section-label';
-  lbl.textContent = lfo.label;
-  section.appendChild(lbl);
+  const { section, content } = createFxSection(lfo.label, `lfo-section lfo-section-${lfoIdx + 1}`);
 
   const rateControl = makeControlRow(LFO_RATE_CONTROL, lfo.rate, (v) => {
     if (lfo.sync) {
@@ -1979,14 +2047,14 @@ function buildLFOSection(lfoIdx) {
     }
   });
   lfoControlBindings[lfoIdx].set('rate', rateControl);
-  section.appendChild(rateControl);
+  content.appendChild(rateControl);
 
   const syncModeRow = buildSyncModeRow(lfo.sync, (mode) => {
     lfo.sync = mode === 'sync';
     refreshLFOControlUI(lfoIdx);
   });
   lfoSyncModeControls[lfoIdx] = syncModeRow;
-  section.appendChild(syncModeRow);
+  content.appendChild(syncModeRow);
 
   const depthControl = makeControlRow(
     { key: 'depth', label: 'Depth', min: 0, max: 1, step: 0.01, unit: '' },
@@ -1996,7 +2064,7 @@ function buildLFOSection(lfoIdx) {
     },
   );
   lfoControlBindings[lfoIdx].set('depth', depthControl);
-  section.appendChild(depthControl);
+  content.appendChild(depthControl);
 
   // Shape selector
   const shapeRow = document.createElement('div');
@@ -2020,7 +2088,7 @@ function buildLFOSection(lfoIdx) {
     lfoShapeButtons[lfoIdx].set(shape, btn);
     shapeRow.appendChild(btn);
   });
-  section.appendChild(shapeRow);
+  content.appendChild(shapeRow);
 
   refreshLFOControlUI(lfoIdx);
 
@@ -2394,13 +2462,7 @@ function buildFxUI() {
 
   // One section per effect, stacked vertically
   FX_DEFS.forEach((def) => {
-    const section = document.createElement('div');
-    section.className = 'fx-section';
-
-    const lbl = document.createElement('div');
-    lbl.className = 'fx-section-label';
-    lbl.textContent = def.label;
-    section.appendChild(lbl);
+    const { section, content } = createFxSection(def.label);
 
     if (def.id === 'filter') {
       const modeRow = document.createElement('div');
@@ -2421,7 +2483,7 @@ function buildFxUI() {
         filterModeButtons.set(mode, btn);
         modeRow.appendChild(btn);
       });
-      section.appendChild(modeRow);
+      content.appendChild(modeRow);
     }
 
     def.params.forEach((p) => {
@@ -2439,7 +2501,7 @@ function buildFxUI() {
         applyFx(def.id, p.key, v);
       });
       fxControlBindings.set(`${def.id}:${p.key}`, control);
-      section.appendChild(control);
+      content.appendChild(control);
 
       if (def.id === 'delay' && p.key === 'time') {
         delaySyncModeControl = buildSyncModeRow(FX.delay.sync, (mode) => {
@@ -2447,7 +2509,7 @@ function buildFxUI() {
           refreshDelayTimeUI();
           applyFx('delay', 'time', FX.delay.time);
         });
-        section.appendChild(delaySyncModeControl);
+        content.appendChild(delaySyncModeControl);
       }
     });
 
@@ -2667,6 +2729,7 @@ setSourceDurationSec(0, LIVE_SOURCE_SECONDS);
 setSourceDurationSec(1, LIVE_SOURCE_SECONDS);
 buildFxUI();
 buildPresetUI();
+initTempoDrag();
 refreshRecordButton();
 setTransportBpm(TRANSPORT.bpm);
 getStartBtn().textContent = getIdleStartButtonLabel();

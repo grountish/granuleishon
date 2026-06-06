@@ -101,6 +101,15 @@ main {
   border: 1px solid var(--border);
   background: #202020;
   border-radius: 2px;
+  cursor: ns-resize;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.tempo-box.dragging {
+  cursor: ns-resize;
+  background: #262626;
+  border-color: #505050;
 }
 
 .tempo-label {
@@ -122,6 +131,7 @@ main {
   font-variant-numeric: tabular-nums;
   appearance: textfield;
   -moz-appearance: textfield;
+  cursor: text;
 }
 
 .tempo-input::-webkit-outer-spin-button,
@@ -599,6 +609,8 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   height: 22px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  width: 100%;
   padding: 0 10px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
@@ -607,6 +619,30 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted);
+  border-radius: 0;
+}
+
+.fx-section-label:hover {
+  background: #2b2b2b;
+}
+
+.fx-section-label-text,
+.fx-section-toggle {
+  pointer-events: none;
+}
+
+.fx-section-toggle {
+  font-size: 11px;
+  line-height: 1;
+  color: #7a7a7a;
+}
+
+.fx-section-content {
+  overflow: hidden;
+}
+
+.fx-section.collapsed .fx-section-content {
+  display: none;
 }
 
 /* ── Gen 3 Oscillator ────────────────────────────────────────── */
