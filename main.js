@@ -2518,7 +2518,7 @@ function buildDrumPanel() {
   const hints = document.createElement('div');
   hints.className = 'drum-hints';
   hints.innerHTML =
-    '<span class="drum-hint"><span class="drum-hint-key">⇧ click</span> active step → cycle probability</span>' +
+    '<span class="drum-hint"><span class="drum-hint-key">shift + click</span> active step → cycle probability</span>' +
     '<span class="drum-hints-sep">·</span>' +
     '<span class="drum-hint"><span class="drum-hint-key">right-click</span> active step → cycle stutter</span>';
   panel.appendChild(hints);

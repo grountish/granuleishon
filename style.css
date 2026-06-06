@@ -549,9 +549,11 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 .back-wire.src-0 { --route-color: #56d6f5; stroke: #56d6f5; }
 .back-wire.src-1 { --route-color: #7ad860; stroke: #7ad860; }
 .back-wire.src-2 { --route-color: #f05a4f; stroke: #f05a4f; }
+.back-wire.src-3 { --route-color: #f050a0; stroke: #f050a0; }
 .back-wire-glow.src-0 { --route-color: #56d6f5; stroke: color-mix(in srgb, #56d6f5 92%, white); }
 .back-wire-glow.src-1 { --route-color: #7ad860; stroke: color-mix(in srgb, #7ad860 90%, white); }
 .back-wire-glow.src-2 { --route-color: #f05a4f; stroke: color-mix(in srgb, #f05a4f 90%, white); }
+.back-wire-glow.src-3 { --route-color: #f050a0; stroke: color-mix(in srgb, #f050a0 90%, white); }
 
 .back-wire-plug {
   stroke-width: 2.2;
@@ -560,6 +562,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 .back-wire-plug.src-0 { fill: color-mix(in srgb, #56d6f5 82%, black); stroke: #262b2c; }
 .back-wire-plug.src-1 { fill: color-mix(in srgb, #7ad860 82%, black); stroke: #262b2c; }
 .back-wire-plug.src-2 { fill: color-mix(in srgb, #f05a4f 82%, black); stroke: #262b2c; }
+.back-wire-plug.src-3 { fill: color-mix(in srgb, #f050a0 82%, black); stroke: #262b2c; }
 
 .back-wire-plug-core {
   fill: rgba(8, 10, 11, 0.92);
@@ -799,6 +802,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 .back-param-row.src-0 { --row-accent: rgba(86, 214, 245, 0.92); }
 .back-param-row.src-1 { --row-accent: rgba(122, 216, 96, 0.92); }
 .back-param-row.src-2 { --row-accent: rgba(240, 90, 79, 0.92); }
+.back-param-row.src-3 { --row-accent: rgba(240, 80, 160, 0.92); }
 
 .back-param-label {
   font-size: 8px;
