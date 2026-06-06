@@ -1845,8 +1845,11 @@ const FX_DEFS = [
     id: 'limiter',
     label: 'Limiter',
     params: [
-      { key: 'threshold', label: 'Threshold', min: -24, max: 0, step: 0.5, value: -8, unit: 'dB' },
-      { key: 'release', label: 'Release', min: 0.02, max: 0.5, step: 0.01, value: 0.12, unit: 's' },
+      { key: 'threshold', label: 'Threshold', min: -36, max: 0, step: 0.5, value: -8, unit: 'dB' },
+      { key: 'attack', label: 'Attack', min: 0, max: 0.1, step: 0.001, value: 0.003, unit: 's' },
+      { key: 'release', label: 'Release', min: 0.02, max: 1, step: 0.01, value: 0.12, unit: 's' },
+      { key: 'ratio', label: 'Ratio', min: 1, max: 40, step: 0.5, value: 20, unit: ':1' },
+      { key: 'knee', label: 'Knee', min: 0, max: 40, step: 0.5, value: 0, unit: 'dB' },
       { key: 'output', label: 'Output', min: 0.5, max: 1.2, step: 0.01, value: 0.96, unit: '' },
     ],
   },
@@ -1859,7 +1862,7 @@ const FX = {
   bitreduce: { bits: 8, rate: 1, mix: 0 },
   sat: { drive: 0.3, mix: 0 },
   reverb: { size: 2, decay: 3, predelay: 0.018, damping: 0.42, mix: 0 },
-  limiter: { threshold: -8, release: 0.12, output: 0.96 },
+  limiter: { threshold: -8, attack: 0.003, release: 0.12, ratio: 20, knee: 0, output: 0.96 },
 };
 
 let fx = null; // audio nodes, created in start(), nulled in stop()
@@ -1962,6 +1965,13 @@ function setSequencerStep(stepIdx, value) {
   STEP_SEQ.steps[stepIdx] = clamp(value, -1, 1);
   STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
   refreshSequencerUI();
+}
+
+function clearSequencerSteps() {
+  STEP_SEQ.steps.fill(0);
+  STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
+  refreshSequencerUI();
+  applyMappedModulationTargets();
 }
 
 function getLFOValue(lfo) {
@@ -2218,6 +2228,18 @@ function buildSequencerSection() {
     subdivisionRow.appendChild(btn);
   });
   content.appendChild(subdivisionRow);
+
+  const actionRow = document.createElement('div');
+  actionRow.className = 'fx-mode-row seq-action-row';
+  const clearBtn = document.createElement('button');
+  clearBtn.type = 'button';
+  clearBtn.className = 'fx-mode-btn seq-action-btn';
+  clearBtn.textContent = 'Clean';
+  clearBtn.addEventListener('click', () => {
+    clearSequencerSteps();
+  });
+  actionRow.appendChild(clearBtn);
+  content.appendChild(actionRow);
 
   const grid = document.createElement('div');
   grid.className = 'seq-grid';
@@ -2497,9 +2519,9 @@ function buildFxNodes() {
   // ─ Master limiter ─
   const limiter = ac.createDynamicsCompressor();
   limiter.threshold.setValueAtTime(FX.limiter.threshold, ac.currentTime);
-  limiter.knee.setValueAtTime(0, ac.currentTime);
-  limiter.ratio.setValueAtTime(20, ac.currentTime);
-  limiter.attack.setValueAtTime(0.003, ac.currentTime);
+  limiter.knee.setValueAtTime(FX.limiter.knee, ac.currentTime);
+  limiter.ratio.setValueAtTime(FX.limiter.ratio, ac.currentTime);
+  limiter.attack.setValueAtTime(FX.limiter.attack, ac.currentTime);
   limiter.release.setValueAtTime(FX.limiter.release, ac.currentTime);
   const masterOut = ac.createGain();
   masterOut.gain.setValueAtTime(FX.limiter.output, ac.currentTime);
@@ -2577,7 +2599,10 @@ function applyFx(id, key, val) {
   } else if (id === 'limiter') {
     if (key === 'threshold')
       fx.limiter.comp.threshold.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'attack') fx.limiter.comp.attack.setTargetAtTime(val, audioCtx.currentTime, 0.02);
     if (key === 'release') fx.limiter.comp.release.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'ratio') fx.limiter.comp.ratio.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'knee') fx.limiter.comp.knee.setTargetAtTime(val, audioCtx.currentTime, 0.02);
     if (key === 'output') fx.limiter.output.gain.setTargetAtTime(val, audioCtx.currentTime, 0.02);
   }
 }

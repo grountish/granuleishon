@@ -621,6 +621,11 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   padding-bottom: 4px;
 }
 
+.seq-action-row {
+  padding-top: 0;
+  padding-bottom: 4px;
+}
+
 .seq-grid {
   display: grid;
   grid-template-columns: repeat(16, minmax(0, 1fr));
