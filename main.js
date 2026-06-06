@@ -872,12 +872,11 @@ function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
 function getEffectiveGeneratorParams(genIdx) {
   const effective = { ...state[genIdx] };
   if (lfoMappings.size > 0) {
-    lfoMappings.forEach(({ genIdx: gi, key, lfoIdx }) => {
+    lfoMappings.forEach(({ genIdx: gi, key, sourceIdx }) => {
       if (gi !== genIdx) return;
-      const lfo = LFOS[lfoIdx];
       const paramDef = getParamBounds(genIdx, key);
-      if (!lfo) return;
-      const scaled = lfo.currentValue * lfo.depth;
+      const scaled = getModSourceScaledValue(sourceIdx);
+      if (!paramDef || scaled === null) return;
       const half = (paramDef.max - paramDef.min) * 0.5;
       effective[key] = Math.max(
         paramDef.min,
@@ -899,12 +898,11 @@ function getEffectiveGen3Params() {
     detune: GEN3.detune,
   };
   if (lfoMappings.size > 0) {
-    lfoMappings.forEach(({ genIdx, key, lfoIdx }) => {
+    lfoMappings.forEach(({ genIdx, key, sourceIdx }) => {
       if (genIdx !== 2) return;
-      const lfo = LFOS[lfoIdx];
       const paramDef = getGen3ParamBounds(key);
-      if (!lfo || !paramDef) return;
-      const scaled = lfo.currentValue * lfo.depth;
+      const scaled = getModSourceScaledValue(sourceIdx);
+      if (!paramDef || scaled === null) return;
       const half = (paramDef.max - paramDef.min) * 0.5;
       effective[key] = Math.max(
         paramDef.min,
@@ -913,6 +911,26 @@ function getEffectiveGen3Params() {
     });
   }
   return effective;
+}
+
+function getModSourceScaledValue(sourceIdx) {
+  if (sourceIdx === 0 || sourceIdx === 1) {
+    const lfo = LFOS[sourceIdx];
+    return lfo ? lfo.currentValue * lfo.depth : null;
+  }
+  if (sourceIdx === 2) {
+    return STEP_SEQ.currentValue;
+  }
+  return null;
+}
+
+function applyMappedModulationTargets() {
+  if (lfoMappings.size === 0) return;
+  const gens = new Set([...lfoMappings.values()].map((m) => m.genIdx));
+  gens.forEach((gi) => {
+    if (gi === 2) applyGen3Modulation();
+    else sendParams(gi);
+  });
 }
 
 function sendParams(genIdx) {
@@ -948,25 +966,32 @@ function refreshLFOMappingUI() {
   for (let genIdx = 0; genIdx < 2; genIdx++) {
     PARAMS.forEach(({ key }) => {
       const mapping = lfoMappings.get(`${genIdx}:${key}`);
-      genMapBindings[genIdx].get(key)?.setMapLFO(mapping ? mapping.lfoIdx : null);
+      genMapBindings[genIdx].get(key)?.setMapLFO(mapping ? mapping.sourceIdx : null);
     });
   }
   GEN3_LFO_PARAMS.forEach(({ key }) => {
     const mapping = lfoMappings.get(`2:${key}`);
-    gen3MapBindings.get(key)?.setMapLFO(mapping ? mapping.lfoIdx : null);
+    gen3MapBindings.get(key)?.setMapLFO(mapping ? mapping.sourceIdx : null);
   });
 }
 
-function setLFOLedState(led, lfoIdx) {
-  led.classList.remove('active', 'lfo-1', 'lfo-2');
+function setLFOLedState(led, sourceIdx) {
+  led.classList.remove('active', 'lfo-1', 'lfo-2', 'lfo-seq');
   led.dataset.lfo = '';
   led.textContent = '';
   led.title = 'Map: unset';
-  if (lfoIdx === null) return;
-  led.classList.add('active', `lfo-${lfoIdx + 1}`);
-  led.dataset.lfo = `${lfoIdx + 1}`;
-  led.textContent = `${lfoIdx + 1}`;
-  led.title = `Map: LFO ${lfoIdx + 1}`;
+  if (sourceIdx === null) return;
+  if (sourceIdx === 2) {
+    led.classList.add('active', 'lfo-seq');
+    led.dataset.lfo = 'S';
+    led.textContent = 'S';
+    led.title = 'Map: Seq';
+    return;
+  }
+  led.classList.add('active', `lfo-${sourceIdx + 1}`);
+  led.dataset.lfo = `${sourceIdx + 1}`;
+  led.textContent = `${sourceIdx + 1}`;
+  led.title = `Map: LFO ${sourceIdx + 1}`;
 }
 
 function makeControlRow(p, initialValue, onInput, lfoCycle = null) {
@@ -1895,10 +1920,49 @@ const DELAY_TIME_SYNC_CONTROL = {
   step: 1,
   unit: '',
 };
-// lfoMappings: 'genIdx:paramKey' → { genIdx, key, lfoIdx }
+const STEP_SEQ = {
+  label: 'Seq 1',
+  steps: Array.from({ length: 16 }, () => 0),
+  subdivision: 16,
+  currentStep: 0,
+  currentValue: 0,
+  elapsed: 0,
+};
+let seqBars = [];
+const seqSubdivisionButtons = new Map();
+// lfoMappings: 'genIdx:paramKey' → { genIdx, key, sourceIdx }
 const lfoMappings = new Map();
 let lfoLastTs = 0,
   lfoAnimFrame = null;
+
+function getSeqActiveStepCount() {
+  return clamp(Math.round(STEP_SEQ.subdivision), 1, STEP_SEQ.steps.length);
+}
+
+function getSeqStepDuration() {
+  return (60 / Math.max(1, TRANSPORT.bpm) * 4) / getSeqActiveStepCount();
+}
+
+function refreshSequencerUI() {
+  seqBars.forEach((bar, idx) => {
+    if (!bar) return;
+    const value = STEP_SEQ.steps[idx] || 0;
+    bar.style.setProperty('--seq-value', `${Math.abs(value)}`);
+    bar.classList.toggle('negative', value < 0);
+    bar.classList.toggle('positive', value > 0);
+    bar.classList.toggle('active', idx === STEP_SEQ.currentStep);
+    bar.classList.toggle('inactive', idx >= getSeqActiveStepCount());
+  });
+  seqSubdivisionButtons.forEach((btn, subdivision) => {
+    btn.classList.toggle('active', STEP_SEQ.subdivision === subdivision);
+  });
+}
+
+function setSequencerStep(stepIdx, value) {
+  STEP_SEQ.steps[stepIdx] = clamp(value, -1, 1);
+  STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
+  refreshSequencerUI();
+}
 
 function getLFOValue(lfo) {
   switch (lfo.shape) {
@@ -1934,13 +1998,19 @@ function lfoStep(ts) {
     }
     lfo.currentValue = getLFOValue(lfo);
   });
-  if (lfoMappings.size > 0) {
-    const gens = new Set([...lfoMappings.values()].map((m) => m.genIdx));
-    gens.forEach((gi) => {
-      if (gi === 2) applyGen3Modulation();
-      else sendParams(gi);
-    });
+  if (STEP_SEQ.steps.length > 0) {
+    const stepDuration = getSeqStepDuration();
+    let advanced = false;
+    STEP_SEQ.elapsed += dt;
+    while (STEP_SEQ.elapsed >= stepDuration) {
+      STEP_SEQ.elapsed -= stepDuration;
+      STEP_SEQ.currentStep = (STEP_SEQ.currentStep + 1) % getSeqActiveStepCount();
+      advanced = true;
+    }
+    STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
+    if (advanced || dt === 0) refreshSequencerUI();
   }
+  applyMappedModulationTargets();
   lfoAnimFrame = requestAnimationFrame(lfoStep);
 }
 
@@ -1960,22 +2030,41 @@ function stopLFOLoop() {
     lfo.currentValue = 0;
     lfo.holdValue = 0;
   });
+  STEP_SEQ.currentStep = 0;
+  STEP_SEQ.currentValue = STEP_SEQ.steps[0] || 0;
+  STEP_SEQ.elapsed = 0;
+  refreshSequencerUI();
+}
+
+function setSequencerSubdivision(subdivision) {
+  STEP_SEQ.subdivision = clamp(Math.round(subdivision), 1, STEP_SEQ.steps.length);
+  STEP_SEQ.currentStep = Math.min(STEP_SEQ.currentStep, getSeqActiveStepCount() - 1);
+  STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
+  STEP_SEQ.elapsed = 0;
+  refreshSequencerUI();
+  applyMappedModulationTargets();
 }
 
 function cycleLFOMap(genIdx, key) {
   const mapKey = `${genIdx}:${key}`;
   const mapping = lfoMappings.get(mapKey);
   if (!mapping) {
-    lfoMappings.set(mapKey, { genIdx, key, lfoIdx: 0 });
+    lfoMappings.set(mapKey, { genIdx, key, sourceIdx: 0 });
     if (genIdx === 2) applyGen3Modulation();
     else sendParams(genIdx);
     return 0;
   }
-  if (mapping.lfoIdx === 0) {
-    mapping.lfoIdx = 1;
+  if (mapping.sourceIdx === 0) {
+    mapping.sourceIdx = 1;
     if (genIdx === 2) applyGen3Modulation();
     else sendParams(genIdx);
     return 1;
+  }
+  if (mapping.sourceIdx === 1) {
+    mapping.sourceIdx = 2;
+    if (genIdx === 2) applyGen3Modulation();
+    else sendParams(genIdx);
+    return 2;
   }
   lfoMappings.delete(mapKey);
   if (genIdx === 2) applyGen3Modulation();
@@ -2106,6 +2195,77 @@ function createFxSection(label, className = '') {
   setCollapsed(false);
 
   return { section, content, setCollapsed };
+}
+
+function buildSequencerSection() {
+  const { section, content } = createFxSection(STEP_SEQ.label, 'seq-section');
+  const subdivisionRow = document.createElement('div');
+  subdivisionRow.className = 'fx-mode-row seq-subdivision-row';
+  [
+    [4, '1/4'],
+    [8, '1/8'],
+    [12, '1/12'],
+    [16, '1/16'],
+  ].forEach(([subdivision, label]) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'fx-mode-btn';
+    btn.textContent = label;
+    btn.addEventListener('click', () => {
+      setSequencerSubdivision(subdivision);
+    });
+    seqSubdivisionButtons.set(subdivision, btn);
+    subdivisionRow.appendChild(btn);
+  });
+  content.appendChild(subdivisionRow);
+
+  const grid = document.createElement('div');
+  grid.className = 'seq-grid';
+  seqBars = [];
+
+  const valueFromPointer = (event, element) => {
+    const rect = element.getBoundingClientRect();
+    const centerY = rect.top + rect.height / 2;
+    const distance = clamp((centerY - event.clientY) / (rect.height / 2), -1, 1);
+    return distance;
+  };
+
+  STEP_SEQ.steps.forEach((stepValue, stepIdx) => {
+    const step = document.createElement('button');
+    step.type = 'button';
+    step.className = 'seq-step';
+    step.style.setProperty('--seq-value', `${Math.abs(stepValue)}`);
+    step.dataset.step = `${stepIdx + 1}`;
+
+    const updateStep = (event) => {
+      setSequencerStep(stepIdx, valueFromPointer(event, step));
+      if (STEP_SEQ.currentStep === stepIdx) applyMappedModulationTargets();
+    };
+
+    step.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      step.setPointerCapture(event.pointerId);
+      step.classList.add('dragging');
+      updateStep(event);
+    });
+    step.addEventListener('pointermove', (event) => {
+      if (!step.hasPointerCapture(event.pointerId)) return;
+      updateStep(event);
+    });
+    const endDrag = (event) => {
+      if (step.hasPointerCapture(event.pointerId)) step.releasePointerCapture(event.pointerId);
+      step.classList.remove('dragging');
+    };
+    step.addEventListener('pointerup', endDrag);
+    step.addEventListener('pointercancel', endDrag);
+
+    seqBars.push(step);
+    grid.appendChild(step);
+  });
+
+  content.appendChild(grid);
+  refreshSequencerUI();
+  return section;
 }
 
 function buildLFOSection(lfoIdx) {
@@ -2474,7 +2634,8 @@ function capturePreset() {
       shape,
       depth,
     })),
-    mappings: [...lfoMappings.values()].map(({ genIdx, key, lfoIdx }) => ({ genIdx, key, lfoIdx })),
+    seq: { steps: [...STEP_SEQ.steps], subdivision: STEP_SEQ.subdivision },
+    mappings: [...lfoMappings.values()].map(({ genIdx, key, sourceIdx }) => ({ genIdx, key, sourceIdx })),
   };
 }
 
@@ -2527,12 +2688,25 @@ function applyPreset(preset) {
     refreshLFOUI();
   }
 
+  if (preset.seq?.steps && Array.isArray(preset.seq.steps)) {
+    preset.seq.steps.slice(0, STEP_SEQ.steps.length).forEach((value, idx) => {
+      if (typeof value === 'number') STEP_SEQ.steps[idx] = clamp(value, -1, 1);
+    });
+  }
+  if (typeof preset.seq?.subdivision === 'number') setSequencerSubdivision(preset.seq.subdivision);
+  else {
+    STEP_SEQ.currentStep = Math.min(STEP_SEQ.currentStep, getSeqActiveStepCount() - 1);
+    STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
+    refreshSequencerUI();
+  }
+
   lfoMappings.clear();
-  preset.mappings?.forEach(({ genIdx, key, lfoIdx }) => {
+  preset.mappings?.forEach(({ genIdx, key, lfoIdx, sourceIdx }) => {
     const isGranularParam = genIdx < 2 && PARAMS.some((p) => p.key === key);
     const isGen3Param = genIdx === 2 && GEN3_LFO_PARAMS.some((p) => p.key === key);
-    if ((isGranularParam || isGen3Param) && (lfoIdx === 0 || lfoIdx === 1)) {
-      lfoMappings.set(`${genIdx}:${key}`, { genIdx, key, lfoIdx });
+    const modSourceIdx = typeof sourceIdx === 'number' ? sourceIdx : lfoIdx;
+    if ((isGranularParam || isGen3Param) && (modSourceIdx === 0 || modSourceIdx === 1 || modSourceIdx === 2)) {
+      lfoMappings.set(`${genIdx}:${key}`, { genIdx, key, sourceIdx: modSourceIdx });
     }
   });
   refreshLFOMappingUI();
@@ -2596,6 +2770,7 @@ function buildFxUI() {
 
   // LFO modulators first
   LFOS.forEach((_, lfoIdx) => container.appendChild(buildLFOSection(lfoIdx)));
+  container.appendChild(buildSequencerSection());
 
   // One section per effect, stacked vertically
   FX_DEFS.forEach((def) => {
