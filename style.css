@@ -1193,6 +1193,27 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   padding-top: 0;
 }
 
+.gen-sync-toggle {
+  flex: none;
+  align-self: flex-end;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 3px 6px;
+  margin: 0 0 6px;
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.gen-sync-toggle.active {
+  background: var(--gen-accent);
+  border-color: var(--gen-accent);
+  color: #161006;
+}
+
 .lfo-shape {
   flex: 1;
   font-size: 8px;

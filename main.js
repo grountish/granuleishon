@@ -25,6 +25,16 @@ const TEMPO_SYNC_STEPS = [
   { label: '1B', beats: 4 },
   { label: '2B', beats: 8 },
 ];
+const GRAIN_SYNC_STEPS = [
+  { label: '1/64', beats: 0.0625 },
+  { label: '1/32', beats: 0.125 },
+  { label: '1/16', beats: 0.25 },
+  { label: '1/8T', beats: 1 / 3 },
+  { label: '1/8',  beats: 0.5 },
+  { label: '1/4T', beats: 2 / 3 },
+  { label: '1/4',  beats: 1 },
+];
+const GRAIN_SYNC_CONTROL = { min: 0, max: GRAIN_SYNC_STEPS.length - 1, step: 1, unit: '' };
 const REC = {
   isRecording: false,
   left: [],
@@ -839,6 +849,8 @@ const GEN_DEFAULTS = [
     reverse: false,
     envType: 'hann',
     freeze: false,
+    grainSizeSync: false, grainSizeSyncIndex: 2,
+    densitySync: false,   densitySyncIndex: 2,
   },
   {
     grainSizeMs: 80,
@@ -852,6 +864,8 @@ const GEN_DEFAULTS = [
     reverse: false,
     envType: 'hann',
     freeze: false,
+    grainSizeSync: false, grainSizeSyncIndex: 2,
+    densitySync: false,   densitySyncIndex: 2,
   },
 ];
 
@@ -861,6 +875,8 @@ const genMapBindings = [new Map(), new Map()];
 const genFreezeButtons = [null, null];
 const genReverseButtons = [null, null];
 const genEnvButtons = [new Map(), new Map()];
+const genGrainSyncModeControls = [null, null];
+const genDensitySyncModeControls = [null, null];
 const gen3ControlBindings = new Map();
 const gen3MapBindings = new Map();
 const fxControlBindings = new Map();
@@ -1013,8 +1029,20 @@ function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
   refreshBackPanelState();
 }
 
+function getGrainSyncStep(syncIndex) {
+  return GRAIN_SYNC_STEPS[clamp(Math.round(syncIndex), 0, GRAIN_SYNC_STEPS.length - 1)];
+}
+function getGrainSizeSyncMs(genIdx) {
+  return beatsToSeconds(getGrainSyncStep(state[genIdx].grainSizeSyncIndex).beats) * 1000;
+}
+function getDensitySyncValue(genIdx) {
+  return 1 / beatsToSeconds(getGrainSyncStep(state[genIdx].densitySyncIndex).beats);
+}
+
 function getEffectiveGeneratorParams(genIdx) {
   const effective = { ...state[genIdx] };
+  if (effective.grainSizeSync) effective.grainSizeMs = getGrainSizeSyncMs(genIdx);
+  if (effective.densitySync) effective.density = getDensitySyncValue(genIdx);
   if (lfoMappings.size > 0) {
     lfoMappings.forEach(({ genIdx: gi, key, sourceIdx }) => {
       if (gi !== genIdx) return;
@@ -1175,10 +1203,51 @@ function refreshModulationVisuals() {
   });
 }
 
+function refreshGenGrainSizeSyncUI(genIdx) {
+  const isSync = state[genIdx].grainSizeSync;
+  const ctrl = genControlBindings[genIdx].get('grainSizeMs');
+  if (ctrl) {
+    if (isSync) {
+      const idx = state[genIdx].grainSizeSyncIndex;
+      ctrl.setConfig({ ...GRAIN_SYNC_CONTROL, label: 'Grain size', resetValue: idx });
+      ctrl.setValue(idx);
+      ctrl.setFormatter((v) => getGrainSyncStep(Math.round(v)).label);
+    } else {
+      const p = PARAMS.find((q) => q.key === 'grainSizeMs');
+      ctrl.setConfig({ ...p, resetValue: state[genIdx].grainSizeMs });
+      ctrl.setValue(state[genIdx].grainSizeMs);
+      ctrl.setFormatter(null);
+    }
+  }
+  genGrainSyncModeControls[genIdx]?.setMode(isSync ? 'sync' : 'free');
+}
+
+function refreshGenDensitySyncUI(genIdx) {
+  const isSync = state[genIdx].densitySync;
+  const ctrl = genControlBindings[genIdx].get('density');
+  if (ctrl) {
+    if (isSync) {
+      const idx = state[genIdx].densitySyncIndex;
+      ctrl.setConfig({ ...GRAIN_SYNC_CONTROL, label: 'Density', resetValue: idx });
+      ctrl.setValue(idx);
+      ctrl.setFormatter((v) => getGrainSyncStep(Math.round(v)).label);
+    } else {
+      const p = PARAMS.find((q) => q.key === 'density');
+      ctrl.setConfig({ ...p, resetValue: state[genIdx].density });
+      ctrl.setValue(state[genIdx].density);
+      ctrl.setFormatter(null);
+    }
+  }
+  genDensitySyncModeControls[genIdx]?.setMode(isSync ? 'sync' : 'free');
+}
+
 function refreshGeneratorUI(genIdx) {
   PARAMS.forEach(({ key }) => {
+    if (key === 'grainSizeMs' || key === 'density') return; // handled by sync refresh
     genControlBindings[genIdx].get(key)?.setValue(state[genIdx][key]);
   });
+  refreshGenGrainSizeSyncUI(genIdx);
+  refreshGenDensitySyncUI(genIdx);
   genFreezeButtons[genIdx]?.classList.toggle('active', !!state[genIdx].freeze);
   if (genFreezeButtons[genIdx]) {
     genFreezeButtons[genIdx].disabled = !canFreezeGenerator(genIdx);
@@ -1328,6 +1397,20 @@ function buildSyncModeRow(isSync, onModeChange) {
   };
   row.setMode(isSync ? 'sync' : 'free');
   return row;
+}
+
+function buildGenSyncToggle(onToggle) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'gen-sync-toggle';
+  btn.textContent = 'FREE';
+  btn.addEventListener('click', () => onToggle());
+  btn.setMode = (mode) => {
+    const sync = mode === 'sync';
+    btn.classList.toggle('active', sync);
+    btn.textContent = sync ? 'SYNC' : 'FREE';
+  };
+  return btn;
 }
 
 function buildGeneratorReverseControl(genIdx) {
@@ -1689,15 +1772,41 @@ function buildGeneratorPanel(genIdx) {
   const rows = document.createElement('div');
   rows.className = 'gen-controls';
   PARAMS.forEach((p) => {
-    const control = makeControlRow(
-      p,
-      defaults[p.key],
-      (v) => setGeneratorParam(genIdx, p.key, v),
-      () => cycleLFOMap(genIdx, p.key),
-    );
+    const onChange = p.key === 'grainSizeMs'
+      ? (v) => {
+          if (state[genIdx].grainSizeSync) state[genIdx].grainSizeSyncIndex = Math.round(v);
+          else setGeneratorParam(genIdx, p.key, v);
+          sendParams(genIdx);
+        }
+      : p.key === 'density'
+        ? (v) => {
+            if (state[genIdx].densitySync) state[genIdx].densitySyncIndex = Math.round(v);
+            else setGeneratorParam(genIdx, p.key, v);
+            sendParams(genIdx);
+          }
+        : (v) => setGeneratorParam(genIdx, p.key, v);
+    const control = makeControlRow(p, defaults[p.key], onChange, () => cycleLFOMap(genIdx, p.key));
     genControlBindings[genIdx].set(p.key, control);
     genMapBindings[genIdx].set(p.key, control);
     rows.appendChild(control);
+    if (p.key === 'grainSizeMs') {
+      const btn = buildGenSyncToggle(() => {
+        state[genIdx].grainSizeSync = !state[genIdx].grainSizeSync;
+        refreshGenGrainSizeSyncUI(genIdx);
+        sendParams(genIdx);
+      });
+      genGrainSyncModeControls[genIdx] = btn;
+      rows.appendChild(btn);
+    }
+    if (p.key === 'density') {
+      const btn = buildGenSyncToggle(() => {
+        state[genIdx].densitySync = !state[genIdx].densitySync;
+        refreshGenDensitySyncUI(genIdx);
+        sendParams(genIdx);
+      });
+      genDensitySyncModeControls[genIdx] = btn;
+      rows.appendChild(btn);
+    }
   });
   rows.appendChild(buildGeneratorReverseControl(genIdx));
   rows.appendChild(buildGeneratorShapeControl(genIdx));
@@ -2645,6 +2754,7 @@ const FX_DEFS = [
     params: [
       { key: 'time', label: 'Time', min: 0, max: 1, step: 0.01, value: 0.3, unit: 's' },
       { key: 'feedback', label: 'Feedback', min: 0, max: 0.95, step: 0.01, value: 0.35, unit: '' },
+      { key: 'hp', label: 'HP Cut', min: 20, max: 2000, step: 10, value: 20, unit: 'Hz' },
       { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
     ],
   },
@@ -2701,7 +2811,7 @@ const FX_DEFS = [
 
 // Source of truth for FX state — applied to audio nodes when they exist.
 const FX = {
-  delay: { time: 0.3, feedback: 0.35, mix: 0, sync: false, syncIndex: 4 },
+  delay: { time: 0.3, feedback: 0.35, mix: 0, sync: false, syncIndex: 4, hp: 20 },
   filter: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 0 },
   bitreduce: { bits: 8, rate: 1, mix: 0 },
   sat: { drive: 0.3, mix: 0 },
@@ -2984,6 +3094,11 @@ function setTransportBpm(value, { refresh = true } = {}) {
   if (FX.delay.sync) applyFx('delay', 'time', getBaseFxValue('delay', 'time'));
   refreshDelayTimeUI();
   refreshLFOUI();
+  for (let gi = 0; gi < 2; gi++) {
+    if (state[gi].grainSizeSync) refreshGenGrainSizeSyncUI(gi);
+    if (state[gi].densitySync) refreshGenDensitySyncUI(gi);
+    if (state[gi].grainSizeSync || state[gi].densitySync) sendParams(gi);
+  }
   applyMappedModulationTargets();
   refreshBackPanelState();
 }
@@ -3244,6 +3359,8 @@ function buildBackPanel() {
       const slider = document.createElement('input');
       slider.type = 'range';
       slider.className = 'back-sc-slider';
+      slider.dataset.scParam = label;
+      slider.dataset.scUnit = unit;
       slider.min = `${min}`; slider.max = `${max}`; slider.step = `${step}`;
       slider.value = `${initial}`;
       slider.addEventListener('input', () => {
@@ -3715,6 +3832,7 @@ function buildSequencerSection() {
   subdivisionRow.className = 'fx-mode-row seq-subdivision-row';
   [
     [4, '1/4'],
+    [5, '1/5'],
     [8, '1/8'],
     [12, '1/12'],
     [16, '1/16'],
@@ -3941,12 +4059,17 @@ function buildFxNodes() {
   const dlyWet = ac.createGain();
   const dlyTap = ac.createDelay(MAX_DELAY_SECONDS);
   const dlyFb = ac.createGain();
+  const dlyHpf = ac.createBiquadFilter();
+  dlyHpf.type = 'highpass';
+  dlyHpf.frequency.value = FX.delay.hp;
+  dlyHpf.Q.value = 0.5;
   const dlyOut = ac.createGain();
 
   dlyIn.connect(dlyDry);
   dlyIn.connect(dlyTap);
   dlyTap.connect(dlyFb);
-  dlyFb.connect(dlyTap); // feedback loop
+  dlyFb.connect(dlyHpf);
+  dlyHpf.connect(dlyTap); // filtered feedback loop
   dlyTap.connect(dlyWet);
   dlyDry.connect(dlyOut);
   dlyWet.connect(dlyOut);
@@ -4043,7 +4166,7 @@ function buildFxNodes() {
   fx = {
     input: dlyIn,
     output: masterOut,
-    delay: { tap: dlyTap, fb: dlyFb, dry: dlyDry, wet: dlyWet },
+    delay: { tap: dlyTap, fb: dlyFb, hpf: dlyHpf, dry: dlyDry, wet: dlyWet },
     filter: { biquad: fltBiquad, dry: fltDry, wet: fltWet },
     bitreduce: { node: bitNode, dry: bitDry, wet: bitWet },
     sat: { shaper: satShaper, dry: satDry, wet: satWet },
@@ -4061,6 +4184,8 @@ function applyFx(id, key, val) {
       fx.delay.tap.delayTime.setTargetAtTime(clamp(val, 0, MAX_DELAY_SECONDS), audioCtx.currentTime, 0.02);
     if (key === 'feedback')
       fx.delay.fb.gain.setTargetAtTime(Math.min(0.98, val), audioCtx.currentTime, 0.02);
+    if (key === 'hp')
+      fx.delay.hpf.frequency.setTargetAtTime(clamp(val, 20, 2000), audioCtx.currentTime, 0.02);
     if (key === 'mix') {
       fx.delay.wet.gain.value = val;
       fx.delay.dry.gain.value = 1 - val;
@@ -4171,6 +4296,17 @@ function capturePreset() {
       depth,
     })),
     seq: { steps: [...STEP_SEQ.steps], subdivision: STEP_SEQ.subdivision },
+    gen4: {
+      fxBypass: GEN4.fxBypass,
+      channels: GEN4.channels.map((ch) => ({
+        steps: [...ch.steps],
+        velocity: [...ch.velocity],
+        stutter: [...ch.stutter],
+        probability: [...ch.probability],
+        params: { ...ch.params },
+      })),
+    },
+    kickSc: { release: KICK_SC.release, amount: KICK_SC.amount },
     mappings: [...lfoMappings.values()].map(({ genIdx, key, sourceIdx }) => ({ genIdx, key, sourceIdx })),
   };
 }
@@ -4187,6 +4323,10 @@ function applyPreset(preset) {
     if (typeof gen.freeze === 'boolean') state[genIdx].freeze = gen.freeze;
     if (typeof gen.reverse === 'boolean') state[genIdx].reverse = gen.reverse;
     if (typeof gen.envType === 'string') state[genIdx].envType = gen.envType;
+    if (typeof gen.grainSizeSync === 'boolean') state[genIdx].grainSizeSync = gen.grainSizeSync;
+    if (typeof gen.grainSizeSyncIndex === 'number') state[genIdx].grainSizeSyncIndex = gen.grainSizeSyncIndex;
+    if (typeof gen.densitySync === 'boolean') state[genIdx].densitySync = gen.densitySync;
+    if (typeof gen.densitySyncIndex === 'number') state[genIdx].densitySyncIndex = gen.densitySyncIndex;
     refreshGeneratorUI(genIdx);
   });
 
@@ -4236,16 +4376,63 @@ function applyPreset(preset) {
     refreshSequencerUI();
   }
 
+  if (preset.gen4?.channels) {
+    preset.gen4.channels.forEach((saved, ci) => {
+      const ch = GEN4.channels[ci];
+      const def = GEN4_DEFS[ci];
+      if (!ch || !saved || !def) return;
+      if (Array.isArray(saved.steps)) {
+        saved.steps.forEach((v, si) => { if (si < 16) ch.steps[si] = !!v; });
+      }
+      if (Array.isArray(saved.velocity)) {
+        saved.velocity.forEach((v, si) => { if (si < 16) ch.velocity[si] = clamp(v, 0.05, 1.0); });
+      }
+      if (Array.isArray(saved.stutter)) {
+        saved.stutter.forEach((v, si) => { if (si < 16) ch.stutter[si] = clamp(Math.round(v), 1, 4); });
+      }
+      if (Array.isArray(saved.probability)) {
+        saved.probability.forEach((v, si) => { if (si < 16) ch.probability[si] = clamp(v, 0.0, 1.0); });
+      }
+      if (saved.params) {
+        def.paramDefs.forEach((pd) => {
+          if (typeof saved.params[pd.key] === 'number') {
+            ch.params[pd.key] = clamp(saved.params[pd.key], pd.min, pd.max);
+            gen4ControlBindings[ci].get(pd.key)?.setValue(ch.params[pd.key]);
+          }
+        });
+      }
+      for (let si = 0; si < 16; si++) gen4ApplyStepBtn(ci, si);
+    });
+    if (typeof preset.gen4.fxBypass === 'boolean') gen4SetFxBypass(preset.gen4.fxBypass);
+  }
+
+  if (preset.kickSc) {
+    document.querySelectorAll('[data-sc-param]').forEach((slider) => {
+      const param = slider.dataset.scParam;
+      if (param === 'amount' && typeof preset.kickSc.amount === 'number') {
+        slider.value = `${clamp(preset.kickSc.amount, 0, 1)}`;
+        slider.dispatchEvent(new Event('input'));
+      } else if (param === 'release' && typeof preset.kickSc.release === 'number') {
+        slider.value = `${clamp(preset.kickSc.release, 0.01, 1)}`;
+        slider.dispatchEvent(new Event('input'));
+      }
+    });
+  }
+
   lfoMappings.clear();
   preset.mappings?.forEach(({ genIdx, key, lfoIdx, sourceIdx }) => {
     const isGranularParam = genIdx < 2 && PARAMS.some((p) => p.key === key);
     const isGen3Param = genIdx === 2 && GEN3_LFO_PARAMS.some((p) => p.key === key);
     const [fxId, fxKey] = typeof key === 'string' ? key.split(':') : [];
     const isFxParam = genIdx === 3 && !!getFxParamBounds(fxId, fxKey);
+    const isGen4Param = genIdx === 4 && (() => {
+      const [chId, paramKey] = typeof key === 'string' ? key.split(':') : [];
+      return GEN4_DEFS.some((d) => d.id === chId && d.paramDefs.some((p) => p.key === paramKey));
+    })();
     const modSourceIdx = typeof sourceIdx === 'number' ? sourceIdx : lfoIdx;
     if (
-      (isGranularParam || isGen3Param || isFxParam) &&
-      (modSourceIdx === 0 || modSourceIdx === 1 || modSourceIdx === 2)
+      (isGranularParam || isGen3Param || isFxParam || isGen4Param) &&
+      modSourceIdx >= 0 && modSourceIdx <= 3
     ) {
       lfoMappings.set(`${genIdx}:${key}`, { genIdx, key, sourceIdx: modSourceIdx });
     }
@@ -4647,4 +4834,8 @@ window.addEventListener('resize', () => {
 
 window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') clearBackPatchSelection();
+  if (event.key === 'Tab' && !event.target.closest('input, textarea, select')) {
+    event.preventDefault();
+    setPanelView(UI_VIEW.mode === 'front' ? 'back' : 'front');
+  }
 });
