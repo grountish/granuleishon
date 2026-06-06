@@ -750,6 +750,7 @@ const genFreezeButtons = [null, null];
 const genReverseButtons = [null, null];
 const genEnvButtons = [new Map(), new Map()];
 const gen3ControlBindings = new Map();
+const gen3MapBindings = new Map();
 const fxControlBindings = new Map();
 const lfoControlBindings = [new Map(), new Map()];
 const lfoShapeButtons = [new Map(), new Map()];
@@ -765,6 +766,10 @@ const GRAIN_ENV_TYPES = [
   ['triangle', 'TRI'],
   ['sharp', 'SHP'],
   ['soft', 'SFT'],
+];
+const GEN3_LFO_PARAMS = [
+  { key: 'gain', min: 0, max: 1 },
+  { key: 'pitch', min: -24, max: 24 },
 ];
 
 function getSourceState(genIdx) {
@@ -883,10 +888,46 @@ function getEffectiveGeneratorParams(genIdx) {
   return effective;
 }
 
+function getGen3ParamBounds(key) {
+  return GEN3_LFO_PARAMS.find((param) => param.key === key) || null;
+}
+
+function getEffectiveGen3Params() {
+  const effective = {
+    gain: GEN3.gain,
+    pitch: GEN3.pitch,
+    detune: GEN3.detune,
+  };
+  if (lfoMappings.size > 0) {
+    lfoMappings.forEach(({ genIdx, key, lfoIdx }) => {
+      if (genIdx !== 2) return;
+      const lfo = LFOS[lfoIdx];
+      const paramDef = getGen3ParamBounds(key);
+      if (!lfo || !paramDef) return;
+      const scaled = lfo.currentValue * lfo.depth;
+      const half = (paramDef.max - paramDef.min) * 0.5;
+      effective[key] = Math.max(
+        paramDef.min,
+        Math.min(paramDef.max, effective[key] + scaled * half),
+      );
+    });
+  }
+  return effective;
+}
+
 function sendParams(genIdx) {
   if (!node) return;
   const effective = getEffectiveGeneratorParams(genIdx);
   node.port.postMessage({ type: 'params', gen: genIdx, value: effective });
+}
+
+function applyGen3Modulation() {
+  if (!GEN3.nodes || !audioCtx) return;
+  const effective = getEffectiveGen3Params();
+  GEN3.nodes.gain.gain.setTargetAtTime(effective.gain, audioCtx.currentTime, 0.02);
+  GEN3.activeNotes.forEach((entry) => {
+    applyGen3VoicePitch(entry, effective);
+  });
 }
 
 function refreshGeneratorUI(genIdx) {
@@ -910,6 +951,10 @@ function refreshLFOMappingUI() {
       genMapBindings[genIdx].get(key)?.setMapLFO(mapping ? mapping.lfoIdx : null);
     });
   }
+  GEN3_LFO_PARAMS.forEach(({ key }) => {
+    const mapping = lfoMappings.get(`2:${key}`);
+    gen3MapBindings.get(key)?.setMapLFO(mapping ? mapping.lfoIdx : null);
+  });
 }
 
 function setLFOLedState(led, lfoIdx) {
@@ -1379,6 +1424,7 @@ const OSC_NOTE_GRID = Array.from(
 const GEN3 = {
   type: 'sine',
   gain: 0.5,
+  pitch: 0,
   detune: 0,
   attack: 0.3,
   decay: 0.18,
@@ -1398,7 +1444,7 @@ function setGen3NoteActive(midi, active) {
 function buildGen3Nodes() {
   const ac = audioCtx;
   const gain = ac.createGain();
-  gain.gain.setValueAtTime(GEN3.gain, ac.currentTime);
+  gain.gain.setValueAtTime(getEffectiveGen3Params().gain, ac.currentTime);
   const analyser = ac.createAnalyser();
   analyser.fftSize = 2048;
   gain.connect(analyser);
@@ -1431,6 +1477,7 @@ function stopGen3Voice(voice) {
 function createGen3SourceNode(freq) {
   if (!GEN3.nodes) return null;
   const ac = audioCtx;
+  const effective = getEffectiveGen3Params();
   let src;
   if (GEN3.type === 'noise') {
     const len = ac.sampleRate;
@@ -1443,10 +1490,23 @@ function createGen3SourceNode(freq) {
   } else {
     src = ac.createOscillator();
     src.type = GEN3.type;
-    src.frequency.setValueAtTime(freq, ac.currentTime);
-    src.detune.setValueAtTime(GEN3.detune, ac.currentTime);
+    src.frequency.setValueAtTime(freq * Math.pow(2, effective.pitch / 12), ac.currentTime);
+    src.detune.setValueAtTime(effective.detune, ac.currentTime);
   }
   return src;
+}
+
+function applyGen3VoicePitch(voice, effective = getEffectiveGen3Params()) {
+  if (!voice?.source || !audioCtx) return;
+  if ('frequency' in voice.source && voice.source.frequency) {
+    voice.source.frequency.setValueAtTime(
+      voice.freq * Math.pow(2, effective.pitch / 12),
+      audioCtx.currentTime,
+    );
+  }
+  if ('detune' in voice.source && voice.source.detune) {
+    voice.source.detune.setValueAtTime(effective.detune, audioCtx.currentTime);
+  }
 }
 
 function applyGen3Envelope(envelope) {
@@ -1680,22 +1740,27 @@ function buildOscPanel() {
   rows.className = 'gen-controls';
   [
     { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, unit: '' },
+    { key: 'pitch', label: 'Pitch', min: -24, max: 24, step: 1, unit: 'st' },
     { key: 'detune', label: 'Detune', min: -100, max: 100, step: 1, unit: 'ct' },
     { key: 'attack', label: 'Attack', min: 0, max: 10, step: 0.01, unit: 's' },
     { key: 'decay', label: 'Decay', min: 0, max: 2, step: 0.01, unit: 's' },
     { key: 'sustain', label: 'Sustain', min: 0, max: 1, step: 0.01, unit: '' },
     { key: 'release', label: 'Release', min: 0, max: 10, step: 0.01, unit: 's' },
   ].forEach((p) => {
-    const control = makeControlRow(p, GEN3[p.key], (v) => {
-      GEN3[p.key] = v;
-      if (p.key === 'gain' && GEN3.nodes)
-        GEN3.nodes.gain.gain.setValueAtTime(v, audioCtx.currentTime);
-      if (p.key === 'detune' && GEN3.nodes)
-        GEN3.activeNotes.forEach((entry) => {
-          if (entry?.source?.detune) entry.source.detune.setValueAtTime(v, audioCtx.currentTime);
-        });
-    });
+    const isMappable = p.key === 'gain' || p.key === 'pitch';
+    const control = makeControlRow(
+      p,
+      GEN3[p.key],
+      (v) => {
+        GEN3[p.key] = v;
+        if (GEN3.nodes && (p.key === 'gain' || p.key === 'pitch' || p.key === 'detune')) {
+          applyGen3Modulation();
+        }
+      },
+      isMappable ? () => cycleLFOMap(2, p.key) : null,
+    );
     gen3ControlBindings.set(p.key, control);
+    if (isMappable) gen3MapBindings.set(p.key, control);
     rows.appendChild(control);
   });
   panel.appendChild(rows);
@@ -1871,7 +1936,10 @@ function lfoStep(ts) {
   });
   if (lfoMappings.size > 0) {
     const gens = new Set([...lfoMappings.values()].map((m) => m.genIdx));
-    gens.forEach((gi) => sendParams(gi));
+    gens.forEach((gi) => {
+      if (gi === 2) applyGen3Modulation();
+      else sendParams(gi);
+    });
   }
   lfoAnimFrame = requestAnimationFrame(lfoStep);
 }
@@ -1899,16 +1967,19 @@ function cycleLFOMap(genIdx, key) {
   const mapping = lfoMappings.get(mapKey);
   if (!mapping) {
     lfoMappings.set(mapKey, { genIdx, key, lfoIdx: 0 });
-    sendParams(genIdx);
+    if (genIdx === 2) applyGen3Modulation();
+    else sendParams(genIdx);
     return 0;
   }
   if (mapping.lfoIdx === 0) {
     mapping.lfoIdx = 1;
-    sendParams(genIdx);
+    if (genIdx === 2) applyGen3Modulation();
+    else sendParams(genIdx);
     return 1;
   }
   lfoMappings.delete(mapKey);
-  sendParams(genIdx);
+  if (genIdx === 2) applyGen3Modulation();
+  else sendParams(genIdx);
   return null;
 }
 
@@ -2357,7 +2428,7 @@ function applyAllFx() {
 }
 
 function refreshGen3UI() {
-  ['gain', 'detune', 'attack', 'decay', 'sustain', 'release'].forEach((key) => {
+  ['gain', 'pitch', 'detune', 'attack', 'decay', 'sustain', 'release'].forEach((key) => {
     gen3ControlBindings.get(key)?.setValue(GEN3[key]);
   });
   gen3ShapeButtons.forEach((btn, type) => btn.classList.toggle('active', GEN3.type === type));
@@ -2387,6 +2458,7 @@ function capturePreset() {
     gen3: {
       type: GEN3.type,
       gain: GEN3.gain,
+      pitch: GEN3.pitch,
       detune: GEN3.detune,
       attack: GEN3.attack,
       decay: GEN3.decay,
@@ -2425,12 +2497,8 @@ function applyPreset(preset) {
     Object.assign(GEN3, preset.gen3);
     refreshGen3UI();
     if (GEN3.nodes) {
-      GEN3.nodes.gain.gain.setValueAtTime(GEN3.gain, audioCtx.currentTime);
-      GEN3.activeNotes.forEach((entry) => {
-        if (entry?.source?.detune)
-          entry.source.detune.setValueAtTime(GEN3.detune, audioCtx.currentTime);
-      });
       restartAllGen3Notes();
+      applyGen3Modulation();
     }
   }
 
@@ -2461,7 +2529,9 @@ function applyPreset(preset) {
 
   lfoMappings.clear();
   preset.mappings?.forEach(({ genIdx, key, lfoIdx }) => {
-    if (genIdx < 2 && PARAMS.some((p) => p.key === key) && (lfoIdx === 0 || lfoIdx === 1)) {
+    const isGranularParam = genIdx < 2 && PARAMS.some((p) => p.key === key);
+    const isGen3Param = genIdx === 2 && GEN3_LFO_PARAMS.some((p) => p.key === key);
+    if ((isGranularParam || isGen3Param) && (lfoIdx === 0 || lfoIdx === 1)) {
       lfoMappings.set(`${genIdx}:${key}`, { genIdx, key, lfoIdx });
     }
   });
@@ -2470,6 +2540,7 @@ function applyPreset(preset) {
   refreshLFOUI();
   sendParams(0);
   sendParams(1);
+  applyGen3Modulation();
 }
 
 function refreshPresetUI() {
