@@ -48,7 +48,11 @@ const BACK_PANEL = {
   targetRows: new Map(),
   targetValues: new Map(),
   routeLayer: null,
+  patchfieldEl: null,
   built: false,
+  selectedSourceIdx: null,
+  pointerX: null,
+  pointerY: null,
 };
 
 function getStatusEl() {
@@ -315,6 +319,7 @@ async function ensureAudioEngine() {
     await ensureFxModules();
     buildFxNodes();
     buildGen3Nodes();
+    buildGen4Nodes();
     fx.output.connect(audioCtx.destination);
   }
   if (audioCtx.state === 'suspended') await audioCtx.resume();
@@ -1064,6 +1069,9 @@ function getModSourceScaledValue(sourceIdx) {
   if (sourceIdx === 2) {
     return STEP_SEQ.currentValue;
   }
+  if (sourceIdx === 3) {
+    return -KICK_SC.envelope * 2 * KICK_SC.amount;
+  }
   return null;
 }
 
@@ -1093,6 +1101,7 @@ function applyMappedModulationTargets() {
   gens.forEach((gi) => {
     if (gi === 2) applyGen3Modulation();
     else if (gi === 3) applyFxModulation();
+    else if (gi === 4) applyGen4Modulation();
     else sendParams(gi);
   });
   refreshModulationVisuals();
@@ -1118,6 +1127,10 @@ function applyFxModulation() {
   FX_LFO_PARAMS.forEach(({ id, key }) => {
     applyFx(id, key, getEffectiveFxValue(id, key));
   });
+}
+
+function applyGen4Modulation() {
+  // drum params are one-shots; effective values read at trigger time in gen4FireChannel
 }
 
 function refreshModulationVisuals() {
@@ -1150,6 +1163,16 @@ function refreshModulationVisuals() {
     }
     control?.setModValue(getEffectiveFxValue(id, key));
   });
+
+  gen4ControlBindings.forEach((ctrlMap, ci) => {
+    const def = GEN4_DEFS[ci];
+    const effective = getEffectiveGen4Params(ci);
+    def.paramDefs.forEach((pd) => {
+      const ctrl = ctrlMap.get(pd.key);
+      const mapped = lfoMappings.has(`4:${def.id}:${pd.key}`);
+      ctrl?.setModValue(mapped ? effective[pd.key] : null);
+    });
+  });
 }
 
 function refreshGeneratorUI(genIdx) {
@@ -1181,6 +1204,13 @@ function refreshLFOMappingUI() {
     const mapping = lfoMappings.get(`3:${id}:${key}`);
     fxControlBindings.get(`${id}:${key}`)?.setMapLFO(mapping ? mapping.sourceIdx : null);
   });
+  gen4ControlBindings.forEach((ctrlMap, ci) => {
+    const def = GEN4_DEFS[ci];
+    def.paramDefs.forEach((pd) => {
+      const mapping = lfoMappings.get(`4:${def.id}:${pd.key}`);
+      ctrlMap.get(pd.key)?.setMapLFO(mapping ? mapping.sourceIdx : null);
+    });
+  });
   refreshModulationVisuals();
   refreshBackPanelState();
 }
@@ -1196,6 +1226,13 @@ function setLFOLedState(led, sourceIdx) {
     led.dataset.lfo = 'S';
     led.textContent = 'S';
     led.title = 'Map: Seq';
+    return;
+  }
+  if (sourceIdx === 3) {
+    led.classList.add('active', 'lfo-sc');
+    led.dataset.lfo = 'K';
+    led.textContent = 'K';
+    led.title = 'Map: Kick SC';
     return;
   }
   led.classList.add('active', `lfo-${sourceIdx + 1}`);
@@ -1676,6 +1713,7 @@ function buildUI() {
   container.appendChild(buildGeneratorPanel(0));
   container.appendChild(buildGeneratorPanel(1));
   container.appendChild(buildOscPanel());
+  container.appendChild(buildDrumPanel());
 }
 
 // ─── Gen 3: Oscillator ─────────────────────────────────────────────────────
@@ -2061,6 +2099,543 @@ function buildOscPanel() {
   return panel;
 }
 
+// ─── Gen 4: Glitch Drums ──────────────────────────────────────────────────
+
+const GEN4_DEFS = [
+  {
+    id: 'kick', label: 'KICK', color: '#e05858',
+    paramDefs: [
+      { key: 'tune',  label: 'Tune',  min: 30,    max: 120,   step: 1,     value: 70,   unit: 'Hz' },
+      { key: 'decay', label: 'Decay', min: 0.05,  max: 1.0,   step: 0.01,  value: 0.85, unit: 's'  },
+      { key: 'punch', label: 'Punch', min: 0,     max: 1,     step: 0.01,  value: 0.36, unit: ''   },
+      { key: 'drive', label: 'Drive', min: 0,     max: 1,     step: 0.01,  value: 0,    unit: ''   },
+      { key: 'gain',  label: 'Gain',  min: 0,     max: 1,     step: 0.01,  value: 1,    unit: ''   },
+    ],
+  },
+  {
+    id: 'snare', label: 'SNR', color: '#d4892a',
+    paramDefs: [
+      { key: 'tune',  label: 'Tone',  min: 100,   max: 500,  step: 5,    value: 360,  unit: 'Hz' },
+      { key: 'decay', label: 'Decay', min: 0.05,  max: 0.8,  step: 0.01, value: 0.09, unit: 's'  },
+      { key: 'snap',  label: 'Snap',  min: 0,     max: 1,    step: 0.01, value: 1,    unit: ''   },
+      { key: 'gain',  label: 'Gain',  min: 0,     max: 1,    step: 0.01, value: 0.96, unit: ''   },
+    ],
+  },
+  {
+    id: 'hat', label: 'HAT', color: '#7ad860',
+    paramDefs: [
+      { key: 'decay', label: 'Decay', min: 0.005, max: 0.5,   step: 0.005, value: 0.06,   unit: 's'  },
+      { key: 'tone',  label: 'Tone',  min: 3000,  max: 16000, step: 200,   value: 11200,  unit: 'Hz' },
+      { key: 'gain',  label: 'Gain',  min: 0,     max: 1,     step: 0.01,  value: 0.6,    unit: ''   },
+    ],
+  },
+  {
+    id: 'perc', label: 'PERC', color: '#9f7de8',
+    paramDefs: [
+      { key: 'tune',  label: 'Tune',  min: 80,   max: 800,  step: 5,    value: 165,  unit: 'Hz' },
+      { key: 'ratio', label: 'Ratio', min: 0.5,  max: 8,    step: 0.1,  value: 1.6,  unit: ''   },
+      { key: 'index', label: 'Index', min: 0,    max: 10,   step: 0.1,  value: 1.6,  unit: ''   },
+      { key: 'decay', label: 'Decay', min: 0.03, max: 0.6,  step: 0.01, value: 0.06, unit: 's'  },
+      { key: 'gain',  label: 'Gain',  min: 0,    max: 1,    step: 0.01, value: 0.7,  unit: ''   },
+    ],
+  },
+];
+
+const GEN4 = {
+  playing: false,
+  schedulerStep: -1,
+  displayStep: -1,
+  nextStepTime: 0,
+  schedulerTimer: null,
+  scheduleAheadTime: 0.1,
+  scheduleInterval: 25,
+  fxBypass: false,
+  nodes: null,
+  channels: GEN4_DEFS.map((def) => ({
+    id: def.id,
+    muted: false,
+    steps: new Array(16).fill(false),
+    velocity: new Array(16).fill(1.0),
+    stutter: new Array(16).fill(1),
+    probability: new Array(16).fill(1.0),
+    params: Object.fromEntries(def.paramDefs.map((p) => [p.key, p.value])),
+  })),
+};
+
+const KICK_SC = {
+  envelope: 0,
+  release: 0.2,
+  amount: 1.0,
+};
+
+const gen4Schedule = [];
+const gen4StepEls = GEN4_DEFS.map(() => new Array(16).fill(null));
+const gen4ControlBindings = GEN4_DEFS.map(() => new Map());
+let gen4PlayBtnEl = null;
+let gen4DisplayFrame = null;
+const gen4DragState = { active: false, ci: 0, si: 0, startY: 0, startVel: 1 };
+
+window.addEventListener('mousemove', (e) => {
+  if (!gen4DragState.active) return;
+  const { ci, si, startY, startVel } = gen4DragState;
+  const next = clamp(startVel + (startY - e.clientY) / 80, 0.05, 1.0);
+  GEN4.channels[ci].velocity[si] = next;
+  gen4StepEls[ci][si]?.style.setProperty('--step-velocity', next);
+});
+
+window.addEventListener('mouseup', () => { gen4DragState.active = false; });
+
+function buildGen4Nodes() {
+  if (!audioCtx || GEN4.nodes) return;
+  const ac = audioCtx;
+
+  const output = ac.createGain();
+  output.gain.value = 1.0;
+
+  const analyser = ac.createAnalyser();
+  analyser.fftSize = 1024;
+
+  const noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+  const noiseData = noiseBuf.getChannelData(0);
+  for (let i = 0; i < ac.sampleRate; i++) noiseData[i] = Math.random() * 2 - 1;
+
+  output.connect(analyser);
+  analyser.connect(GEN4.fxBypass ? fx.limiter.comp : fx.input);
+
+  GEN4.nodes = { output, analyser, noiseBuf };
+}
+
+let gen4FxBtn = null;
+
+function gen4SetFxBypass(bypass) {
+  GEN4.fxBypass = bypass;
+  if (GEN4.nodes && fx) {
+    try { GEN4.nodes.analyser.disconnect(); } catch (e) {}
+    GEN4.nodes.analyser.connect(bypass ? fx.limiter.comp : fx.input);
+  }
+  if (gen4FxBtn) gen4FxBtn.classList.toggle('active', !bypass);
+}
+
+function gen4DistortionCurve(amount) {
+  const n = 256;
+  const curve = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i * 2) / n - 1;
+    curve[i] = ((Math.PI + amount) * x) / (Math.PI + amount * Math.abs(x));
+  }
+  return curve;
+}
+
+function gen4TriggerKick(time, velocity, p) {
+  KICK_SC.envelope = 1.0;
+  const ac = audioCtx;
+  const osc = ac.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(p.tune * (1 + p.punch * 4), time);
+  osc.frequency.exponentialRampToValueAtTime(Math.max(p.tune * 0.08, 18), time + p.punch * 0.15 + 0.005);
+
+  const shaper = ac.createWaveShaper();
+  shaper.curve = gen4DistortionCurve(p.drive * 300 + 1);
+  shaper.oversample = '2x';
+
+  const env = ac.createGain();
+  env.gain.setValueAtTime(0.001, time);
+  env.gain.linearRampToValueAtTime(velocity * p.gain, time + 0.003);
+  env.gain.exponentialRampToValueAtTime(0.001, time + p.decay);
+
+  osc.connect(shaper);
+  shaper.connect(env);
+  env.connect(GEN4.nodes.output);
+  osc.start(time);
+  osc.stop(time + p.decay + 0.05);
+}
+
+function gen4TriggerSnare(time, velocity, p) {
+  const ac = audioCtx;
+
+  const osc = ac.createOscillator();
+  osc.type = 'triangle';
+  osc.frequency.setValueAtTime(p.tune, time);
+  osc.frequency.exponentialRampToValueAtTime(Math.max(p.tune * 0.5, 20), time + p.decay * 0.3);
+  const oscEnv = ac.createGain();
+  oscEnv.gain.setValueAtTime(0.001, time);
+  oscEnv.gain.linearRampToValueAtTime(velocity * p.gain * p.snap, time + 0.002);
+  oscEnv.gain.exponentialRampToValueAtTime(0.001, time + p.decay * 0.6);
+  osc.connect(oscEnv);
+  oscEnv.connect(GEN4.nodes.output);
+
+  const noise = ac.createBufferSource();
+  noise.buffer = GEN4.nodes.noiseBuf;
+  const bpf = ac.createBiquadFilter();
+  bpf.type = 'bandpass';
+  bpf.frequency.value = p.tune * 1.5;
+  bpf.Q.value = 0.7;
+  const noiseEnv = ac.createGain();
+  noiseEnv.gain.setValueAtTime(0.001, time);
+  noiseEnv.gain.linearRampToValueAtTime(velocity * p.gain * (1 - p.snap * 0.3), time + 0.001);
+  noiseEnv.gain.exponentialRampToValueAtTime(0.001, time + p.decay);
+  noise.connect(bpf);
+  bpf.connect(noiseEnv);
+  noiseEnv.connect(GEN4.nodes.output);
+
+  osc.start(time);
+  osc.stop(time + p.decay + 0.05);
+  noise.start(time);
+  noise.stop(time + p.decay + 0.05);
+}
+
+function gen4TriggerHat(time, velocity, p) {
+  const ac = audioCtx;
+  const noise = ac.createBufferSource();
+  noise.buffer = GEN4.nodes.noiseBuf;
+
+  const hpf = ac.createBiquadFilter();
+  hpf.type = 'highpass';
+  hpf.frequency.value = p.tone;
+  hpf.Q.value = 0.5;
+
+  const bpf = ac.createBiquadFilter();
+  bpf.type = 'bandpass';
+  bpf.frequency.value = p.tone * 1.4;
+  bpf.Q.value = 1.0;
+
+  const env = ac.createGain();
+  env.gain.setValueAtTime(0.001, time);
+  env.gain.linearRampToValueAtTime(velocity * p.gain, time + 0.001);
+  env.gain.exponentialRampToValueAtTime(0.001, time + p.decay);
+
+  noise.connect(hpf);
+  hpf.connect(bpf);
+  bpf.connect(env);
+  env.connect(GEN4.nodes.output);
+  noise.start(time);
+  noise.stop(time + p.decay + 0.02);
+}
+
+function gen4TriggerPerc(time, velocity, p) {
+  const ac = audioCtx;
+  const modFreq = p.tune * p.ratio;
+
+  const mod = ac.createOscillator();
+  mod.type = 'sine';
+  mod.frequency.setValueAtTime(modFreq, time);
+
+  const modGain = ac.createGain();
+  const modDepth = modFreq * p.index;
+  modGain.gain.setValueAtTime(modDepth, time);
+  modGain.gain.exponentialRampToValueAtTime(Math.max(modDepth * 0.01, 0.001), time + p.decay * 0.5);
+  mod.connect(modGain);
+
+  const car = ac.createOscillator();
+  car.type = 'sine';
+  car.frequency.setValueAtTime(p.tune, time);
+  modGain.connect(car.frequency);
+
+  const env = ac.createGain();
+  env.gain.setValueAtTime(0.001, time);
+  env.gain.linearRampToValueAtTime(velocity * p.gain, time + 0.003);
+  env.gain.exponentialRampToValueAtTime(0.001, time + p.decay);
+
+  car.connect(env);
+  env.connect(GEN4.nodes.output);
+  mod.start(time);
+  mod.stop(time + p.decay + 0.05);
+  car.start(time);
+  car.stop(time + p.decay + 0.05);
+}
+
+function getEffectiveGen4Params(ci) {
+  const ch = GEN4.channels[ci];
+  const def = GEN4_DEFS[ci];
+  const effective = { ...ch.params };
+  def.paramDefs.forEach((pd) => {
+    const mapping = lfoMappings.get(`4:${def.id}:${pd.key}`);
+    if (!mapping) return;
+    const scaled = getModSourceScaledValue(mapping.sourceIdx);
+    if (scaled === null) return;
+    const half = (pd.max - pd.min) * 0.5;
+    effective[pd.key] = Math.max(pd.min, Math.min(pd.max, effective[pd.key] + scaled * half));
+  });
+  return effective;
+}
+
+function gen4FireChannel(ci, time, velocity) {
+  const ch = GEN4.channels[ci];
+  if (ch.muted) return;
+  const p = getEffectiveGen4Params(ci);
+  switch (ch.id) {
+    case 'kick':  gen4TriggerKick(time, velocity, p);  break;
+    case 'snare': gen4TriggerSnare(time, velocity, p); break;
+    case 'hat':   gen4TriggerHat(time, velocity, p);   break;
+    case 'perc':  gen4TriggerPerc(time, velocity, p);  break;
+  }
+}
+
+function gen4ScheduleTick() {
+  if (!audioCtx || !GEN4.nodes || !GEN4.playing) return;
+  const secPerStep = (60.0 / TRANSPORT.bpm) / 4;
+  while (GEN4.nextStepTime < audioCtx.currentTime + GEN4.scheduleAheadTime) {
+    const step = (GEN4.schedulerStep + 1) % 16;
+    GEN4.schedulerStep = step;
+    gen4Schedule.push({ step, time: GEN4.nextStepTime });
+    if (gen4Schedule.length > 48) gen4Schedule.shift();
+    GEN4.channels.forEach((ch, ci) => {
+      if (!ch.steps[step]) return;
+      if (Math.random() > ch.probability[step]) return;
+      const count = ch.stutter[step];
+      for (let r = 0; r < count; r++) {
+        gen4FireChannel(ci, GEN4.nextStepTime + r * (secPerStep / count), ch.velocity[step]);
+      }
+    });
+    GEN4.nextStepTime += secPerStep;
+  }
+}
+
+function gen4RefreshStepDisplay() {
+  GEN4_DEFS.forEach((_, ci) => {
+    for (let si = 0; si < 16; si++) {
+      gen4StepEls[ci][si]?.classList.toggle('current', si === GEN4.displayStep);
+    }
+  });
+}
+
+function gen4DisplayTick() {
+  gen4DisplayFrame = requestAnimationFrame(gen4DisplayTick);
+  if (!audioCtx || !GEN4.playing) return;
+  const now = audioCtx.currentTime;
+  let found = GEN4.displayStep;
+  for (let i = gen4Schedule.length - 1; i >= 0; i--) {
+    if (gen4Schedule[i].time <= now) { found = gen4Schedule[i].step; break; }
+  }
+  if (found !== GEN4.displayStep) {
+    GEN4.displayStep = found;
+    gen4RefreshStepDisplay();
+  }
+}
+
+function startGen4Sequencer() {
+  if (GEN4.playing) return;
+  GEN4.playing = true;
+  GEN4.schedulerStep = -1;
+  GEN4.displayStep = -1;
+  gen4Schedule.length = 0;
+  GEN4.nextStepTime = audioCtx.currentTime;
+  GEN4.schedulerTimer = setInterval(gen4ScheduleTick, GEN4.scheduleInterval);
+  if (!gen4DisplayFrame) gen4DisplayFrame = requestAnimationFrame(gen4DisplayTick);
+  if (gen4PlayBtnEl) {
+    gen4PlayBtnEl.textContent = '◼ Stop';
+    gen4PlayBtnEl.classList.add('active');
+  }
+}
+
+function stopGen4Sequencer() {
+  GEN4.playing = false;
+  clearInterval(GEN4.schedulerTimer);
+  GEN4.schedulerTimer = null;
+  if (gen4DisplayFrame) {
+    cancelAnimationFrame(gen4DisplayFrame);
+    gen4DisplayFrame = null;
+  }
+  GEN4.displayStep = -1;
+  gen4RefreshStepDisplay();
+  if (gen4PlayBtnEl) {
+    gen4PlayBtnEl.textContent = '▶ Play';
+    gen4PlayBtnEl.classList.remove('active');
+  }
+}
+
+const GEN4_PROB_CYCLE = [1.0, 0.75, 0.5, 0.25];
+
+function gen4ApplyStepBtn(ci, si) {
+  const btn = gen4StepEls[ci][si];
+  if (!btn) return;
+  const ch = GEN4.channels[ci];
+  const on = ch.steps[si];
+  btn.classList.toggle('on', on);
+  btn.style.setProperty('--step-velocity', ch.velocity[si]);
+
+  const stutterEl = btn.querySelector('.drum-step-stutter');
+  if (stutterEl) {
+    const s = ch.stutter[si];
+    stutterEl.textContent = s > 1 ? `${s}×` : '';
+    stutterEl.hidden = s <= 1;
+  }
+
+  const probEl = btn.querySelector('.drum-step-prob');
+  if (probEl) {
+    const p = ch.probability[si];
+    probEl.style.width = `${p * 100}%`;
+    probEl.hidden = !on || p >= 1.0;
+  }
+}
+
+function gen4CycleStutter(ci, si) {
+  const ch = GEN4.channels[ci];
+  ch.stutter[si] = (ch.stutter[si] % 4) + 1;
+  gen4ApplyStepBtn(ci, si);
+}
+
+function gen4CycleProbability(ci, si) {
+  const ch = GEN4.channels[ci];
+  const idx = GEN4_PROB_CYCLE.indexOf(ch.probability[si]);
+  ch.probability[si] = GEN4_PROB_CYCLE[(idx + 1) % GEN4_PROB_CYCLE.length];
+  gen4ApplyStepBtn(ci, si);
+}
+
+function buildDrumPanel() {
+  const panel = document.createElement('div');
+  panel.className = 'generator gen-4';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'col-header';
+  const title = document.createElement('span');
+  title.className = 'col-title';
+  title.innerHTML = '<span class="col-dot"></span>Gen 4 · Drums';
+  const actions = document.createElement('div');
+  actions.className = 'gen-header-actions';
+  const fxBtn = document.createElement('button');
+  fxBtn.className = 'drum-fx-btn active';
+  fxBtn.textContent = 'FX';
+  fxBtn.title = 'Route through FX chain — click to bypass to limiter only';
+  gen4FxBtn = fxBtn;
+  fxBtn.addEventListener('click', () => gen4SetFxBypass(!GEN4.fxBypass));
+  actions.appendChild(fxBtn);
+
+  const playBtn = document.createElement('button');
+  playBtn.className = 'drum-play-btn';
+  playBtn.textContent = '▶ Play';
+  gen4PlayBtnEl = playBtn;
+  playBtn.addEventListener('click', async () => {
+    await ensureAudioEngine();
+    if (!GEN4.nodes) buildGen4Nodes();
+    GEN4.playing ? stopGen4Sequencer() : startGen4Sequencer();
+  });
+  actions.appendChild(playBtn);
+  header.append(title, actions);
+  panel.appendChild(header);
+
+  const hints = document.createElement('div');
+  hints.className = 'drum-hints';
+  hints.innerHTML =
+    '<span class="drum-hint"><span class="drum-hint-key">⇧ click</span> active step → cycle probability</span>' +
+    '<span class="drum-hints-sep">·</span>' +
+    '<span class="drum-hint"><span class="drum-hint-key">right-click</span> active step → cycle stutter</span>';
+  panel.appendChild(hints);
+
+  // Step grid
+  const grid = document.createElement('div');
+  grid.className = 'drum-grid';
+
+  GEN4_DEFS.forEach((def, ci) => {
+    const ch = GEN4.channels[ci];
+    const row = document.createElement('div');
+    row.className = 'drum-row';
+    row.style.setProperty('--ch-color', def.color);
+
+    const lbl = document.createElement('div');
+    lbl.className = 'drum-row-label';
+    lbl.textContent = def.label;
+
+    const stepsEl = document.createElement('div');
+    stepsEl.className = 'drum-steps';
+
+    for (let si = 0; si < 16; si++) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'drum-step';
+      gen4StepEls[ci][si] = btn;
+
+      const stutterEl = document.createElement('span');
+      stutterEl.className = 'drum-step-stutter';
+      stutterEl.hidden = true;
+      btn.appendChild(stutterEl);
+
+      const probEl = document.createElement('span');
+      probEl.className = 'drum-step-prob';
+      probEl.hidden = true;
+      btn.appendChild(probEl);
+
+      gen4ApplyStepBtn(ci, si);
+
+      btn.addEventListener('click', (e) => {
+        if (e.shiftKey && ch.steps[si]) {
+          gen4CycleProbability(ci, si);
+          return;
+        }
+        ch.steps[si] = !ch.steps[si];
+        // reset glitch state when turning off
+        if (!ch.steps[si]) {
+          ch.stutter[si] = 1;
+          ch.probability[si] = 1.0;
+        }
+        gen4ApplyStepBtn(ci, si);
+      });
+
+      btn.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (ch.steps[si]) gen4CycleStutter(ci, si);
+      });
+
+      btn.addEventListener('mousedown', (e) => {
+        if (!ch.steps[si] || e.shiftKey || e.button !== 0) return;
+        gen4DragState.active = true;
+        gen4DragState.ci = ci;
+        gen4DragState.si = si;
+        gen4DragState.startY = e.clientY;
+        gen4DragState.startVel = ch.velocity[si];
+        e.preventDefault();
+      });
+
+      stepsEl.appendChild(btn);
+    }
+
+    const muteBtn = document.createElement('button');
+    muteBtn.type = 'button';
+    muteBtn.className = 'drum-mute-btn';
+    muteBtn.textContent = 'M';
+    muteBtn.title = 'Mute channel';
+    muteBtn.addEventListener('click', () => {
+      ch.muted = !ch.muted;
+      muteBtn.classList.toggle('muted', ch.muted);
+    });
+
+    row.append(lbl, stepsEl, muteBtn);
+    grid.appendChild(row);
+  });
+
+  panel.appendChild(grid);
+
+  // Param sections (one per channel, collapsed by default)
+  const paramsWrap = document.createElement('div');
+  paramsWrap.className = 'drum-params';
+
+  GEN4_DEFS.forEach((def, ci) => {
+    const ch = GEN4.channels[ci];
+    const { section, content, setCollapsed } = createFxSection(def.label, 'drum-param-section');
+    section.querySelector('.fx-section-label').style.color = def.color;
+    setCollapsed(true);
+
+    const controls = document.createElement('div');
+    controls.className = 'gen-controls';
+    controls.style.setProperty('--gen-accent', def.color);
+
+    def.paramDefs.forEach((p) => {
+      const ctrl = makeControlRow(p, ch.params[p.key], (v) => { ch.params[p.key] = v; },
+        () => cycleLFOMap(4, `${def.id}:${p.key}`)
+      );
+      gen4ControlBindings[ci].set(p.key, ctrl);
+      controls.appendChild(ctrl);
+    });
+
+    content.appendChild(controls);
+    paramsWrap.appendChild(section);
+  });
+
+  panel.appendChild(paramsWrap);
+  return panel;
+}
+
 // ─── FX Chain ──────────────────────────────────────────────────────────────
 
 const FX_DEFS = [
@@ -2291,6 +2866,9 @@ function lfoStep(ts) {
     STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
     if (advanced || dt === 0) refreshSequencerUI();
   }
+  if (KICK_SC.envelope > 0) {
+    KICK_SC.envelope = Math.max(0, KICK_SC.envelope - dt / Math.max(0.005, KICK_SC.release));
+  }
   applyMappedModulationTargets();
   lfoAnimFrame = requestAnimationFrame(lfoStep);
 }
@@ -2342,12 +2920,16 @@ function cycleLFOMap(genIdx, key) {
   } else if (mapping.sourceIdx === 1) {
     mapping.sourceIdx = 2;
     nextSourceIdx = 2;
+  } else if (mapping.sourceIdx === 2) {
+    mapping.sourceIdx = 3;
+    nextSourceIdx = 3;
   } else {
     lfoMappings.delete(mapKey);
     nextSourceIdx = null;
   }
   if (genIdx === 2) applyGen3Modulation();
   else if (genIdx === 3) applyFxModulation();
+  else if (genIdx === 4) applyGen4Modulation();
   else sendParams(genIdx);
   refreshBackPanelState();
   return nextSourceIdx;
@@ -2484,6 +3066,60 @@ function getBackTargetValue(routeKey) {
   return 'n/a';
 }
 
+function parseBackRouteKey(routeKey) {
+  const [group, a, b] = routeKey.split(':');
+  const genIdx = Number(group);
+  if (!Number.isFinite(genIdx)) return null;
+  if (genIdx === 3 || genIdx === 4) {
+    if (!a || !b) return null;
+    return { genIdx, key: `${a}:${b}` };
+  }
+  if (!a) return null;
+  return { genIdx, key: a };
+}
+
+function clearBackPatchSelection() {
+  if (BACK_PANEL.selectedSourceIdx === null && BACK_PANEL.pointerX === null && BACK_PANEL.pointerY === null) {
+    return;
+  }
+  BACK_PANEL.selectedSourceIdx = null;
+  BACK_PANEL.pointerX = null;
+  BACK_PANEL.pointerY = null;
+  refreshBackPanelState();
+}
+
+function setBackPatchSelection(sourceIdx) {
+  BACK_PANEL.selectedSourceIdx = BACK_PANEL.selectedSourceIdx === sourceIdx ? null : sourceIdx;
+  BACK_PANEL.pointerX = null;
+  BACK_PANEL.pointerY = null;
+  refreshBackPanelState();
+}
+
+function applyModulationTargetUpdate(genIdx) {
+  if (genIdx === 2) applyGen3Modulation();
+  else if (genIdx === 3) applyFxModulation();
+  else if (genIdx === 4) applyGen4Modulation();
+  else sendParams(genIdx);
+}
+
+function patchBackPanelRoute(routeKey) {
+  if (BACK_PANEL.selectedSourceIdx === null) return;
+  const parsed = parseBackRouteKey(routeKey);
+  if (!parsed) return;
+  const existing = lfoMappings.get(routeKey);
+  if (existing?.sourceIdx === BACK_PANEL.selectedSourceIdx) {
+    lfoMappings.delete(routeKey);
+  } else {
+    lfoMappings.set(routeKey, {
+      genIdx: parsed.genIdx,
+      key: parsed.key,
+      sourceIdx: BACK_PANEL.selectedSourceIdx,
+    });
+  }
+  applyModulationTargetUpdate(parsed.genIdx);
+  refreshLFOMappingUI();
+}
+
 function buildBackPanel() {
   const root = getBackPanel();
   if (!root) return;
@@ -2510,35 +3146,9 @@ function buildBackPanel() {
     board.appendChild(hole);
   }
 
-  const audioStrip = document.createElement('div');
-  audioStrip.className = 'back-audio-strip';
-  BACK_AUDIO_CHAIN.forEach(({ id, title }, idx) => {
-    const cell = document.createElement('div');
-    cell.className = 'back-pipeline-cell';
-
-    const module = document.createElement('div');
-    module.className = 'back-module back-audio-module';
-    const titleEl = document.createElement('div');
-    titleEl.className = 'back-module-title';
-    titleEl.textContent = title;
-    const subtitleEl = document.createElement('div');
-    subtitleEl.className = 'back-module-subtitle';
-    subtitleEl.textContent = '...';
-    module.append(titleEl, subtitleEl);
-    cell.appendChild(module);
-
-    if (idx < BACK_AUDIO_CHAIN.length - 1) {
-      const link = document.createElement('div');
-      link.className = 'back-pipeline-link';
-      cell.appendChild(link);
-    }
-
-    audioStrip.appendChild(cell);
-    BACK_PANEL.audioModules.set(id, { el: module, subtitleEl });
-  });
-
   const patchfield = document.createElement('div');
   patchfield.className = 'back-patchfield';
+  BACK_PANEL.patchfieldEl = patchfield;
 
   const wireLayer = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   wireLayer.classList.add('back-wire-layer');
@@ -2578,8 +3188,13 @@ function buildBackPanel() {
     jackRow.className = 'back-source-readout';
     const jackLabel = document.createElement('span');
     jackLabel.textContent = 'patch';
-    const jack = document.createElement('div');
+    const jack = document.createElement('button');
+    jack.type = 'button';
     jack.className = 'patch-jack source';
+    jack.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setBackPatchSelection(idx);
+    });
     jackRow.append(jackLabel, jack);
     body.append(readout, meter, jackRow);
     module.append(titleEl, subtitleEl, body);
@@ -2588,6 +3203,78 @@ function buildBackPanel() {
     BACK_PANEL.sourceMeters.set(idx, fill);
     BACK_PANEL.sourceMeta.set(idx, { subtitleEl, valueEl, module });
   });
+
+  // Kick SC source module (sourceIdx = 3)
+  (() => {
+    const module = document.createElement('div');
+    module.className = 'back-module back-source-module back-sc-module';
+    const titleEl = document.createElement('div');
+    titleEl.className = 'back-module-title';
+    titleEl.textContent = 'Kick SC';
+    const subtitleEl = document.createElement('div');
+    subtitleEl.className = 'back-module-subtitle';
+    subtitleEl.textContent = 'Sidechain';
+    const body = document.createElement('div');
+    body.className = 'back-source-body';
+
+    const readout = document.createElement('div');
+    readout.className = 'back-source-readout';
+    const readoutLabel = document.createElement('span');
+    readoutLabel.textContent = 'envelope';
+    const valueEl = document.createElement('span');
+    valueEl.textContent = '0.00';
+    readout.append(readoutLabel, valueEl);
+
+    const meter = document.createElement('div');
+    meter.className = 'back-source-meter';
+    const fill = document.createElement('div');
+    fill.className = 'back-source-fill src-3';
+    meter.appendChild(fill);
+
+    const buildScCtrl = (label, min, max, step, initial, unit, onChange) => {
+      const row = document.createElement('div');
+      row.className = 'back-source-readout';
+      const lbl = document.createElement('span');
+      lbl.textContent = label;
+      const valEl = document.createElement('span');
+      valEl.textContent = `${formatNumericValue(initial, 2)}${unit}`;
+      row.append(lbl, valEl);
+      const sliderRow = document.createElement('div');
+      sliderRow.className = 'back-sc-slider-row';
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.className = 'back-sc-slider';
+      slider.min = `${min}`; slider.max = `${max}`; slider.step = `${step}`;
+      slider.value = `${initial}`;
+      slider.addEventListener('input', () => {
+        const v = parseFloat(slider.value);
+        onChange(v);
+        valEl.textContent = `${formatNumericValue(v, 2)}${unit}`;
+      });
+      sliderRow.appendChild(slider);
+      return [row, sliderRow];
+    };
+
+    const [amtRow, amtSliderRow] = buildScCtrl('amount', 0, 1, 0.01, KICK_SC.amount, '', (v) => { KICK_SC.amount = v; });
+    const [relRow, relSliderRow] = buildScCtrl('release', 0.01, 1, 0.01, KICK_SC.release, 's', (v) => { KICK_SC.release = v; });
+
+    const jackRow = document.createElement('div');
+    jackRow.className = 'back-source-readout';
+    const jackLabel = document.createElement('span');
+    jackLabel.textContent = 'patch';
+    const jack = document.createElement('button');
+    jack.type = 'button';
+    jack.className = 'patch-jack source';
+    jack.addEventListener('click', (e) => { e.stopPropagation(); setBackPatchSelection(3); });
+    jackRow.append(jackLabel, jack);
+
+    body.append(readout, meter, amtRow, amtSliderRow, relRow, relSliderRow, jackRow);
+    module.append(titleEl, subtitleEl, body);
+    sourceColumn.appendChild(module);
+    BACK_PANEL.sourceJacks.set(3, jack);
+    BACK_PANEL.sourceMeters.set(3, fill);
+    BACK_PANEL.sourceMeta.set(3, { subtitleEl, valueEl, module });
+  })();
 
   const destGrid = document.createElement('div');
   destGrid.className = 'back-dest-grid';
@@ -2619,6 +3306,11 @@ function buildBackPanel() {
         { routeKey: '3:reverb:mix', label: getFxParamDef('reverb', 'mix')?.label || 'Mix' },
       ],
     },
+    ...GEN4_DEFS.map((def) => ({
+      title: `Drm·${def.label}`,
+      subtitle: def.id === 'kick' ? 'Bass drum' : def.id === 'snare' ? 'Snare' : def.id === 'hat' ? 'Hi-hat' : 'Percussion',
+      params: def.paramDefs.map((pd) => ({ routeKey: `4:${def.id}:${pd.key}`, label: pd.label })),
+    })),
   ];
 
   destinationGroups.forEach(({ title, subtitle, params }) => {
@@ -2635,7 +3327,8 @@ function buildBackPanel() {
     params.forEach(({ routeKey, label }) => {
       const row = document.createElement('div');
       row.className = 'back-param-row';
-      const jack = document.createElement('div');
+      const jack = document.createElement('button');
+      jack.type = 'button';
       jack.className = 'patch-jack target';
       const labelEl = document.createElement('span');
       labelEl.className = 'back-param-label';
@@ -2644,6 +3337,19 @@ function buildBackPanel() {
       valueEl.className = 'back-param-value';
       valueEl.textContent = '...';
       row.append(jack, labelEl, valueEl);
+      const handlePatch = (event) => {
+        event.stopPropagation();
+        if (BACK_PANEL.selectedSourceIdx === null) {
+          const mapping = lfoMappings.get(routeKey);
+          if (mapping) {
+            setBackPatchSelection(mapping.sourceIdx);
+          }
+          return;
+        }
+        patchBackPanelRoute(routeKey);
+      };
+      row.addEventListener('click', handlePatch);
+      jack.addEventListener('click', handlePatch);
       list.appendChild(row);
       BACK_PANEL.targetJacks.set(routeKey, jack);
       BACK_PANEL.targetRows.set(routeKey, row);
@@ -2653,8 +3359,27 @@ function buildBackPanel() {
     destGrid.appendChild(module);
   });
 
+  patchfield.addEventListener('pointermove', (event) => {
+    if (BACK_PANEL.selectedSourceIdx === null) return;
+    const rect = patchfield.getBoundingClientRect();
+    BACK_PANEL.pointerX = event.clientX - rect.left;
+    BACK_PANEL.pointerY = event.clientY - rect.top;
+    if (UI_VIEW.mode === 'back') requestAnimationFrame(renderBackPanelConnections);
+  });
+  patchfield.addEventListener('pointerleave', () => {
+    if (BACK_PANEL.selectedSourceIdx === null) return;
+    BACK_PANEL.pointerX = null;
+    BACK_PANEL.pointerY = null;
+    if (UI_VIEW.mode === 'back') requestAnimationFrame(renderBackPanelConnections);
+  });
+  patchfield.addEventListener('click', (event) => {
+    if (BACK_PANEL.selectedSourceIdx === null) return;
+    if (event.target.closest('.patch-jack') || event.target.closest('.back-param-row')) return;
+    clearBackPatchSelection();
+  });
+
   patchfield.append(sourceColumn, destGrid);
-  board.append(audioStrip, patchfield);
+  board.append(patchfield);
   root.appendChild(board);
   BACK_PANEL.built = true;
   refreshBackPanelState();
@@ -2726,17 +3451,58 @@ function renderBackPanelConnections() {
       svg.appendChild(core);
     });
   });
+
+  if (
+    BACK_PANEL.selectedSourceIdx !== null &&
+    BACK_PANEL.pointerX !== null &&
+    BACK_PANEL.pointerY !== null
+  ) {
+    const sourceJack = BACK_PANEL.sourceJacks.get(BACK_PANEL.selectedSourceIdx);
+    if (sourceJack) {
+      const s = sourceJack.getBoundingClientRect();
+      const sx = s.left - rect.left + s.width / 2;
+      const sy = s.top - rect.top + s.height / 2;
+      const tx = BACK_PANEL.pointerX;
+      const ty = BACK_PANEL.pointerY;
+      const travel = Math.max(90, tx - sx);
+      const c1x = sx + Math.min(Math.max(50, travel * 0.28), 110);
+      const c2x = tx - 48;
+      const c1y = sy + 56;
+      const c2y = ty + 34;
+      const d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${tx.toFixed(1)} ${ty.toFixed(1)}`;
+
+      const shadow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      shadow.setAttribute('d', d);
+      shadow.setAttribute('class', 'back-wire-shadow preview');
+      svg.appendChild(shadow);
+
+      const glow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      glow.setAttribute('d', d);
+      glow.setAttribute('class', `back-wire-glow src-${BACK_PANEL.selectedSourceIdx} preview`);
+      glow.style.setProperty('--route-opacity', '0.44');
+      svg.appendChild(glow);
+
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', d);
+      path.setAttribute('class', `back-wire src-${BACK_PANEL.selectedSourceIdx} preview`);
+      path.style.setProperty('--route-opacity', '0.82');
+      svg.appendChild(path);
+    }
+  }
 }
 
 function refreshBackPanelState() {
   if (!BACK_PANEL.built) return;
 
-  [0, 1, 2].forEach((idx) => {
+  BACK_PANEL.patchfieldEl?.classList.toggle('patching', BACK_PANEL.selectedSourceIdx !== null);
+
+  [0, 1, 2, 3].forEach((idx) => {
     const meta = BACK_PANEL.sourceMeta.get(idx);
     if (!meta) return;
     const routeCount = [...lfoMappings.values()].filter((mapping) => mapping.sourceIdx === idx).length;
     meta.module.dataset.routes = `${routeCount}`;
     meta.module.classList.toggle('mapped', routeCount > 0);
+    meta.module.classList.toggle('selected', BACK_PANEL.selectedSourceIdx === idx);
   });
 
   BACK_PANEL.sourceMeta.get(0) &&
@@ -2763,6 +3529,14 @@ function refreshBackPanelState() {
       meta.valueEl.textContent = `${STEP_SEQ.currentValue >= 0 ? '+' : ''}${formatNumericValue(STEP_SEQ.currentValue, 2)}`;
       meta.module.classList.toggle('active', true);
     })();
+  BACK_PANEL.sourceMeta.get(3) &&
+    (() => {
+      const meta = BACK_PANEL.sourceMeta.get(3);
+      const routeCount = [...lfoMappings.values()].filter((mapping) => mapping.sourceIdx === 3).length;
+      meta.subtitleEl.textContent = `${formatNumericValue(KICK_SC.release, 2)}s release • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
+      meta.valueEl.textContent = formatNumericValue(KICK_SC.envelope, 2);
+      meta.module.classList.toggle('active', KICK_SC.envelope > 0.01);
+    })();
 
   [0, 1, 2].forEach((idx) => {
     const fill = BACK_PANEL.sourceMeters.get(idx);
@@ -2771,6 +3545,11 @@ function refreshBackPanelState() {
     fill.style.setProperty('--source-level', `${Math.abs(value)}`);
     fill.classList.toggle('negative', value < 0);
   });
+  (() => {
+    const fill = BACK_PANEL.sourceMeters.get(3);
+    if (!fill) return;
+    fill.style.setProperty('--source-level', `${KICK_SC.envelope}`);
+  })();
 
   BACK_PANEL.audioModules.get('input-1') &&
     (() => {
@@ -2861,7 +3640,8 @@ function refreshBackPanelState() {
   });
 
   BACK_PANEL.targetRows.forEach((row) => {
-    row.classList.remove('mapped', 'src-0', 'src-1', 'src-2');
+    row.classList.remove('mapped', 'src-0', 'src-1', 'src-2', 'patch-ready');
+    row.classList.toggle('patch-ready', BACK_PANEL.selectedSourceIdx !== null);
   });
   lfoMappings.forEach(({ genIdx, key, sourceIdx }) => {
     BACK_PANEL.targetRows.get(`${genIdx}:${key}`)?.classList.add('mapped', `src-${sourceIdx}`);
@@ -3772,6 +4552,8 @@ function stop() {
   stopGen3Scope();
   stopAllGen3Notes();
   GEN3.nodes = null;
+  stopGen4Sequencer();
+  GEN4.nodes = null;
   disconnectGranularInput({ stopTracks: true });
   if (audioCtx) audioCtx.close();
   audioCtx = node = fx = null;
@@ -3861,4 +4643,8 @@ getStartBtn().textContent = getIdleStartButtonLabel();
 
 window.addEventListener('resize', () => {
   if (UI_VIEW.mode === 'back') requestAnimationFrame(renderBackPanelConnections);
+});
+
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') clearBackPatchSelection();
 });
