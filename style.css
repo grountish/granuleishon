@@ -514,7 +514,9 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 
 .knob-track  { stroke: #2e2e2e; }
 .knob-value  { stroke: var(--gen-accent); }
+.knob-mod-value { stroke: var(--gen-accent); opacity: 0.42; }
 .knob-dot    { fill: var(--gen-accent); }
+.knob-mod-dot { fill: var(--gen-accent); opacity: 0; }
 .knob-body   { fill: #1e1e1e; stroke: #383838; stroke-width: 1; }
 
 .knob:hover .knob-body    { fill: #252525; }

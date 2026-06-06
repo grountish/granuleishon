@@ -771,6 +771,18 @@ const GEN3_LFO_PARAMS = [
   { key: 'gain', min: 0, max: 1 },
   { key: 'pitch', min: -24, max: 24 },
 ];
+const FX_LFO_PARAMS = [
+  { id: 'delay', key: 'time', min: 0, max: MAX_DELAY_SECONDS },
+  { id: 'delay', key: 'feedback', min: 0, max: 0.95 },
+  { id: 'delay', key: 'mix', min: 0, max: 1 },
+  { id: 'filter', key: 'cutoff', min: 80, max: 14000 },
+  { id: 'filter', key: 'q', min: 0.1, max: 20 },
+  { id: 'filter', key: 'mix', min: 0, max: 1 },
+  { id: 'bitreduce', key: 'rate', min: 0.02, max: 1 },
+  { id: 'bitreduce', key: 'mix', min: 0, max: 1 },
+  { id: 'reverb', key: 'predelay', min: 0, max: 0.25 },
+  { id: 'reverb', key: 'mix', min: 0, max: 1 },
+];
 
 function getSourceState(genIdx) {
   return GRANULAR_SOURCES[genIdx];
@@ -867,6 +879,7 @@ function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
     if (!vizState.seeded) vizState.currentPosX = posX;
   }
   if (send) sendParams(genIdx);
+  refreshModulationVisuals();
 }
 
 function getEffectiveGeneratorParams(genIdx) {
@@ -889,6 +902,10 @@ function getEffectiveGeneratorParams(genIdx) {
 
 function getGen3ParamBounds(key) {
   return GEN3_LFO_PARAMS.find((param) => param.key === key) || null;
+}
+
+function getFxParamBounds(id, key) {
+  return FX_LFO_PARAMS.find((param) => param.id === id && param.key === key) || null;
 }
 
 function getEffectiveGen3Params() {
@@ -924,13 +941,34 @@ function getModSourceScaledValue(sourceIdx) {
   return null;
 }
 
+function getBaseFxValue(id, key) {
+  if (id === 'delay' && key === 'time') return getDelayTimeSeconds();
+  return FX[id]?.[key];
+}
+
+function getEffectiveFxValue(id, key) {
+  const base = getBaseFxValue(id, key);
+  const mapping = lfoMappings.get(`3:${id}:${key}`);
+  const paramDef = getFxParamBounds(id, key);
+  if (!mapping || !paramDef) return base;
+  const scaled = getModSourceScaledValue(mapping.sourceIdx);
+  if (scaled === null) return base;
+  const half = (paramDef.max - paramDef.min) * 0.5;
+  return Math.max(paramDef.min, Math.min(paramDef.max, base + scaled * half));
+}
+
 function applyMappedModulationTargets() {
-  if (lfoMappings.size === 0) return;
+  if (lfoMappings.size === 0) {
+    refreshModulationVisuals();
+    return;
+  }
   const gens = new Set([...lfoMappings.values()].map((m) => m.genIdx));
   gens.forEach((gi) => {
     if (gi === 2) applyGen3Modulation();
+    else if (gi === 3) applyFxModulation();
     else sendParams(gi);
   });
+  refreshModulationVisuals();
 }
 
 function sendParams(genIdx) {
@@ -945,6 +983,44 @@ function applyGen3Modulation() {
   GEN3.nodes.gain.gain.setTargetAtTime(effective.gain, audioCtx.currentTime, 0.02);
   GEN3.activeNotes.forEach((entry) => {
     applyGen3VoicePitch(entry, effective);
+  });
+}
+
+function applyFxModulation() {
+  FX_LFO_PARAMS.forEach(({ id, key }) => {
+    applyFx(id, key, getEffectiveFxValue(id, key));
+  });
+}
+
+function refreshModulationVisuals() {
+  for (let genIdx = 0; genIdx < 2; genIdx++) {
+    const effective = getEffectiveGeneratorParams(genIdx);
+    PARAMS.forEach(({ key }) => {
+      const control = genControlBindings[genIdx].get(key);
+      const mapped = lfoMappings.has(`${genIdx}:${key}`);
+      control?.setModValue(mapped ? effective[key] : null);
+    });
+  }
+
+  const gen3Effective = getEffectiveGen3Params();
+  GEN3_LFO_PARAMS.forEach(({ key }) => {
+    const control = gen3ControlBindings.get(key);
+    const mapped = lfoMappings.has(`2:${key}`);
+    control?.setModValue(mapped ? gen3Effective[key] : null);
+  });
+
+  FX_LFO_PARAMS.forEach(({ id, key }) => {
+    const control = fxControlBindings.get(`${id}:${key}`);
+    const mapped = lfoMappings.has(`3:${id}:${key}`);
+    if (!mapped) {
+      control?.setModValue(null);
+      return;
+    }
+    if (id === 'delay' && key === 'time' && FX.delay.sync) {
+      control?.setModValue(null);
+      return;
+    }
+    control?.setModValue(getEffectiveFxValue(id, key));
   });
 }
 
@@ -973,6 +1049,11 @@ function refreshLFOMappingUI() {
     const mapping = lfoMappings.get(`2:${key}`);
     gen3MapBindings.get(key)?.setMapLFO(mapping ? mapping.sourceIdx : null);
   });
+  FX_LFO_PARAMS.forEach(({ id, key }) => {
+    const mapping = lfoMappings.get(`3:${id}:${key}`);
+    fxControlBindings.get(`${id}:${key}`)?.setMapLFO(mapping ? mapping.sourceIdx : null);
+  });
+  refreshModulationVisuals();
 }
 
 function setLFOLedState(led, sourceIdx) {
@@ -1048,6 +1129,12 @@ function makeControlRow(p, initialValue, onInput, lfoCycle = null) {
   };
   row.setMapLFO = (lfoIdx) => {
     if (led) setLFOLedState(led, lfoIdx);
+  };
+  row.setModValue = (v) => {
+    knob.setModValue?.(v);
+  };
+  row.setModNorm = (n) => {
+    knob.setModNorm?.(n);
   };
   return row;
 }
@@ -1134,6 +1221,7 @@ function makeKnob(p, initialValue, onInput) {
     cx = 20,
     cy = 20,
     r = 15,
+    modR = 17.5,
     sw = 3;
   const S = -135,
     E = 135; // 7 o'clock → 5 o'clock (270° sweep)
@@ -1141,6 +1229,7 @@ function makeKnob(p, initialValue, onInput) {
 
   let spec = { resetValue: initialValue, ...p };
   let currentValue = initialValue;
+  let currentModNorm = null;
   const getDecimals = () => (spec.step.toString().split('.')[1] || '').length;
   const toNorm = (v) => {
     const rawToNorm =
@@ -1153,15 +1242,15 @@ function makeKnob(p, initialValue, onInput) {
     return parseFloat((Math.round(rawFromNorm(n) / spec.step) * spec.step).toFixed(getDecimals()));
   };
 
-  function polar(deg) {
+  function polar(deg, radius = r) {
     const rad = ((deg - 90) * Math.PI) / 180;
-    return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
+    return [cx + radius * Math.cos(rad), cy + radius * Math.sin(rad)];
   }
-  function arc(a, b) {
+  function arc(a, b, radius = r) {
     if (b - a < 0.5) return '';
-    const [sx, sy] = polar(a),
-      [ex, ey] = polar(b);
-    return `M${sx.toFixed(2)},${sy.toFixed(2)}A${r},${r},0,${b - a > 180 ? 1 : 0},1,${ex.toFixed(2)},${ey.toFixed(2)}`;
+    const [sx, sy] = polar(a, radius),
+      [ex, ey] = polar(b, radius);
+    return `M${sx.toFixed(2)},${sy.toFixed(2)}A${radius},${radius},0,${b - a > 180 ? 1 : 0},1,${ex.toFixed(2)},${ey.toFixed(2)}`;
   }
 
   const svg = document.createElementNS(NS, 'svg');
@@ -1181,6 +1270,12 @@ function makeKnob(p, initialValue, onInput) {
   valArc.setAttribute('stroke-linecap', 'round');
   valArc.classList.add('knob-value');
 
+  const modArc = document.createElementNS(NS, 'path');
+  modArc.setAttribute('stroke-width', '2');
+  modArc.setAttribute('fill', 'none');
+  modArc.setAttribute('stroke-linecap', 'round');
+  modArc.classList.add('knob-mod-value');
+
   const body = document.createElementNS(NS, 'circle');
   body.setAttribute('cx', cx);
   body.setAttribute('cy', cy);
@@ -1191,9 +1286,30 @@ function makeKnob(p, initialValue, onInput) {
   dot.setAttribute('r', '2');
   dot.classList.add('knob-dot');
 
-  svg.append(track, valArc, body, dot);
+  const modDot = document.createElementNS(NS, 'circle');
+  modDot.setAttribute('r', '1.7');
+  modDot.classList.add('knob-mod-dot');
+
+  svg.append(track, modArc, valArc, body, modDot, dot);
 
   let norm = toNorm(initialValue);
+
+  function renderModNorm(n) {
+    currentModNorm = n === null ? null : clamp01(n);
+    if (currentModNorm === null || Math.abs(currentModNorm - norm) < 0.002) {
+      modArc.setAttribute('d', '');
+      modDot.setAttribute('opacity', '0');
+      return;
+    }
+    const start = S + Math.min(norm, currentModNorm) * (E - S);
+    const end = S + Math.max(norm, currentModNorm) * (E - S);
+    modArc.setAttribute('d', arc(start, end, modR));
+    const modDeg = S + currentModNorm * (E - S);
+    const modRad = ((modDeg - 90) * Math.PI) / 180;
+    modDot.setAttribute('cx', (cx + modR * Math.cos(modRad)).toFixed(2));
+    modDot.setAttribute('cy', (cy + modR * Math.sin(modRad)).toFixed(2));
+    modDot.setAttribute('opacity', '1');
+  }
 
   function renderNorm(n) {
     norm = clamp01(n);
@@ -1203,6 +1319,7 @@ function makeKnob(p, initialValue, onInput) {
       rad = ((deg - 90) * Math.PI) / 180;
     dot.setAttribute('cx', (cx + dr * Math.cos(rad)).toFixed(2));
     dot.setAttribute('cy', (cy + dr * Math.sin(rad)).toFixed(2));
+    renderModNorm(currentModNorm);
   }
 
   function renderValue(v) {
@@ -1254,6 +1371,20 @@ function makeKnob(p, initialValue, onInput) {
   });
 
   svg.setValue = (v) => renderValue(v);
+  svg.setModValue = (v) => {
+    if (v === null || v === undefined) {
+      renderModNorm(null);
+      return;
+    }
+    renderModNorm(toNorm(v));
+  };
+  svg.setModNorm = (n) => {
+    if (n === null || n === undefined) {
+      renderModNorm(null);
+      return;
+    }
+    renderModNorm(n);
+  };
   svg.setConfig = (patch) => {
     spec = { ...spec, ...patch };
     renderValue(currentValue);
@@ -1781,6 +1912,7 @@ function buildOscPanel() {
         if (GEN3.nodes && (p.key === 'gain' || p.key === 'pitch' || p.key === 'detune')) {
           applyGen3Modulation();
         }
+        refreshModulationVisuals();
       },
       isMappable ? () => cycleLFOMap(2, p.key) : null,
     );
@@ -2044,6 +2176,7 @@ function stopLFOLoop() {
   STEP_SEQ.currentValue = STEP_SEQ.steps[0] || 0;
   STEP_SEQ.elapsed = 0;
   refreshSequencerUI();
+  refreshModulationVisuals();
 }
 
 function setSequencerSubdivision(subdivision) {
@@ -2061,23 +2194,27 @@ function cycleLFOMap(genIdx, key) {
   if (!mapping) {
     lfoMappings.set(mapKey, { genIdx, key, sourceIdx: 0 });
     if (genIdx === 2) applyGen3Modulation();
+    else if (genIdx === 3) applyFxModulation();
     else sendParams(genIdx);
     return 0;
   }
   if (mapping.sourceIdx === 0) {
     mapping.sourceIdx = 1;
     if (genIdx === 2) applyGen3Modulation();
+    else if (genIdx === 3) applyFxModulation();
     else sendParams(genIdx);
     return 1;
   }
   if (mapping.sourceIdx === 1) {
     mapping.sourceIdx = 2;
     if (genIdx === 2) applyGen3Modulation();
+    else if (genIdx === 3) applyFxModulation();
     else sendParams(genIdx);
     return 2;
   }
   lfoMappings.delete(mapKey);
   if (genIdx === 2) applyGen3Modulation();
+  else if (genIdx === 3) applyFxModulation();
   else sendParams(genIdx);
   return null;
 }
@@ -2128,9 +2265,10 @@ function setTransportBpm(value, { refresh = true } = {}) {
   const bpmInput = getBpmInput();
   if (bpmInput) bpmInput.value = `${TRANSPORT.bpm}`;
   if (!refresh) return;
-  if (FX.delay.sync) applyFx('delay', 'time', FX.delay.time);
+  if (FX.delay.sync) applyFx('delay', 'time', getBaseFxValue('delay', 'time'));
   refreshDelayTimeUI();
   refreshLFOUI();
+  applyMappedModulationTargets();
 }
 
 function initTempoDrag() {
@@ -2552,7 +2690,7 @@ function applyFx(id, key, val) {
   if (!fx) return;
   if (id === 'delay') {
     if (key === 'time')
-      fx.delay.tap.delayTime.setTargetAtTime(getDelayTimeSeconds(), audioCtx.currentTime, 0.02);
+      fx.delay.tap.delayTime.setTargetAtTime(clamp(val, 0, MAX_DELAY_SECONDS), audioCtx.currentTime, 0.02);
     if (key === 'feedback')
       fx.delay.fb.gain.setTargetAtTime(Math.min(0.98, val), audioCtx.currentTime, 0.02);
     if (key === 'mix') {
@@ -2608,8 +2746,11 @@ function applyFx(id, key, val) {
 }
 
 function applyAllFx() {
-  FX_DEFS.forEach(({ id, params }) => params.forEach(({ key }) => applyFx(id, key, FX[id][key])));
+  FX_DEFS.forEach(({ id, params }) =>
+    params.forEach(({ key }) => applyFx(id, key, getBaseFxValue(id, key))),
+  );
   applyFilterMode();
+  applyFxModulation();
 }
 
 function refreshGen3UI() {
@@ -2729,8 +2870,13 @@ function applyPreset(preset) {
   preset.mappings?.forEach(({ genIdx, key, lfoIdx, sourceIdx }) => {
     const isGranularParam = genIdx < 2 && PARAMS.some((p) => p.key === key);
     const isGen3Param = genIdx === 2 && GEN3_LFO_PARAMS.some((p) => p.key === key);
+    const [fxId, fxKey] = typeof key === 'string' ? key.split(':') : [];
+    const isFxParam = genIdx === 3 && !!getFxParamBounds(fxId, fxKey);
     const modSourceIdx = typeof sourceIdx === 'number' ? sourceIdx : lfoIdx;
-    if ((isGranularParam || isGen3Param) && (modSourceIdx === 0 || modSourceIdx === 1 || modSourceIdx === 2)) {
+    if (
+      (isGranularParam || isGen3Param || isFxParam) &&
+      (modSourceIdx === 0 || modSourceIdx === 1 || modSourceIdx === 2)
+    ) {
       lfoMappings.set(`${genIdx}:${key}`, { genIdx, key, sourceIdx: modSourceIdx });
     }
   });
@@ -2740,6 +2886,7 @@ function applyPreset(preset) {
   sendParams(0);
   sendParams(1);
   applyGen3Modulation();
+  applyFxModulation();
 }
 
 function refreshPresetUI() {
@@ -2824,19 +2971,29 @@ function buildFxUI() {
     }
 
     def.params.forEach((p) => {
-      const control = makeControlRow(p, FX[def.id][p.key], (v) => {
-        if (def.id === 'delay' && p.key === 'time') {
-          if (FX.delay.sync) {
-            FX.delay.syncIndex = Math.round(v);
-          } else {
-            FX.delay.time = v;
+      const isMappable = !!getFxParamBounds(def.id, p.key);
+      const control = makeControlRow(
+        p,
+        FX[def.id][p.key],
+        (v) => {
+          if (def.id === 'delay' && p.key === 'time') {
+            if (FX.delay.sync) {
+              FX.delay.syncIndex = Math.round(v);
+            } else {
+              FX.delay.time = v;
+            }
+            if (isMappable) applyFxModulation();
+            else applyFx('delay', 'time', getBaseFxValue('delay', 'time'));
+            refreshModulationVisuals();
+            return;
           }
-          applyFx('delay', 'time', FX.delay.time);
-          return;
-        }
-        FX[def.id][p.key] = v;
-        applyFx(def.id, p.key, v);
-      });
+          FX[def.id][p.key] = v;
+          if (isMappable) applyFxModulation();
+          else applyFx(def.id, p.key, v);
+          refreshModulationVisuals();
+        },
+        isMappable ? () => cycleLFOMap(3, `${def.id}:${p.key}`) : null,
+      );
       fxControlBindings.set(`${def.id}:${p.key}`, control);
       content.appendChild(control);
 
@@ -2844,7 +3001,9 @@ function buildFxUI() {
         delaySyncModeControl = buildSyncModeRow(FX.delay.sync, (mode) => {
           FX.delay.sync = mode === 'sync';
           refreshDelayTimeUI();
-          applyFx('delay', 'time', FX.delay.time);
+          if (isMappable) applyFxModulation();
+          else applyFx('delay', 'time', getBaseFxValue('delay', 'time'));
+          refreshModulationVisuals();
         });
         content.appendChild(delaySyncModeControl);
       }
