@@ -37,6 +37,19 @@ const PRESET_STORAGE_KEY = 'grnsh-presets-v1';
 const PRESET_SLOT_COUNT = 4;
 let presetSaveArmed = false;
 let presetStore = Array.from({ length: PRESET_SLOT_COUNT }, () => null);
+const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+const UI_VIEW = { mode: 'front' };
+const BACK_PANEL = {
+  sourceJacks: new Map(),
+  sourceMeters: new Map(),
+  sourceMeta: new Map(),
+  audioModules: new Map(),
+  targetJacks: new Map(),
+  targetRows: new Map(),
+  targetValues: new Map(),
+  routeLayer: null,
+  built: false,
+};
 
 function getStatusEl() {
   return document.getElementById('status');
@@ -203,8 +216,44 @@ function getInputSelect() {
   return document.getElementById('inputDeviceSelect');
 }
 
+function getFrontWorkspace() {
+  return document.getElementById('frontWorkspace');
+}
+
+function getBackPanel() {
+  return document.getElementById('backPanel');
+}
+
+function getViewToggle() {
+  return document.getElementById('viewToggle');
+}
+
 function getIdleStartButtonLabel() {
   return anyMicSourceSelected() ? '▶ Start input' : '▶ Start';
+}
+
+function getAudioWorkletErrorMessage() {
+  if (location.protocol === 'file:') {
+    return 'audio worklets unavailable. open the app through localhost instead of file://';
+  }
+  if (!window.isSecureContext) {
+    return 'audio worklets unavailable. use localhost or https';
+  }
+  return 'audio worklets unavailable in this browser. use a browser with AudioWorklet support';
+}
+
+function createAudioContext() {
+  if (!AudioContextCtor) {
+    throw new Error('web audio is not supported in this browser');
+  }
+  const ctx = new AudioContextCtor();
+  if (!ctx.audioWorklet?.addModule) {
+    try {
+      ctx.close?.();
+    } catch (e) {}
+    throw new Error(getAudioWorkletErrorMessage());
+  }
+  return ctx;
 }
 
 function formatInputDeviceLabel(device, idx) {
@@ -247,6 +296,7 @@ async function refreshInputDevices() {
       ? audioInputs
       : [{ deviceId: 'default', label: 'System Default', kind: 'audioinput' }];
     renderInputDevices();
+    refreshBackPanelState();
   } catch (e) {}
 }
 
@@ -261,7 +311,7 @@ function createGranularSourceState() {
 
 async function ensureAudioEngine() {
   if (!audioCtx) {
-    audioCtx = new AudioContext();
+    audioCtx = createAudioContext();
     await ensureFxModules();
     buildFxNodes();
     buildGen3Nodes();
@@ -275,6 +325,9 @@ async function ensureAudioEngine() {
 
 async function ensureFxModules() {
   if (!audioCtx) return;
+  if (!audioCtx.audioWorklet?.addModule) {
+    throw new Error(getAudioWorkletErrorMessage());
+  }
   if (!bitReducerModulePromise) {
     bitReducerModulePromise = audioCtx.audioWorklet.addModule('bit-reducer-processor.js');
   }
@@ -283,6 +336,9 @@ async function ensureFxModules() {
 
 async function ensureGranularModule() {
   if (!audioCtx) await ensureAudioEngine();
+  if (!audioCtx.audioWorklet?.addModule) {
+    throw new Error(getAudioWorkletErrorMessage());
+  }
   if (!granularModulePromise) {
     granularModulePromise = audioCtx.audioWorklet.addModule('granular-processor.js');
   }
@@ -819,8 +875,8 @@ const GRAIN_ENV_TYPES = [
   ['soft', 'SFT'],
 ];
 const GEN3_LFO_PARAMS = [
-  { key: 'gain', min: 0, max: 1 },
-  { key: 'pitch', min: -24, max: 24 },
+  { key: 'gain', min: 0, max: 1, step: 0.01, unit: '' },
+  { key: 'pitch', min: -24, max: 24, step: 1, unit: 'st' },
 ];
 const FX_LFO_PARAMS = [
   { id: 'delay', key: 'time', min: 0, max: MAX_DELAY_SECONDS },
@@ -833,6 +889,21 @@ const FX_LFO_PARAMS = [
   { id: 'bitreduce', key: 'mix', min: 0, max: 1 },
   { id: 'reverb', key: 'predelay', min: 0, max: 0.25 },
   { id: 'reverb', key: 'mix', min: 0, max: 1 },
+];
+const BACK_AUDIO_CHAIN = [
+  { id: 'input-1', title: 'Input A' },
+  { id: 'gen-1', title: 'Gen 1' },
+  { id: 'input-2', title: 'Input B' },
+  { id: 'gen-2', title: 'Gen 2' },
+  { id: 'gen-3', title: 'Gen 3' },
+  { id: 'mix', title: 'Mix Bus' },
+  { id: 'delay', title: 'Delay' },
+  { id: 'filter', title: 'Filter' },
+  { id: 'bitreduce', title: 'Bit Reduce' },
+  { id: 'sat', title: 'Saturation' },
+  { id: 'reverb', title: 'Reverb' },
+  { id: 'limiter', title: 'Limiter' },
+  { id: 'output', title: 'Output' },
 ];
 
 function getSourceState(genIdx) {
@@ -863,6 +934,7 @@ function setSourceDurationSec(genIdx, durationSec) {
   const vizState = genVizStates[genIdx];
   vizState.targetPosX = posX;
   if (!vizState.seeded) vizState.currentPosX = posX;
+  refreshBackPanelState();
 }
 
 function clearFreezeStates({ send = true } = {}) {
@@ -902,6 +974,7 @@ function refreshSourceModeUI(genIdx) {
     btn.classList.toggle('loaded', key === 'file' && !!getSourceState(genIdx).bufferData);
   });
   if (!started) getStartBtn().textContent = getIdleStartButtonLabel();
+  refreshBackPanelState();
 }
 
 function setGranularRunning() {
@@ -912,6 +985,7 @@ function setGranularRunning() {
   startLFOLoop();
   startGenVizLoop();
   setStatus(getGranularStatusText());
+  refreshBackPanelState();
 }
 
 function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
@@ -931,6 +1005,7 @@ function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
   }
   if (send) sendParams(genIdx);
   refreshModulationVisuals();
+  refreshBackPanelState();
 }
 
 function getEffectiveGeneratorParams(genIdx) {
@@ -1011,6 +1086,7 @@ function getEffectiveFxValue(id, key) {
 function applyMappedModulationTargets() {
   if (lfoMappings.size === 0) {
     refreshModulationVisuals();
+    refreshBackPanelState();
     return;
   }
   const gens = new Set([...lfoMappings.values()].map((m) => m.genIdx));
@@ -1020,6 +1096,7 @@ function applyMappedModulationTargets() {
     else sendParams(gi);
   });
   refreshModulationVisuals();
+  refreshBackPanelState();
 }
 
 function sendParams(genIdx) {
@@ -1105,6 +1182,7 @@ function refreshLFOMappingUI() {
     fxControlBindings.get(`${id}:${key}`)?.setMapLFO(mapping ? mapping.sourceIdx : null);
   });
   refreshModulationVisuals();
+  refreshBackPanelState();
 }
 
 function setLFOLedState(led, sourceIdx) {
@@ -1767,6 +1845,7 @@ function releaseGen3Voice(voice) {
   voice.releaseTimer = setTimeout(() => {
     GEN3.releasingVoices.delete(voice);
     stopGen3Voice(voice);
+    refreshBackPanelState();
   }, stopAfterMs);
 }
 
@@ -1774,6 +1853,7 @@ function addGen3Note(midi, freq) {
   const entry = { freq, ...createGen3Voice(freq) };
   GEN3.activeNotes.set(midi, entry);
   setGen3NoteActive(midi, true);
+  refreshBackPanelState();
 }
 
 function removeGen3Note(midi) {
@@ -1781,16 +1861,20 @@ function removeGen3Note(midi) {
   GEN3.activeNotes.delete(midi);
   setGen3NoteActive(midi, false);
   if (entry) releaseGen3Voice(entry);
+  refreshBackPanelState();
 }
 
 function stopAllGen3Notes() {
   GEN3.activeNotes.forEach((entry) => {
     stopGen3Voice(entry);
   });
+  GEN3.activeNotes.clear();
   GEN3.releasingVoices.forEach((voice) => {
     stopGen3Voice(voice);
   });
   GEN3.releasingVoices.clear();
+  gen3NoteEls.forEach((_, midi) => setGen3NoteActive(midi, false));
+  refreshBackPanelState();
 }
 
 function restartAllGen3Notes() {
@@ -1801,6 +1885,7 @@ function restartAllGen3Notes() {
     stopGen3Voice(entry);
     Object.assign(entry, createGen3Voice(entry.freq));
   });
+  refreshBackPanelState();
 }
 
 function drawGen3Scope() {
@@ -1964,6 +2049,7 @@ function buildOscPanel() {
           applyGen3Modulation();
         }
         refreshModulationVisuals();
+        refreshBackPanelState();
       },
       isMappable ? () => cycleLFOMap(2, p.key) : null,
     );
@@ -2148,12 +2234,14 @@ function setSequencerStep(stepIdx, value) {
   STEP_SEQ.steps[stepIdx] = clamp(value, -1, 1);
   STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
   refreshSequencerUI();
+  refreshBackPanelState();
 }
 
 function clearSequencerSteps() {
   STEP_SEQ.steps.fill(0);
   STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
   refreshSequencerUI();
+  refreshBackPanelState();
   applyMappedModulationTargets();
 }
 
@@ -2228,6 +2316,7 @@ function stopLFOLoop() {
   STEP_SEQ.elapsed = 0;
   refreshSequencerUI();
   refreshModulationVisuals();
+  refreshBackPanelState();
 }
 
 function setSequencerSubdivision(subdivision) {
@@ -2236,38 +2325,32 @@ function setSequencerSubdivision(subdivision) {
   STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
   STEP_SEQ.elapsed = 0;
   refreshSequencerUI();
+  refreshBackPanelState();
   applyMappedModulationTargets();
 }
 
 function cycleLFOMap(genIdx, key) {
   const mapKey = `${genIdx}:${key}`;
   const mapping = lfoMappings.get(mapKey);
+  let nextSourceIdx = null;
   if (!mapping) {
     lfoMappings.set(mapKey, { genIdx, key, sourceIdx: 0 });
-    if (genIdx === 2) applyGen3Modulation();
-    else if (genIdx === 3) applyFxModulation();
-    else sendParams(genIdx);
-    return 0;
-  }
-  if (mapping.sourceIdx === 0) {
+    nextSourceIdx = 0;
+  } else if (mapping.sourceIdx === 0) {
     mapping.sourceIdx = 1;
-    if (genIdx === 2) applyGen3Modulation();
-    else if (genIdx === 3) applyFxModulation();
-    else sendParams(genIdx);
-    return 1;
-  }
-  if (mapping.sourceIdx === 1) {
+    nextSourceIdx = 1;
+  } else if (mapping.sourceIdx === 1) {
     mapping.sourceIdx = 2;
-    if (genIdx === 2) applyGen3Modulation();
-    else if (genIdx === 3) applyFxModulation();
-    else sendParams(genIdx);
-    return 2;
+    nextSourceIdx = 2;
+  } else {
+    lfoMappings.delete(mapKey);
+    nextSourceIdx = null;
   }
-  lfoMappings.delete(mapKey);
   if (genIdx === 2) applyGen3Modulation();
   else if (genIdx === 3) applyFxModulation();
   else sendParams(genIdx);
-  return null;
+  refreshBackPanelState();
+  return nextSourceIdx;
 }
 
 function refreshDelayTimeUI() {
@@ -2320,6 +2403,7 @@ function setTransportBpm(value, { refresh = true } = {}) {
   refreshDelayTimeUI();
   refreshLFOUI();
   applyMappedModulationTargets();
+  refreshBackPanelState();
 }
 
 function initTempoDrag() {
@@ -2358,6 +2442,455 @@ function initTempoDrag() {
 
   tempoBox.addEventListener('pointerup', endDrag);
   tempoBox.addEventListener('pointercancel', endDrag);
+}
+
+function getFxParamDef(id, key) {
+  return FX_DEFS.find((def) => def.id === id)?.params.find((param) => param.key === key) || null;
+}
+
+function getGen3ParamLabel(key) {
+  if (key === 'gain') return 'Gain';
+  if (key === 'pitch') return 'Pitch';
+  if (key === 'detune') return 'Detune';
+  return key;
+}
+
+function formatBackValue(spec, value) {
+  if (!spec || typeof value !== 'number' || Number.isNaN(value)) return 'n/a';
+  return formatControlValue(spec, value);
+}
+
+function getSelectedInputLabel() {
+  const idx = INPUT_SOURCE.devices.findIndex((device) => device.deviceId === INPUT_SOURCE.selectedId);
+  return formatInputDeviceLabel(
+    INPUT_SOURCE.devices[idx] || INPUT_SOURCE.devices[0] || { deviceId: 'default', label: 'System Default' },
+    Math.max(0, idx),
+  );
+}
+
+function getBackTargetValue(routeKey) {
+  const [group, a, b] = routeKey.split(':');
+  if (group === '0' || group === '1') {
+    return formatBackValue(getParamBounds(Number(group), a), getEffectiveGeneratorParams(Number(group))[a]);
+  }
+  if (group === '2') {
+    const spec = getGen3ParamBounds(a) || { step: 0.01, unit: '' };
+    return formatBackValue(spec, getEffectiveGen3Params()[a]);
+  }
+  if (group === '3') {
+    const spec = getFxParamDef(a, b);
+    return formatBackValue(spec, getEffectiveFxValue(a, b));
+  }
+  return 'n/a';
+}
+
+function buildBackPanel() {
+  const root = getBackPanel();
+  if (!root) return;
+  root.textContent = '';
+  BACK_PANEL.sourceJacks.clear();
+  BACK_PANEL.sourceMeters.clear();
+  BACK_PANEL.sourceMeta.clear();
+  BACK_PANEL.audioModules.clear();
+  BACK_PANEL.targetJacks.clear();
+  BACK_PANEL.targetRows.clear();
+  BACK_PANEL.targetValues.clear();
+
+  const board = document.createElement('div');
+  board.className = 'back-board';
+
+  const legend = document.createElement('div');
+  legend.className = 'back-board-legend';
+  legend.innerHTML = '<span>modulation board</span><span>rev a</span>';
+  board.appendChild(legend);
+
+  for (let idx = 0; idx < 4; idx++) {
+    const hole = document.createElement('div');
+    hole.className = `back-mount-hole hole-${idx + 1}`;
+    board.appendChild(hole);
+  }
+
+  const audioStrip = document.createElement('div');
+  audioStrip.className = 'back-audio-strip';
+  BACK_AUDIO_CHAIN.forEach(({ id, title }, idx) => {
+    const cell = document.createElement('div');
+    cell.className = 'back-pipeline-cell';
+
+    const module = document.createElement('div');
+    module.className = 'back-module back-audio-module';
+    const titleEl = document.createElement('div');
+    titleEl.className = 'back-module-title';
+    titleEl.textContent = title;
+    const subtitleEl = document.createElement('div');
+    subtitleEl.className = 'back-module-subtitle';
+    subtitleEl.textContent = '...';
+    module.append(titleEl, subtitleEl);
+    cell.appendChild(module);
+
+    if (idx < BACK_AUDIO_CHAIN.length - 1) {
+      const link = document.createElement('div');
+      link.className = 'back-pipeline-link';
+      cell.appendChild(link);
+    }
+
+    audioStrip.appendChild(cell);
+    BACK_PANEL.audioModules.set(id, { el: module, subtitleEl });
+  });
+
+  const patchfield = document.createElement('div');
+  patchfield.className = 'back-patchfield';
+
+  const wireLayer = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  wireLayer.classList.add('back-wire-layer');
+  patchfield.appendChild(wireLayer);
+  BACK_PANEL.routeLayer = wireLayer;
+
+  const sourceColumn = document.createElement('div');
+  sourceColumn.className = 'back-column';
+  [
+    { idx: 0, title: 'LFO 1' },
+    { idx: 1, title: 'LFO 2' },
+    { idx: 2, title: 'Seq 1' },
+  ].forEach(({ idx, title }) => {
+    const module = document.createElement('div');
+    module.className = 'back-module back-source-module';
+    const titleEl = document.createElement('div');
+    titleEl.className = 'back-module-title';
+    titleEl.textContent = title;
+    const subtitleEl = document.createElement('div');
+    subtitleEl.className = 'back-module-subtitle';
+    subtitleEl.textContent = '...';
+    const body = document.createElement('div');
+    body.className = 'back-source-body';
+    const readout = document.createElement('div');
+    readout.className = 'back-source-readout';
+    const left = document.createElement('span');
+    left.textContent = 'mod out';
+    const valueEl = document.createElement('span');
+    valueEl.textContent = '0.00';
+    readout.append(left, valueEl);
+    const meter = document.createElement('div');
+    meter.className = 'back-source-meter';
+    const fill = document.createElement('div');
+    fill.className = `back-source-fill src-${idx}`;
+    meter.appendChild(fill);
+    const jackRow = document.createElement('div');
+    jackRow.className = 'back-source-readout';
+    const jackLabel = document.createElement('span');
+    jackLabel.textContent = 'patch';
+    const jack = document.createElement('div');
+    jack.className = 'patch-jack source';
+    jackRow.append(jackLabel, jack);
+    body.append(readout, meter, jackRow);
+    module.append(titleEl, subtitleEl, body);
+    sourceColumn.appendChild(module);
+    BACK_PANEL.sourceJacks.set(idx, jack);
+    BACK_PANEL.sourceMeters.set(idx, fill);
+    BACK_PANEL.sourceMeta.set(idx, { subtitleEl, valueEl, module });
+  });
+
+  const destGrid = document.createElement('div');
+  destGrid.className = 'back-dest-grid';
+  const destinationGroups = [
+    { title: 'Gen 1', subtitle: 'Granular A', params: PARAMS.map((p) => ({ routeKey: `0:${p.key}`, label: p.label })) },
+    { title: 'Gen 2', subtitle: 'Granular B', params: PARAMS.map((p) => ({ routeKey: `1:${p.key}`, label: p.label })) },
+    {
+      title: 'Gen 3',
+      subtitle: 'Oscillator',
+      params: GEN3_LFO_PARAMS.map((p) => ({ routeKey: `2:${p.key}`, label: getGen3ParamLabel(p.key) })),
+    },
+    {
+      title: 'Delay',
+      subtitle: 'FX routing',
+      params: ['time', 'feedback', 'mix'].map((key) => ({ routeKey: `3:delay:${key}`, label: getFxParamDef('delay', key)?.label || key })),
+    },
+    {
+      title: 'Filter',
+      subtitle: 'Tone shaping',
+      params: ['cutoff', 'q', 'mix'].map((key) => ({ routeKey: `3:filter:${key}`, label: getFxParamDef('filter', key)?.label || key })),
+    },
+    {
+      title: 'Bit + Verb',
+      subtitle: 'Texture / space',
+      params: [
+        { routeKey: '3:bitreduce:rate', label: getFxParamDef('bitreduce', 'rate')?.label || 'Rate' },
+        { routeKey: '3:bitreduce:mix', label: getFxParamDef('bitreduce', 'mix')?.label || 'Mix' },
+        { routeKey: '3:reverb:predelay', label: getFxParamDef('reverb', 'predelay')?.label || 'Pre-delay' },
+        { routeKey: '3:reverb:mix', label: getFxParamDef('reverb', 'mix')?.label || 'Mix' },
+      ],
+    },
+  ];
+
+  destinationGroups.forEach(({ title, subtitle, params }) => {
+    const module = document.createElement('div');
+    module.className = 'back-module back-dest-module';
+    const titleEl = document.createElement('div');
+    titleEl.className = 'back-module-title';
+    titleEl.textContent = title;
+    const subtitleEl = document.createElement('div');
+    subtitleEl.className = 'back-module-subtitle';
+    subtitleEl.textContent = subtitle;
+    const list = document.createElement('div');
+    list.className = 'back-param-list';
+    params.forEach(({ routeKey, label }) => {
+      const row = document.createElement('div');
+      row.className = 'back-param-row';
+      const jack = document.createElement('div');
+      jack.className = 'patch-jack target';
+      const labelEl = document.createElement('span');
+      labelEl.className = 'back-param-label';
+      labelEl.textContent = label;
+      const valueEl = document.createElement('span');
+      valueEl.className = 'back-param-value';
+      valueEl.textContent = '...';
+      row.append(jack, labelEl, valueEl);
+      list.appendChild(row);
+      BACK_PANEL.targetJacks.set(routeKey, jack);
+      BACK_PANEL.targetRows.set(routeKey, row);
+      BACK_PANEL.targetValues.set(routeKey, valueEl);
+    });
+    module.append(titleEl, subtitleEl, list);
+    destGrid.appendChild(module);
+  });
+
+  patchfield.append(sourceColumn, destGrid);
+  board.append(audioStrip, patchfield);
+  root.appendChild(board);
+  BACK_PANEL.built = true;
+  refreshBackPanelState();
+}
+
+function renderBackPanelConnections() {
+  if (!BACK_PANEL.built || !BACK_PANEL.routeLayer || UI_VIEW.mode !== 'back') return;
+  const svg = BACK_PANEL.routeLayer;
+  const rect = svg.getBoundingClientRect();
+  svg.textContent = '';
+  const routes = [...lfoMappings.values()].sort((a, b) => {
+    if (a.sourceIdx !== b.sourceIdx) return a.sourceIdx - b.sourceIdx;
+    if (a.genIdx !== b.genIdx) return a.genIdx - b.genIdx;
+    return `${a.key}`.localeCompare(`${b.key}`);
+  });
+  routes.forEach(({ genIdx, key, sourceIdx }, routeIdx) => {
+    const sourceJack = BACK_PANEL.sourceJacks.get(sourceIdx);
+    const targetJack = BACK_PANEL.targetJacks.get(`${genIdx}:${key}`);
+    if (!sourceJack || !targetJack) return;
+    const s = sourceJack.getBoundingClientRect();
+    const t = targetJack.getBoundingClientRect();
+    const sx = s.left - rect.left + s.width / 2;
+    const sy = s.top - rect.top + s.height / 2;
+    const tx = t.left - rect.left + t.width / 2;
+    const ty = t.top - rect.top + t.height / 2;
+    const activity = Math.abs(getModSourceScaledValue(sourceIdx) || 0);
+    const travel = Math.max(120, tx - sx);
+    const drop = 34 + (routeIdx % 6) * 16 + sourceIdx * 10;
+    const spread = ((routeIdx % 5) - 2) * 18;
+    const c1x = sx + Math.min(travel * 0.24, 120);
+    const c2x = tx - Math.min(travel * 0.3, 170);
+    const c1y = sy + drop + spread * 0.2;
+    const c2y = ty + drop - spread * 0.35;
+    const d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${tx.toFixed(1)} ${ty.toFixed(1)}`;
+
+    const shadow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    shadow.setAttribute('d', d);
+    shadow.setAttribute('class', 'back-wire-shadow');
+    svg.appendChild(shadow);
+
+    const glow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    glow.setAttribute('d', d);
+    glow.setAttribute('class', `back-wire-glow src-${sourceIdx}`);
+    glow.style.setProperty('--route-opacity', `${0.34 + activity * 0.34}`);
+    svg.appendChild(glow);
+
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('class', `back-wire src-${sourceIdx}`);
+    path.style.setProperty('--route-opacity', `${0.76 + activity * 0.24}`);
+    svg.appendChild(path);
+
+    [
+      [sx, sy],
+      [tx, ty],
+    ].forEach(([cx, cy]) => {
+      const plug = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      plug.setAttribute('cx', cx.toFixed(1));
+      plug.setAttribute('cy', cy.toFixed(1));
+      plug.setAttribute('r', '7.2');
+      plug.setAttribute('class', `back-wire-plug src-${sourceIdx}`);
+      svg.appendChild(plug);
+
+      const core = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      core.setAttribute('cx', cx.toFixed(1));
+      core.setAttribute('cy', cy.toFixed(1));
+      core.setAttribute('r', '3');
+      core.setAttribute('class', 'back-wire-plug-core');
+      svg.appendChild(core);
+    });
+  });
+}
+
+function refreshBackPanelState() {
+  if (!BACK_PANEL.built) return;
+
+  [0, 1, 2].forEach((idx) => {
+    const meta = BACK_PANEL.sourceMeta.get(idx);
+    if (!meta) return;
+    const routeCount = [...lfoMappings.values()].filter((mapping) => mapping.sourceIdx === idx).length;
+    meta.module.dataset.routes = `${routeCount}`;
+    meta.module.classList.toggle('mapped', routeCount > 0);
+  });
+
+  BACK_PANEL.sourceMeta.get(0) &&
+    (() => {
+      const meta = BACK_PANEL.sourceMeta.get(0);
+      const routeCount = [...lfoMappings.values()].filter((mapping) => mapping.sourceIdx === 0).length;
+      meta.subtitleEl.textContent = `${LFOS[0].shape.toUpperCase()} • ${LFOS[0].sync ? getTempoStep(LFOS[0].syncIndex).label : `${formatNumericValue(LFOS[0].rate, 2)}Hz`} • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
+      meta.valueEl.textContent = `${LFOS[0].currentValue >= 0 ? '+' : ''}${formatNumericValue(LFOS[0].currentValue, 2)}`;
+      meta.module.classList.toggle('active', true);
+    })();
+  BACK_PANEL.sourceMeta.get(1) &&
+    (() => {
+      const meta = BACK_PANEL.sourceMeta.get(1);
+      const routeCount = [...lfoMappings.values()].filter((mapping) => mapping.sourceIdx === 1).length;
+      meta.subtitleEl.textContent = `${LFOS[1].shape.toUpperCase()} • ${LFOS[1].sync ? getTempoStep(LFOS[1].syncIndex).label : `${formatNumericValue(LFOS[1].rate, 2)}Hz`} • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
+      meta.valueEl.textContent = `${LFOS[1].currentValue >= 0 ? '+' : ''}${formatNumericValue(LFOS[1].currentValue, 2)}`;
+      meta.module.classList.toggle('active', true);
+    })();
+  BACK_PANEL.sourceMeta.get(2) &&
+    (() => {
+      const meta = BACK_PANEL.sourceMeta.get(2);
+      const routeCount = [...lfoMappings.values()].filter((mapping) => mapping.sourceIdx === 2).length;
+      meta.subtitleEl.textContent = `1/${STEP_SEQ.subdivision} • step ${STEP_SEQ.currentStep + 1} • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
+      meta.valueEl.textContent = `${STEP_SEQ.currentValue >= 0 ? '+' : ''}${formatNumericValue(STEP_SEQ.currentValue, 2)}`;
+      meta.module.classList.toggle('active', true);
+    })();
+
+  [0, 1, 2].forEach((idx) => {
+    const fill = BACK_PANEL.sourceMeters.get(idx);
+    const value = idx === 2 ? STEP_SEQ.currentValue : LFOS[idx].currentValue;
+    if (!fill) return;
+    fill.style.setProperty('--source-level', `${Math.abs(value)}`);
+    fill.classList.toggle('negative', value < 0);
+  });
+
+  BACK_PANEL.audioModules.get('input-1') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('input-1');
+      const source = getSourceState(0);
+      module.subtitleEl.textContent =
+        source.mode === 'file' ? source.fileName || 'File source' : getSelectedInputLabel();
+      module.el.classList.toggle('active', source.mode === 'file' ? !!source.bufferData : anyMicSourceSelected());
+    })();
+  BACK_PANEL.audioModules.get('gen-1') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('gen-1');
+      module.subtitleEl.textContent = `${Math.round(state[0].density)}/s • ${formatNumericValue(state[0].grainSizeMs, 0)}ms`;
+      module.el.classList.toggle('active', started);
+    })();
+  BACK_PANEL.audioModules.get('input-2') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('input-2');
+      const source = getSourceState(1);
+      module.subtitleEl.textContent =
+        source.mode === 'file' ? source.fileName || 'File source' : getSelectedInputLabel();
+      module.el.classList.toggle('active', source.mode === 'file' ? !!source.bufferData : anyMicSourceSelected());
+    })();
+  BACK_PANEL.audioModules.get('gen-2') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('gen-2');
+      module.subtitleEl.textContent = `${Math.round(state[1].density)}/s • ${formatNumericValue(state[1].grainSizeMs, 0)}ms`;
+      module.el.classList.toggle('active', started);
+    })();
+  BACK_PANEL.audioModules.get('gen-3') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('gen-3');
+      const totalVoices = GEN3.activeNotes.size + GEN3.releasingVoices.size;
+      module.subtitleEl.textContent = `${GEN3.type.toUpperCase()} • ${totalVoices} voice${totalVoices === 1 ? '' : 's'}`;
+      module.el.classList.toggle('active', GEN3.activeNotes.size + GEN3.releasingVoices.size > 0);
+    })();
+  BACK_PANEL.audioModules.get('mix') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('mix');
+      module.subtitleEl.textContent = `${started ? 'front bus live' : 'standby'} • ${lfoMappings.size} mod route${lfoMappings.size === 1 ? '' : 's'}`;
+      module.el.classList.toggle('active', started || GEN3.activeNotes.size > 0);
+    })();
+  BACK_PANEL.audioModules.get('delay') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('delay');
+      module.subtitleEl.textContent = `${formatBackValue(getFxParamDef('delay', 'mix'), FX.delay.mix)} wet`;
+      module.el.classList.toggle('active', FX.delay.mix > 0.001);
+    })();
+  BACK_PANEL.audioModules.get('filter') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('filter');
+      module.subtitleEl.textContent = `${FX.filter.mode.toUpperCase()} • ${formatNumericValue(FX.filter.cutoff, 0)}Hz`;
+      module.el.classList.toggle('active', FX.filter.mix > 0.001);
+    })();
+  BACK_PANEL.audioModules.get('bitreduce') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('bitreduce');
+      module.subtitleEl.textContent = `${formatNumericValue(FX.bitreduce.bits, 0)} bits • ${formatBackValue(getFxParamDef('bitreduce', 'mix'), FX.bitreduce.mix)} wet`;
+      module.el.classList.toggle('active', FX.bitreduce.mix > 0.001);
+    })();
+  BACK_PANEL.audioModules.get('sat') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('sat');
+      module.subtitleEl.textContent = `${formatBackValue(getFxParamDef('sat', 'drive'), FX.sat.drive)} drive`;
+      module.el.classList.toggle('active', FX.sat.mix > 0.001 || FX.sat.drive > 0.001);
+    })();
+  BACK_PANEL.audioModules.get('reverb') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('reverb');
+      module.subtitleEl.textContent = `${formatBackValue(getFxParamDef('reverb', 'mix'), FX.reverb.mix)} wet`;
+      module.el.classList.toggle('active', FX.reverb.mix > 0.001);
+    })();
+  BACK_PANEL.audioModules.get('limiter') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('limiter');
+      module.subtitleEl.textContent = `${formatNumericValue(FX.limiter.ratio, 1)}:1 • ${formatNumericValue(FX.limiter.threshold, 1)}dB`;
+      module.el.classList.toggle('active', true);
+    })();
+  BACK_PANEL.audioModules.get('output') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('output');
+      module.subtitleEl.textContent = started || GEN3.activeNotes.size > 0 ? getGranularStatusText() : 'idle';
+      module.el.classList.toggle('active', started || GEN3.activeNotes.size > 0);
+    })();
+
+  BACK_PANEL.targetValues.forEach((valueEl, routeKey) => {
+    valueEl.textContent = getBackTargetValue(routeKey);
+  });
+
+  BACK_PANEL.targetRows.forEach((row) => {
+    row.classList.remove('mapped', 'src-0', 'src-1', 'src-2');
+  });
+  lfoMappings.forEach(({ genIdx, key, sourceIdx }) => {
+    BACK_PANEL.targetRows.get(`${genIdx}:${key}`)?.classList.add('mapped', `src-${sourceIdx}`);
+  });
+
+  if (UI_VIEW.mode === 'back') requestAnimationFrame(renderBackPanelConnections);
+}
+
+function setPanelView(mode) {
+  UI_VIEW.mode = mode === 'back' ? 'back' : 'front';
+  getFrontWorkspace()?.classList.toggle('hidden-panel', UI_VIEW.mode !== 'front');
+  getBackPanel()?.classList.toggle('hidden-panel', UI_VIEW.mode !== 'back');
+  getViewToggle()
+    ?.querySelectorAll('.view-btn')
+    .forEach((btn) => btn.classList.toggle('active', btn.dataset.view === UI_VIEW.mode));
+  if (UI_VIEW.mode === 'back') {
+    refreshBackPanelState();
+    requestAnimationFrame(renderBackPanelConnections);
+  }
+}
+
+function initViewToggle() {
+  getViewToggle()
+    ?.querySelectorAll('.view-btn')
+    .forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setPanelView(btn.dataset.view);
+      });
+    });
 }
 
 function createFxSection(label, className = '') {
@@ -2489,6 +3022,7 @@ function buildLFOSection(lfoIdx) {
     } else {
       lfo.rate = v;
     }
+    refreshBackPanelState();
   });
   lfoControlBindings[lfoIdx].set('rate', rateControl);
   content.appendChild(rateControl);
@@ -2496,6 +3030,7 @@ function buildLFOSection(lfoIdx) {
   const syncModeRow = buildSyncModeRow(lfo.sync, (mode) => {
     lfo.sync = mode === 'sync';
     refreshLFOControlUI(lfoIdx);
+    refreshBackPanelState();
   });
   lfoSyncModeControls[lfoIdx] = syncModeRow;
   content.appendChild(syncModeRow);
@@ -2505,6 +3040,7 @@ function buildLFOSection(lfoIdx) {
     lfo.depth,
     (v) => {
       lfo.depth = v;
+      refreshBackPanelState();
     },
   );
   lfoControlBindings[lfoIdx].set('depth', depthControl);
@@ -2528,6 +3064,7 @@ function buildLFOSection(lfoIdx) {
       if (shape === 'samplehold') lfo.holdValue = Math.random() * 2 - 1;
       shapeRow.querySelectorAll('.lfo-shape').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
+      refreshBackPanelState();
     });
     lfoShapeButtons[lfoIdx].set(shape, btn);
     shapeRow.appendChild(btn);
@@ -2819,6 +3356,7 @@ function refreshLFOUI() {
       btn.classList.toggle('active', lfo.shape === shape),
     );
   });
+  refreshBackPanelState();
 }
 
 function refreshFilterUI() {
@@ -2826,6 +3364,7 @@ function refreshFilterUI() {
     fxControlBindings.get(`filter:${key}`)?.setValue(FX.filter[key]);
   });
   filterModeButtons.forEach((btn, mode) => btn.classList.toggle('active', FX.filter.mode === mode));
+  refreshBackPanelState();
 }
 
 function capturePreset() {
@@ -2938,6 +3477,7 @@ function applyPreset(preset) {
   sendParams(1);
   applyGen3Modulation();
   applyFxModulation();
+  refreshBackPanelState();
 }
 
 function refreshPresetUI() {
@@ -3014,6 +3554,7 @@ function buildFxUI() {
           FX.filter.mode = mode;
           applyFilterMode();
           refreshFilterUI();
+          refreshBackPanelState();
         });
         filterModeButtons.set(mode, btn);
         modeRow.appendChild(btn);
@@ -3036,12 +3577,14 @@ function buildFxUI() {
             if (isMappable) applyFxModulation();
             else applyFx('delay', 'time', getBaseFxValue('delay', 'time'));
             refreshModulationVisuals();
+            refreshBackPanelState();
             return;
           }
           FX[def.id][p.key] = v;
           if (isMappable) applyFxModulation();
           else applyFx(def.id, p.key, v);
           refreshModulationVisuals();
+          refreshBackPanelState();
         },
         isMappable ? () => cycleLFOMap(3, `${def.id}:${p.key}`) : null,
       );
@@ -3055,6 +3598,7 @@ function buildFxUI() {
           if (isMappable) applyFxModulation();
           else applyFx('delay', 'time', getBaseFxValue('delay', 'time'));
           refreshModulationVisuals();
+          refreshBackPanelState();
         });
         content.appendChild(delaySyncModeControl);
       }
@@ -3255,6 +3799,7 @@ function stop() {
   drawGenVizEmpty(0);
   drawGenVizEmpty(1);
   drawGenVizEmpty(2);
+  refreshBackPanelState();
 }
 
 document.getElementById('startBtn').addEventListener('click', () => {
@@ -3305,8 +3850,15 @@ setSourceDurationSec(0, LIVE_SOURCE_SECONDS);
 setSourceDurationSec(1, LIVE_SOURCE_SECONDS);
 buildFxUI();
 buildPresetUI();
+buildBackPanel();
 refreshInputDevices();
 initTempoDrag();
+initViewToggle();
 refreshRecordButton();
 setTransportBpm(TRANSPORT.bpm);
+setPanelView('front');
 getStartBtn().textContent = getIdleStartButtonLabel();
+
+window.addEventListener('resize', () => {
+  if (UI_VIEW.mode === 'back') requestAnimationFrame(renderBackPanelConnections);
+});
