@@ -92,6 +92,44 @@ main {
   margin-left: auto;
 }
 
+.tempo-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  background: #202020;
+  border-radius: 2px;
+}
+
+.tempo-label {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.tempo-input {
+  width: 44px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 10px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.tempo-input::-webkit-outer-spin-button,
+.tempo-input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
 .status {
   font-size: 9px;
   letter-spacing: 0.08em;
@@ -369,7 +407,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 .control .value {
   font-size: 9px;
   color: var(--gen-accent);
-  width: 48px;
+  width: 68px;
   text-align: right;
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
@@ -529,6 +567,10 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   display: flex;
   gap: 2px;
   padding: 5px 10px 8px;
+}
+
+.sync-mode-row {
+  padding-top: 0;
 }
 
 .lfo-shape {

@@ -8,6 +8,19 @@ let started = false;
 let granularModulePromise = null;
 let bitReducerModulePromise = null;
 const LIVE_SOURCE_SECONDS = 10;
+const MAX_DELAY_SECONDS = 16;
+const BPM_BOUNDS = { min: 40, max: 240, step: 1 };
+const TRANSPORT = { bpm: 120 };
+const TEMPO_SYNC_STEPS = [
+  { label: '1/16', beats: 0.25 },
+  { label: '1/8T', beats: 1 / 3 },
+  { label: '1/8', beats: 0.5 },
+  { label: '1/4T', beats: 2 / 3 },
+  { label: '1/4', beats: 1 },
+  { label: '1/2', beats: 2 },
+  { label: '1B', beats: 4 },
+  { label: '2B', beats: 8 },
+];
 const REC = {
   isRecording: false,
   left: [],
@@ -37,9 +50,61 @@ function getPresetSlotsEl() {
   return document.getElementById('presetSlots');
 }
 
+function getBpmInput() {
+  return document.getElementById('bpmInput');
+}
+
 function setStatus(text) {
   const status = getStatusEl();
   if (status) status.textContent = text;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function quantize(value, step, decimals) {
+  return parseFloat((Math.round(value / step) * step).toFixed(decimals));
+}
+
+function formatNumericValue(value, decimals) {
+  return parseFloat(value.toFixed(decimals));
+}
+
+function formatControlValue(spec, value) {
+  const decimals = (spec.step.toString().split('.')[1] || '').length;
+  return `${formatNumericValue(value, decimals)}${spec.unit ? ' ' + spec.unit : ''}`;
+}
+
+function getTempoStep(syncIndex) {
+  const index = clamp(Math.round(syncIndex), 0, TEMPO_SYNC_STEPS.length - 1);
+  return TEMPO_SYNC_STEPS[index];
+}
+
+function beatsToSeconds(beats) {
+  return (60 / TRANSPORT.bpm) * beats;
+}
+
+function formatTempoSeconds(seconds) {
+  const decimals = seconds >= 10 ? 1 : 2;
+  return `${formatNumericValue(seconds, decimals)}s`;
+}
+
+function formatTempoSyncValue(syncIndex, suffix) {
+  const step = getTempoStep(syncIndex);
+  return `${step.label} ${suffix(step)}`;
+}
+
+function getDelayTimeSeconds() {
+  return clamp(
+    FX.delay.sync ? beatsToSeconds(getTempoStep(FX.delay.syncIndex).beats) : FX.delay.time,
+    0,
+    MAX_DELAY_SECONDS,
+  );
+}
+
+function getLfoRateHz(lfo) {
+  return lfo.sync ? 1 / beatsToSeconds(getTempoStep(lfo.syncIndex).beats) : lfo.rate;
 }
 
 function refreshRecordButton() {
@@ -688,8 +753,10 @@ const gen3ControlBindings = new Map();
 const fxControlBindings = new Map();
 const lfoControlBindings = [new Map(), new Map()];
 const lfoShapeButtons = [new Map(), new Map()];
+const lfoSyncModeControls = [null, null];
 const gen3ShapeButtons = new Map();
 const filterModeButtons = new Map();
+let delaySyncModeControl = null;
 const genSourceModeButtons = [new Map(), new Map()];
 const POSITION_PARAM = PARAMS.find((p) => p.key === 'positionSec');
 const GRANULAR_SOURCES = [createGranularSourceState(), createGranularSourceState()];
@@ -858,18 +925,24 @@ function setLFOLedState(led, lfoIdx) {
 }
 
 function makeControlRow(p, initialValue, onInput, lfoCycle = null) {
-  const dec = (p.step.toString().split('.')[1] || '').length;
-  const fmt = (v) => `${parseFloat(v.toFixed(dec))}${p.unit ? ' ' + p.unit : ''}`;
-
+  let spec = { ...p };
+  let formatter = null;
+  let currentValue = initialValue;
   const row = document.createElement('div');
   row.className = 'control';
 
   const valueEl = document.createElement('span');
   valueEl.className = 'value';
-  valueEl.textContent = fmt(initialValue);
+
+  const renderValue = (value) => {
+    currentValue = value;
+    valueEl.textContent = (formatter || ((v) => formatControlValue(spec, v)))(value);
+  };
+
+  renderValue(initialValue);
 
   const knob = makeKnob(p, initialValue, (v) => {
-    valueEl.textContent = fmt(v);
+    renderValue(v);
     onInput(v);
   });
 
@@ -891,15 +964,46 @@ function makeControlRow(p, initialValue, onInput, lfoCycle = null) {
     row.append(knob, label, valueEl);
   }
   row.setValue = (v) => {
-    valueEl.textContent = fmt(v);
+    renderValue(v);
     knob.setValue(v);
   };
   row.setConfig = (patch) => {
+    spec = { ...spec, ...patch };
     knob.setConfig?.(patch);
+    renderValue(currentValue);
+  };
+  row.setFormatter = (nextFormatter) => {
+    formatter = nextFormatter || null;
+    renderValue(currentValue);
   };
   row.setMapLFO = (lfoIdx) => {
     if (led) setLFOLedState(led, lfoIdx);
   };
+  return row;
+}
+
+function buildSyncModeRow(isSync, onModeChange) {
+  const row = document.createElement('div');
+  row.className = 'fx-mode-row sync-mode-row';
+
+  const buttons = new Map();
+  [
+    ['free', 'Free'],
+    ['sync', 'Sync'],
+  ].forEach(([mode, label]) => {
+    const btn = document.createElement('button');
+    btn.className = 'fx-mode-btn';
+    btn.type = 'button';
+    btn.textContent = label;
+    btn.addEventListener('click', () => onModeChange(mode));
+    buttons.set(mode, btn);
+    row.appendChild(btn);
+  });
+
+  row.setMode = (mode) => {
+    buttons.forEach((btn, key) => btn.classList.toggle('active', key === mode));
+  };
+  row.setMode(isSync ? 'sync' : 'free');
   return row;
 }
 
@@ -965,7 +1069,7 @@ function makeKnob(p, initialValue, onInput) {
     E = 135; // 7 o'clock → 5 o'clock (270° sweep)
   const clamp01 = (n) => Math.max(0, Math.min(1, n));
 
-  let spec = { ...p };
+  let spec = { resetValue: initialValue, ...p };
   let currentValue = initialValue;
   const getDecimals = () => (spec.step.toString().split('.')[1] || '').length;
   const toNorm = (v) => {
@@ -1074,8 +1178,9 @@ function makeKnob(p, initialValue, onInput) {
 
   // Double-click to reset to initial value
   svg.addEventListener('dblclick', () => {
-    renderValue(initialValue);
-    onInput(Math.max(spec.min, Math.min(spec.max, initialValue)));
+    const resetValue = typeof spec.resetValue === 'number' ? spec.resetValue : initialValue;
+    renderValue(resetValue);
+    onInput(Math.max(spec.min, Math.min(spec.max, resetValue)));
   });
 
   svg.setValue = (v) => renderValue(v);
@@ -1657,7 +1762,7 @@ const FX_DEFS = [
 
 // Source of truth for FX state — applied to audio nodes when they exist.
 const FX = {
-  delay: { time: 0.3, feedback: 0.35, mix: 0 },
+  delay: { time: 0.3, feedback: 0.35, mix: 0, sync: false, syncIndex: 4 },
   filter: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 0 },
   bitreduce: { bits: 8, rate: 1, mix: 0 },
   sat: { drive: 0.3, mix: 0 },
@@ -1670,10 +1775,22 @@ let fx = null; // audio nodes, created in start(), nulled in stop()
 // ─── LFO ───────────────────────────────────────────────────────────────────
 
 const LFOS = [
-  { label: 'LFO 1', rate: 1.0, shape: 'sine', depth: 0.3, phase: 0, currentValue: 0, holdValue: 0 },
+  {
+    label: 'LFO 1',
+    rate: 1.0,
+    sync: false,
+    syncIndex: 5,
+    shape: 'sine',
+    depth: 0.3,
+    phase: 0,
+    currentValue: 0,
+    holdValue: 0,
+  },
   {
     label: 'LFO 2',
     rate: 0.35,
+    sync: false,
+    syncIndex: 6,
     shape: 'tri',
     depth: 0.25,
     phase: 0,
@@ -1691,6 +1808,25 @@ const LFO_RATE_CONTROL = {
   unit: 'Hz',
   toNorm: (v) => Math.pow((v - 0.05) / (10 - 0.05), 1 / LFO_RATE_CURVE_EXP),
   fromNorm: (n) => 0.05 + Math.pow(Math.max(0, Math.min(1, n)), LFO_RATE_CURVE_EXP) * (10 - 0.05),
+};
+const LFO_RATE_SYNC_CONTROL = {
+  key: 'rate',
+  label: 'Rate',
+  min: 0,
+  max: TEMPO_SYNC_STEPS.length - 1,
+  step: 1,
+  unit: '',
+};
+const DELAY_TIME_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'delay').params.find(
+  (param) => param.key === 'time',
+);
+const DELAY_TIME_SYNC_CONTROL = {
+  key: 'time',
+  label: 'Time',
+  min: 0,
+  max: TEMPO_SYNC_STEPS.length - 1,
+  step: 1,
+  unit: '',
 };
 // lfoMappings: 'genIdx:paramKey' → { genIdx, key, lfoIdx }
 const lfoMappings = new Map();
@@ -1718,8 +1854,9 @@ function lfoStep(ts) {
   const dt = lfoLastTs ? Math.min((ts - lfoLastTs) / 1000, 0.1) : 0;
   lfoLastTs = ts;
   LFOS.forEach((lfo) => {
+    const rateHz = getLfoRateHz(lfo);
     const prevPhase = lfo.phase;
-    lfo.phase += lfo.rate * dt;
+    lfo.phase += rateHz * dt;
     let wrapped = false;
     while (lfo.phase >= 1) {
       lfo.phase -= 1;
@@ -1773,6 +1910,57 @@ function cycleLFOMap(genIdx, key) {
   return null;
 }
 
+function refreshDelayTimeUI() {
+  const control = fxControlBindings.get('delay:time');
+  if (!control) return;
+  const isSync = !!FX.delay.sync;
+  control.setConfig(
+    isSync
+      ? { ...DELAY_TIME_SYNC_CONTROL, resetValue: FX.delay.syncIndex }
+      : { ...DELAY_TIME_FREE_CONTROL, resetValue: FX.delay.time },
+  );
+  control.setFormatter(
+    isSync ? (v) => formatTempoSyncValue(v, (step) => formatTempoSeconds(beatsToSeconds(step.beats))) : null,
+  );
+  control.setValue(isSync ? FX.delay.syncIndex : FX.delay.time);
+  delaySyncModeControl?.setMode(isSync ? 'sync' : 'free');
+}
+
+function refreshLFOControlUI(lfoIdx) {
+  const lfo = LFOS[lfoIdx];
+  const control = lfoControlBindings[lfoIdx].get('rate');
+  if (!control) return;
+  const isSync = !!lfo.sync;
+  control.setConfig(
+    isSync
+      ? { ...LFO_RATE_SYNC_CONTROL, resetValue: lfo.syncIndex }
+      : { ...LFO_RATE_CONTROL, resetValue: lfo.rate },
+  );
+  control.setFormatter(
+    isSync
+      ? (v) => formatTempoSyncValue(v, (step) => `${formatNumericValue(1 / beatsToSeconds(step.beats), 2)}Hz`)
+      : null,
+  );
+  control.setValue(isSync ? lfo.syncIndex : lfo.rate);
+  lfoSyncModeControls[lfoIdx]?.setMode(isSync ? 'sync' : 'free');
+}
+
+function setTransportBpm(value, { refresh = true } = {}) {
+  if (!Number.isFinite(value)) return;
+  const decimals = (BPM_BOUNDS.step.toString().split('.')[1] || '').length;
+  TRANSPORT.bpm = clamp(
+    quantize(value, BPM_BOUNDS.step, decimals),
+    BPM_BOUNDS.min,
+    BPM_BOUNDS.max,
+  );
+  const bpmInput = getBpmInput();
+  if (bpmInput) bpmInput.value = `${TRANSPORT.bpm}`;
+  if (!refresh) return;
+  if (FX.delay.sync) applyFx('delay', 'time', FX.delay.time);
+  refreshDelayTimeUI();
+  refreshLFOUI();
+}
+
 function buildLFOSection(lfoIdx) {
   const lfo = LFOS[lfoIdx];
   const section = document.createElement('div');
@@ -1783,16 +1971,32 @@ function buildLFOSection(lfoIdx) {
   lbl.textContent = lfo.label;
   section.appendChild(lbl);
 
-  [
-    LFO_RATE_CONTROL,
-    { key: 'depth', label: 'Depth', min: 0, max: 1, step: 0.01, unit: '' },
-  ].forEach((p) => {
-    const control = makeControlRow(p, lfo[p.key], (v) => {
-      lfo[p.key] = v;
-    });
-    lfoControlBindings[lfoIdx].set(p.key, control);
-    section.appendChild(control);
+  const rateControl = makeControlRow(LFO_RATE_CONTROL, lfo.rate, (v) => {
+    if (lfo.sync) {
+      lfo.syncIndex = Math.round(v);
+    } else {
+      lfo.rate = v;
+    }
   });
+  lfoControlBindings[lfoIdx].set('rate', rateControl);
+  section.appendChild(rateControl);
+
+  const syncModeRow = buildSyncModeRow(lfo.sync, (mode) => {
+    lfo.sync = mode === 'sync';
+    refreshLFOControlUI(lfoIdx);
+  });
+  lfoSyncModeControls[lfoIdx] = syncModeRow;
+  section.appendChild(syncModeRow);
+
+  const depthControl = makeControlRow(
+    { key: 'depth', label: 'Depth', min: 0, max: 1, step: 0.01, unit: '' },
+    lfo.depth,
+    (v) => {
+      lfo.depth = v;
+    },
+  );
+  lfoControlBindings[lfoIdx].set('depth', depthControl);
+  section.appendChild(depthControl);
 
   // Shape selector
   const shapeRow = document.createElement('div');
@@ -1817,6 +2021,8 @@ function buildLFOSection(lfoIdx) {
     shapeRow.appendChild(btn);
   });
   section.appendChild(shapeRow);
+
+  refreshLFOControlUI(lfoIdx);
 
   return section;
 }
@@ -1858,7 +2064,7 @@ function buildFxNodes() {
   const dlyIn = ac.createGain();
   const dlyDry = ac.createGain();
   const dlyWet = ac.createGain();
-  const dlyTap = ac.createDelay(2.0);
+  const dlyTap = ac.createDelay(MAX_DELAY_SECONDS);
   const dlyFb = ac.createGain();
   const dlyOut = ac.createGain();
 
@@ -1966,7 +2172,8 @@ function buildFxNodes() {
 function applyFx(id, key, val) {
   if (!fx) return;
   if (id === 'delay') {
-    if (key === 'time') fx.delay.tap.delayTime.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'time')
+      fx.delay.tap.delayTime.setTargetAtTime(getDelayTimeSeconds(), audioCtx.currentTime, 0.02);
     if (key === 'feedback')
       fx.delay.fb.gain.setTargetAtTime(Math.min(0.98, val), audioCtx.currentTime, 0.02);
     if (key === 'mix') {
@@ -2024,7 +2231,7 @@ function refreshGen3UI() {
 
 function refreshLFOUI() {
   LFOS.forEach((lfo, lfoIdx) => {
-    lfoControlBindings[lfoIdx].get('rate')?.setValue(lfo.rate);
+    refreshLFOControlUI(lfoIdx);
     lfoControlBindings[lfoIdx].get('depth')?.setValue(lfo.depth);
     lfoShapeButtons[lfoIdx].forEach((btn, shape) =>
       btn.classList.toggle('active', lfo.shape === shape),
@@ -2041,6 +2248,7 @@ function refreshFilterUI() {
 
 function capturePreset() {
   return {
+    transport: { bpm: TRANSPORT.bpm },
     gens: state.map((gen) => ({ ...gen })),
     gen3: {
       type: GEN3.type,
@@ -2052,13 +2260,23 @@ function capturePreset() {
       release: GEN3.release,
     },
     fx: JSON.parse(JSON.stringify(FX)),
-    lfos: LFOS.map(({ label, rate, shape, depth }) => ({ label, rate, shape, depth })),
+    lfos: LFOS.map(({ label, rate, sync, syncIndex, shape, depth }) => ({
+      label,
+      rate,
+      sync,
+      syncIndex,
+      shape,
+      depth,
+    })),
     mappings: [...lfoMappings.values()].map(({ genIdx, key, lfoIdx }) => ({ genIdx, key, lfoIdx })),
   };
 }
 
 function applyPreset(preset) {
   if (!preset) return;
+  if (typeof preset.transport?.bpm === 'number') {
+    setTransportBpm(preset.transport.bpm, { refresh: false });
+  }
   preset.gens?.forEach((gen, genIdx) => {
     PARAMS.forEach(({ key }) => {
       if (typeof gen[key] === 'number') setGeneratorParam(genIdx, key, gen[key], { send: false });
@@ -2099,6 +2317,8 @@ function applyPreset(preset) {
     preset.lfos.forEach((saved, idx) => {
       if (!LFOS[idx]) return;
       LFOS[idx].rate = saved.rate;
+      if (typeof saved.sync === 'boolean') LFOS[idx].sync = saved.sync;
+      if (typeof saved.syncIndex === 'number') LFOS[idx].syncIndex = saved.syncIndex;
       LFOS[idx].shape = saved.shape;
       LFOS[idx].depth = saved.depth;
     });
@@ -2112,6 +2332,8 @@ function applyPreset(preset) {
     }
   });
   refreshLFOMappingUI();
+  refreshDelayTimeUI();
+  refreshLFOUI();
   sendParams(0);
   sendParams(1);
 }
@@ -2204,15 +2426,35 @@ function buildFxUI() {
 
     def.params.forEach((p) => {
       const control = makeControlRow(p, FX[def.id][p.key], (v) => {
+        if (def.id === 'delay' && p.key === 'time') {
+          if (FX.delay.sync) {
+            FX.delay.syncIndex = Math.round(v);
+          } else {
+            FX.delay.time = v;
+          }
+          applyFx('delay', 'time', FX.delay.time);
+          return;
+        }
         FX[def.id][p.key] = v;
         applyFx(def.id, p.key, v);
       });
       fxControlBindings.set(`${def.id}:${p.key}`, control);
       section.appendChild(control);
+
+      if (def.id === 'delay' && p.key === 'time') {
+        delaySyncModeControl = buildSyncModeRow(FX.delay.sync, (mode) => {
+          FX.delay.sync = mode === 'sync';
+          refreshDelayTimeUI();
+          applyFx('delay', 'time', FX.delay.time);
+        });
+        section.appendChild(delaySyncModeControl);
+      }
     });
 
     container.appendChild(section);
   });
+
+  refreshDelayTimeUI();
 }
 
 async function start() {
@@ -2399,6 +2641,15 @@ document.getElementById('startBtn').addEventListener('click', () => {
   started ? stop() : start();
 });
 
+getBpmInput()?.addEventListener('input', (e) => {
+  const next = Number.parseFloat(e.target.value);
+  if (Number.isFinite(next)) setTransportBpm(next);
+});
+
+getBpmInput()?.addEventListener('change', () => {
+  setTransportBpm(TRANSPORT.bpm);
+});
+
 ['dragover', 'drop'].forEach((eventName) => {
   window.addEventListener(eventName, (e) => {
     if (!Array.from(e.dataTransfer?.types || []).includes('Files')) return;
@@ -2417,4 +2668,5 @@ setSourceDurationSec(1, LIVE_SOURCE_SECONDS);
 buildFxUI();
 buildPresetUI();
 refreshRecordButton();
+setTransportBpm(TRANSPORT.bpm);
 getStartBtn().textContent = getIdleStartButtonLabel();

@@ -18,6 +18,10 @@
         <div id="presetSlots" class="preset-slots"></div>
       </div>
       <div class="transport">
+        <label class="tempo-box" for="bpmInput">
+          <span class="tempo-label">BPM</span>
+          <input id="bpmInput" class="tempo-input" type="number" min="40" max="240" step="1" value="120" />
+        </label>
         <button id="startBtn" class="primary">&#9654; Start mic</button>
         <button id="recordBtn" class="record-btn">Rec</button>
         <span id="status" class="status">idle</span>
