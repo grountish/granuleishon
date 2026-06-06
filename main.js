@@ -1746,6 +1746,8 @@ const FX_DEFS = [
     params: [
       { key: 'size', label: 'Size', min: 0.1, max: 5, step: 0.1, value: 2, unit: 's' },
       { key: 'decay', label: 'Decay', min: 0.5, max: 8, step: 0.1, value: 3, unit: '' },
+      { key: 'predelay', label: 'Pre-delay', min: 0, max: 0.25, step: 0.001, value: 0.018, unit: 's' },
+      { key: 'damping', label: 'Damping', min: 0, max: 1, step: 0.01, value: 0.42, unit: '' },
       { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
     ],
   },
@@ -1766,7 +1768,7 @@ const FX = {
   filter: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 0 },
   bitreduce: { bits: 8, rate: 1, mix: 0 },
   sat: { drive: 0.3, mix: 0 },
-  reverb: { size: 2, decay: 3, mix: 0 },
+  reverb: { size: 2, decay: 3, predelay: 0.018, damping: 0.42, mix: 0 },
   limiter: { threshold: -8, release: 0.12, output: 0.96 },
 };
 
@@ -2111,13 +2113,59 @@ function makeReverbIR() {
   const sr = audioCtx.sampleRate;
   const len = Math.floor(sr * Math.max(0.05, FX.reverb.size));
   const buf = audioCtx.createBuffer(2, len, sr);
+  const damping = clamp(FX.reverb.damping, 0, 1);
+  const decay = Math.max(0.5, FX.reverb.decay);
+  const earlyCount = 6 + Math.round(FX.reverb.size * 3);
+  const earlySpacing = Math.max(0.003, FX.reverb.size * 0.0022);
+  const baseBrightness = 0.11 + (1 - damping) * 0.22;
+  let peak = 0;
+  const seededNoise = (seed) => {
+    const x = Math.sin(seed * 12.9898 + 78.233) * 43758.5453123;
+    return (x - Math.floor(x)) * 2 - 1;
+  };
+
   for (let c = 0; c < 2; c++) {
     const d = buf.getChannelData(c);
+    const stereoBias = c === 0 ? -1 : 1;
+
+    for (let tap = 0; tap < earlyCount; tap++) {
+      const jitter = (seededNoise((tap + 1) * (c + 3) * 11.7) + 1) * 0.5;
+      const tapTime =
+        tap * earlySpacing +
+        earlySpacing * 0.5 * Math.sin((tap + 1) * (0.91 + c * 0.13)) +
+        jitter * earlySpacing * 0.45;
+      const index = Math.min(len - 1, Math.max(0, Math.floor(tapTime * sr)));
+      const amp = (0.42 - tap / (earlyCount * 2.2)) * (tap % 2 === 0 ? 1 : 0.82);
+      d[index] += amp * (0.9 + stereoBias * 0.08 * Math.sin((tap + 1) * 1.37));
+    }
+
+    let filtered = 0;
+    let diffuser = 0;
     for (let i = 0; i < len; i++) {
-      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, FX.reverb.decay);
+      const t = i / Math.max(1, len - 1);
+      const env = Math.pow(1 - t, 0.35 + 3.4 / decay);
+      const noise = seededNoise(i + 1 + c * 8192);
+      const brightness = baseBrightness * (1 - t * 0.55) + 0.012 + c * 0.006;
+      filtered += (noise - filtered) * brightness;
+      diffuser += (filtered - diffuser) * (0.055 + (1 - damping) * 0.02 + c * 0.004);
+      const shimmer = Math.sin(t * Math.PI * (7.5 + c * 0.7)) * 0.035;
+      d[i] += (filtered * 0.78 + diffuser * 0.52 + shimmer) * env;
+      peak = Math.max(peak, Math.abs(d[i]));
+    }
+  }
+
+  if (peak > 0) {
+    const norm = 0.92 / peak;
+    for (let c = 0; c < 2; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < len; i++) d[i] *= norm;
     }
   }
   return buf;
+}
+
+function getReverbDampingCutoff() {
+  return 900 + Math.pow(1 - clamp(FX.reverb.damping, 0, 1), 1.45) * 13500;
 }
 
 function applyFilterMode() {
@@ -2194,13 +2242,23 @@ function buildFxNodes() {
 
   // ─ Reverb ─
   const rvbIn = ac.createGain();
+  const rvbPre = ac.createDelay(0.25);
+  const rvbHP = ac.createBiquadFilter();
+  rvbHP.type = 'highpass';
+  rvbHP.frequency.setValueAtTime(140, ac.currentTime);
+  rvbHP.Q.setValueAtTime(0.6, ac.currentTime);
+  const rvbDamp = ac.createBiquadFilter();
+  rvbDamp.type = 'lowpass';
   const rvbConv = ac.createConvolver();
   const rvbDry = ac.createGain();
   const rvbWet = ac.createGain();
   const rvbOut = ac.createGain();
 
   rvbIn.connect(rvbDry);
-  rvbIn.connect(rvbConv);
+  rvbIn.connect(rvbPre);
+  rvbPre.connect(rvbHP);
+  rvbHP.connect(rvbDamp);
+  rvbDamp.connect(rvbConv);
   rvbConv.connect(rvbWet);
   rvbDry.connect(rvbOut);
   rvbWet.connect(rvbOut);
@@ -2230,7 +2288,7 @@ function buildFxNodes() {
     filter: { biquad: fltBiquad, dry: fltDry, wet: fltWet },
     bitreduce: { node: bitNode, dry: bitDry, wet: bitWet },
     sat: { shaper: satShaper, dry: satDry, wet: satWet },
-    reverb: { conv: rvbConv, dry: rvbDry, wet: rvbWet },
+    reverb: { pre: rvbPre, hp: rvbHP, damp: rvbDamp, conv: rvbConv, dry: rvbDry, wet: rvbWet },
     limiter: { comp: limiter, output: masterOut },
   };
 
@@ -2272,7 +2330,15 @@ function applyFx(id, key, val) {
       fx.sat.dry.gain.value = 1 - val;
     }
   } else if (id === 'reverb') {
-    if (key === 'size' || key === 'decay') fx.reverb.conv.buffer = makeReverbIR();
+    if (key === 'size' || key === 'decay' || key === 'damping') fx.reverb.conv.buffer = makeReverbIR();
+    if (key === 'predelay')
+      fx.reverb.pre.delayTime.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+    if (key === 'damping')
+      fx.reverb.damp.frequency.setTargetAtTime(
+        getReverbDampingCutoff(),
+        audioCtx.currentTime,
+        0.03,
+      );
     if (key === 'mix') {
       fx.reverb.wet.gain.value = val;
       fx.reverb.dry.gain.value = 1 - val;
