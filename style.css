@@ -411,6 +411,38 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   text-align: center;
 }
 
+.generator .control.gen-discrete-control {
+  gap: 7px;
+  padding: 10px 6px;
+}
+
+.gen-reverse-control {
+  max-width: 84px;
+}
+
+.gen-shape-control {
+  flex: 1.7;
+}
+
+.gen-discrete-btn {
+  padding: 4px 6px;
+  font-size: 7px;
+  line-height: 1;
+}
+
+.gen-discrete-btn.active {
+  background: var(--gen-accent);
+  border-color: var(--gen-accent);
+  color: #121212;
+}
+
+.gen-shape-buttons {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+}
+
 /* FX row: smaller knob, visually lowered without increasing panel height */
 #fx-chain .knob {
   width: 28px;

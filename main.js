@@ -533,8 +533,10 @@ function renderGenViz(gi) {
     c.fillRect(cx - sw, 0, sw, H);
   }
 
-  // Blue — outer/peak layer (draw first, widest)
-  c.fillStyle = state.frozen ? '#3a52a0' : '#3490d8';
+  // Outer layer
+  c.shadowBlur = 10;
+  c.shadowColor = state.frozen ? 'rgba(122, 144, 178, 0.28)' : 'rgba(122, 150, 176, 0.22)';
+  c.fillStyle = state.frozen ? '#5c7091' : '#738ea8';
   c.beginPath();
   for (let x = 0; x < W; x++) {
     if (state.currentPeak[x] > 0.5)
@@ -542,8 +544,10 @@ function renderGenViz(gi) {
   }
   c.fill();
 
-  // Teal — mid layer
-  c.fillStyle = state.frozen ? '#285e72' : '#16b8a8';
+  // Mid layer
+  c.shadowBlur = 8;
+  c.shadowColor = state.frozen ? 'rgba(92, 148, 143, 0.22)' : 'rgba(88, 172, 160, 0.2)';
+  c.fillStyle = state.frozen ? '#3f6f6c' : '#329487';
   c.beginPath();
   for (let x = 0; x < W; x++) {
     if (state.currentTeal[x] > 0.5)
@@ -551,8 +555,10 @@ function renderGenViz(gi) {
   }
   c.fill();
 
-  // Yellow — inner/bass layer (RMS-based, represents sustained low-freq content)
-  c.fillStyle = state.frozen ? '#6e5818' : '#c4a018';
+  // Inner layer (RMS-based, represents sustained low-freq content)
+  c.shadowBlur = 6;
+  c.shadowColor = state.frozen ? 'rgba(155, 130, 82, 0.18)' : 'rgba(198, 160, 88, 0.16)';
+  c.fillStyle = state.frozen ? '#8b7041' : '#b28b47';
   c.beginPath();
   for (let x = 0; x < W; x++) {
     if (state.currentBass[x] > 0.5)
@@ -560,8 +566,10 @@ function renderGenViz(gi) {
   }
   c.fill();
 
-  // Bright peak caps (1px line at top and bottom of each column)
-  c.fillStyle = state.frozen ? 'rgba(140,165,220,0.65)' : 'rgba(200,238,255,0.9)';
+  // Peak caps (1px line at top and bottom of each column)
+  c.shadowBlur = 14;
+  c.shadowColor = state.frozen ? 'rgba(196, 210, 228, 0.3)' : 'rgba(222, 232, 240, 0.24)';
+  c.fillStyle = state.frozen ? 'rgba(190, 204, 224, 0.54)' : 'rgba(211, 226, 237, 0.72)';
   c.beginPath();
   for (let x = 0; x < W; x++) {
     if (state.currentPeak[x] > 2) {
@@ -570,6 +578,7 @@ function renderGenViz(gi) {
     }
   }
   c.fill();
+  c.shadowBlur = 0;
 
   // Center line
   c.fillStyle = '#252525';
@@ -650,6 +659,8 @@ const GEN_DEFAULTS = [
     pitchJitter: 0,
     spread: 0.5,
     gain: 0.8,
+    reverse: false,
+    envType: 'hann',
     freeze: false,
   },
   {
@@ -661,6 +672,8 @@ const GEN_DEFAULTS = [
     pitchJitter: 2,
     spread: 0.7,
     gain: 0.6,
+    reverse: false,
+    envType: 'hann',
     freeze: false,
   },
 ];
@@ -669,6 +682,8 @@ const state = [{ ...GEN_DEFAULTS[0] }, { ...GEN_DEFAULTS[1] }];
 const genControlBindings = [new Map(), new Map()];
 const genMapBindings = [new Map(), new Map()];
 const genFreezeButtons = [null, null];
+const genReverseButtons = [null, null];
+const genEnvButtons = [new Map(), new Map()];
 const gen3ControlBindings = new Map();
 const fxControlBindings = new Map();
 const lfoControlBindings = [new Map(), new Map()];
@@ -678,6 +693,12 @@ const filterModeButtons = new Map();
 const genSourceModeButtons = [new Map(), new Map()];
 const POSITION_PARAM = PARAMS.find((p) => p.key === 'positionSec');
 const GRANULAR_SOURCES = [createGranularSourceState(), createGranularSourceState()];
+const GRAIN_ENV_TYPES = [
+  ['hann', 'HAN'],
+  ['triangle', 'TRI'],
+  ['sharp', 'SHP'],
+  ['soft', 'SFT'],
+];
 
 function getSourceState(genIdx) {
   return GRANULAR_SOURCES[genIdx];
@@ -721,6 +742,10 @@ function anyMicSourceSelected() {
   return GRANULAR_SOURCES.some((source) => source.mode === 'mic');
 }
 
+function canFreezeGenerator(genIdx) {
+  return started && getSourceState(genIdx)?.mode === 'mic';
+}
+
 function getGranularStatusText() {
   const micCount = granularInputSource
     ? GRANULAR_SOURCES.filter((source) => source.mode === 'mic').length
@@ -747,7 +772,8 @@ function refreshSourceModeUI(genIdx) {
 function setGranularRunning() {
   started = true;
   getStartBtn().textContent = '■ Stop';
-  document.querySelectorAll('.gen-freeze').forEach((btn) => (btn.disabled = false));
+  refreshGeneratorUI(0);
+  refreshGeneratorUI(1);
   startLFOLoop();
   startGenVizLoop();
   setStatus(getGranularStatusText());
@@ -801,6 +827,13 @@ function refreshGeneratorUI(genIdx) {
     genControlBindings[genIdx].get(key)?.setValue(state[genIdx][key]);
   });
   genFreezeButtons[genIdx]?.classList.toggle('active', !!state[genIdx].freeze);
+  if (genFreezeButtons[genIdx]) {
+    genFreezeButtons[genIdx].disabled = !canFreezeGenerator(genIdx);
+  }
+  genReverseButtons[genIdx]?.classList.toggle('active', !!state[genIdx].reverse);
+  genEnvButtons[genIdx].forEach((btn, envType) => {
+    btn.classList.toggle('active', state[genIdx].envType === envType);
+  });
 }
 
 function refreshLFOMappingUI() {
@@ -867,6 +900,55 @@ function makeControlRow(p, initialValue, onInput, lfoCycle = null) {
   row.setMapLFO = (lfoIdx) => {
     if (led) setLFOLedState(led, lfoIdx);
   };
+  return row;
+}
+
+function buildGeneratorReverseControl(genIdx) {
+  const row = document.createElement('div');
+  row.className = 'control gen-discrete-control gen-reverse-control';
+
+  const btn = document.createElement('button');
+  btn.className = 'gen-discrete-btn';
+  btn.type = 'button';
+  btn.textContent = 'REV';
+  btn.addEventListener('click', () => {
+    state[genIdx].reverse = !state[genIdx].reverse;
+    refreshGeneratorUI(genIdx);
+    sendParams(genIdx);
+  });
+  genReverseButtons[genIdx] = btn;
+
+  const label = document.createElement('label');
+  label.textContent = 'Reverse';
+
+  row.append(btn, label);
+  return row;
+}
+
+function buildGeneratorShapeControl(genIdx) {
+  const row = document.createElement('div');
+  row.className = 'control gen-discrete-control gen-shape-control';
+
+  const buttons = document.createElement('div');
+  buttons.className = 'gen-shape-buttons';
+  GRAIN_ENV_TYPES.forEach(([envType, shortLabel]) => {
+    const btn = document.createElement('button');
+    btn.className = 'gen-discrete-btn gen-shape-btn';
+    btn.type = 'button';
+    btn.textContent = shortLabel;
+    btn.addEventListener('click', () => {
+      state[genIdx].envType = envType;
+      refreshGeneratorUI(genIdx);
+      sendParams(genIdx);
+    });
+    genEnvButtons[genIdx].set(envType, btn);
+    buttons.appendChild(btn);
+  });
+
+  const label = document.createElement('label');
+  label.textContent = 'Grain shape';
+
+  row.append(buttons, label);
   return row;
 }
 
@@ -1145,8 +1227,11 @@ function buildGeneratorPanel(genIdx) {
     genMapBindings[genIdx].set(p.key, control);
     rows.appendChild(control);
   });
+  rows.appendChild(buildGeneratorReverseControl(genIdx));
+  rows.appendChild(buildGeneratorShapeControl(genIdx));
 
   panel.appendChild(rows);
+  refreshGeneratorUI(genIdx);
   refreshSourceModeUI(genIdx);
   return panel;
 }
@@ -1573,7 +1658,7 @@ const FX_DEFS = [
 // Source of truth for FX state — applied to audio nodes when they exist.
 const FX = {
   delay: { time: 0.3, feedback: 0.35, mix: 0 },
-  filter: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 1 },
+  filter: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 0 },
   bitreduce: { bits: 8, rate: 1, mix: 0 },
   sat: { drive: 0.3, mix: 0 },
   reverb: { size: 2, decay: 3, mix: 0 },
@@ -1585,8 +1670,16 @@ let fx = null; // audio nodes, created in start(), nulled in stop()
 // ─── LFO ───────────────────────────────────────────────────────────────────
 
 const LFOS = [
-  { label: 'LFO 1', rate: 1.0, shape: 'sine', depth: 0.3, phase: 0, currentValue: 0 },
-  { label: 'LFO 2', rate: 0.35, shape: 'tri', depth: 0.25, phase: 0, currentValue: 0 },
+  { label: 'LFO 1', rate: 1.0, shape: 'sine', depth: 0.3, phase: 0, currentValue: 0, holdValue: 0 },
+  {
+    label: 'LFO 2',
+    rate: 0.35,
+    shape: 'tri',
+    depth: 0.25,
+    phase: 0,
+    currentValue: 0,
+    holdValue: 0,
+  },
 ];
 const LFO_RATE_CURVE_EXP = 2.4;
 const LFO_RATE_CONTROL = {
@@ -1614,6 +1707,8 @@ function getLFOValue(lfo) {
       return lfo.phase < 0.5 ? 1 : -1;
     case 'saw':
       return 2 * lfo.phase - 1;
+    case 'samplehold':
+      return lfo.holdValue;
     default:
       return 0;
   }
@@ -1623,8 +1718,16 @@ function lfoStep(ts) {
   const dt = lfoLastTs ? Math.min((ts - lfoLastTs) / 1000, 0.1) : 0;
   lfoLastTs = ts;
   LFOS.forEach((lfo) => {
+    const prevPhase = lfo.phase;
     lfo.phase += lfo.rate * dt;
-    while (lfo.phase >= 1) lfo.phase -= 1;
+    let wrapped = false;
+    while (lfo.phase >= 1) {
+      lfo.phase -= 1;
+      wrapped = true;
+    }
+    if (lfo.shape === 'samplehold' && (wrapped || (dt === 0 && prevPhase === 0))) {
+      lfo.holdValue = Math.random() * 2 - 1;
+    }
     lfo.currentValue = getLFOValue(lfo);
   });
   if (lfoMappings.size > 0) {
@@ -1648,6 +1751,7 @@ function stopLFOLoop() {
   LFOS.forEach((lfo) => {
     lfo.phase = 0;
     lfo.currentValue = 0;
+    lfo.holdValue = 0;
   });
 }
 
@@ -1698,12 +1802,14 @@ function buildLFOSection(lfoIdx) {
     ['tri', 'TRI'],
     ['square', 'SQR'],
     ['saw', 'SAW'],
+    ['samplehold', 'S&H'],
   ].forEach(([shape, lbl]) => {
     const btn = document.createElement('button');
     btn.className = 'lfo-shape' + (lfo.shape === shape ? ' active' : '');
     btn.textContent = lbl;
     btn.addEventListener('click', () => {
       lfo.shape = shape;
+      if (shape === 'samplehold') lfo.holdValue = Math.random() * 2 - 1;
       shapeRow.querySelectorAll('.lfo-shape').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
     });
@@ -1958,6 +2064,8 @@ function applyPreset(preset) {
       if (typeof gen[key] === 'number') setGeneratorParam(genIdx, key, gen[key], { send: false });
     });
     if (typeof gen.freeze === 'boolean') state[genIdx].freeze = gen.freeze;
+    if (typeof gen.reverse === 'boolean') state[genIdx].reverse = gen.reverse;
+    if (typeof gen.envType === 'string') state[genIdx].envType = gen.envType;
     refreshGeneratorUI(genIdx);
   });
 
@@ -2274,14 +2382,11 @@ function stop() {
         ? getSourceState(genIdx).durationSec
         : LIVE_SOURCE_SECONDS,
     );
+    refreshGeneratorUI(genIdx);
     refreshSourceModeUI(genIdx);
   }
 
   document.getElementById('startBtn').textContent = getIdleStartButtonLabel();
-  document.querySelectorAll('.gen-freeze').forEach((btn) => {
-    btn.disabled = true;
-    btn.classList.remove('active');
-  });
   setStatus('idle');
   resetGenVizState(0);
   resetGenVizState(1);

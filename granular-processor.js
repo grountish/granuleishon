@@ -9,6 +9,8 @@ const DEFAULT_PARAMS = {
   pitchJitter: 0,
   spread: 0.5,
   gain: 0.8,
+  reverse: false,
+  envType: 'hann',
 };
 
 class GranularProcessor extends AudioWorkletProcessor {
@@ -20,7 +22,7 @@ class GranularProcessor extends AudioWorkletProcessor {
     this.writePos = 0;
     this.filled = 0;
 
-    // Two independent generators sharing the same source buffer.
+    // Two independent generators, each with its own selectable source.
     // freezeBuffer: pre-allocated snapshot copied from the active source on freeze.
     // frozenAt: source anchor at the moment of freeze — null when live.
     this.gens = [
@@ -111,6 +113,22 @@ class GranularProcessor extends AudioWorkletProcessor {
     this.clearGenState(gen);
   }
 
+  grainWindow(type, phase, length) {
+    const t = Math.max(0, Math.min(1, length <= 1 ? 1 : phase / (length - 1)));
+    const hann = 0.5 * (1 - Math.cos(2 * Math.PI * t));
+    switch (type) {
+      case 'triangle':
+        return Math.max(0, 1 - Math.abs(t * 2 - 1));
+      case 'sharp':
+        return hann * hann;
+      case 'soft':
+        return Math.sqrt(hann);
+      case 'hann':
+      default:
+        return hann;
+    }
+  }
+
   spawnGrain(gen) {
     if (gen.grains.length >= 128) return;
 
@@ -125,7 +143,7 @@ class GranularProcessor extends AudioWorkletProcessor {
     start = ((start % sourceLength) + sourceLength) % sourceLength;
 
     const semis = p.pitch + (Math.random() * 2 - 1) * p.pitchJitter;
-    const rate = Math.pow(2, semis / 12);
+    const rate = Math.pow(2, semis / 12) * (p.reverse ? -1 : 1);
 
     const pan = 0.5 + (Math.random() * 2 - 1) * p.spread * 0.5;
     const panClamped = Math.min(1, Math.max(0, pan));
@@ -204,7 +222,7 @@ class GranularProcessor extends AudioWorkletProcessor {
 
         for (let g = 0; g < gen.grains.length; g++) {
           const grain = gen.grains[g];
-          const win = 0.5 * (1 - Math.cos((2 * Math.PI * grain.phase) / grain.length));
+          const win = this.grainWindow(gen.params.envType, grain.phase, grain.length);
           const buf = gen.frozenAt !== null ? gen.freezeBuffer : this.getGenSourceBuffer(gen);
           const s = this.readInterpolated(buf, grain.pos, sourceLength) * win;
           sumL += s * grain.gainL * gen.params.gain;
@@ -212,6 +230,7 @@ class GranularProcessor extends AudioWorkletProcessor {
 
           grain.pos += grain.rate;
           if (grain.pos >= sourceLength) grain.pos -= sourceLength;
+          if (grain.pos < 0) grain.pos += sourceLength;
           grain.phase += 1;
         }
 
