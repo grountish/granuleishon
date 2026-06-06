@@ -106,6 +106,39 @@ main {
   -webkit-user-select: none;
 }
 
+.input-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  min-width: 170px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  background: #202020;
+  border-radius: 2px;
+}
+
+.input-label {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.input-select {
+  min-width: 0;
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 9px;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+
 .tempo-box.dragging {
   cursor: ns-resize;
   background: #262626;

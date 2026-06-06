@@ -9,6 +9,10 @@ let granularModulePromise = null;
 let bitReducerModulePromise = null;
 const LIVE_SOURCE_SECONDS = 10;
 const MAX_DELAY_SECONDS = 16;
+const INPUT_SOURCE = {
+  devices: [],
+  selectedId: 'default',
+};
 const BPM_BOUNDS = { min: 40, max: 240, step: 1 };
 const TRANSPORT = { bpm: 120 };
 const TEMPO_SYNC_STEPS = [
@@ -195,8 +199,55 @@ function getStartBtn() {
   return document.getElementById('startBtn');
 }
 
+function getInputSelect() {
+  return document.getElementById('inputDeviceSelect');
+}
+
 function getIdleStartButtonLabel() {
-  return anyMicSourceSelected() ? '▶ Start mic' : '▶ Start';
+  return anyMicSourceSelected() ? '▶ Start input' : '▶ Start';
+}
+
+function formatInputDeviceLabel(device, idx) {
+  if (!device) return `Input ${idx + 1}`;
+  if (device.deviceId === 'default') return device.label || 'System Default';
+  return device.label || `Input ${idx + 1}`;
+}
+
+function renderInputDevices() {
+  const select = getInputSelect();
+  if (!select) return;
+  select.textContent = '';
+  if (INPUT_SOURCE.devices.length === 0) {
+    const option = document.createElement('option');
+    option.value = 'default';
+    option.textContent = 'No input devices';
+    select.appendChild(option);
+    select.disabled = true;
+    return;
+  }
+  INPUT_SOURCE.devices.forEach((device, idx) => {
+    const option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = formatInputDeviceLabel(device, idx);
+    select.appendChild(option);
+  });
+  if (!INPUT_SOURCE.devices.some((device) => device.deviceId === INPUT_SOURCE.selectedId)) {
+    INPUT_SOURCE.selectedId = INPUT_SOURCE.devices[0]?.deviceId || 'default';
+  }
+  select.value = INPUT_SOURCE.selectedId;
+  select.disabled = false;
+}
+
+async function refreshInputDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioInputs = devices.filter((device) => device.kind === 'audioinput');
+    INPUT_SOURCE.devices = audioInputs.length
+      ? audioInputs
+      : [{ deviceId: 'default', label: 'System Default', kind: 'audioinput' }];
+    renderInputDevices();
+  } catch (e) {}
 }
 
 function createGranularSourceState() {
@@ -3019,7 +3070,7 @@ async function start() {
   try {
     await ensureGranularEngine();
     if (anyMicSourceSelected()) {
-      setStatus('requesting mic…');
+      setStatus('requesting input…');
       await ensureMicInput();
     }
     sendParams(0);
@@ -3064,15 +3115,26 @@ function disconnectGranularInput({ stopTracks = false } = {}) {
   }
 }
 
-async function ensureMicInput() {
+async function ensureMicInput({ forceReconnect = false } = {}) {
   if (!node) await ensureGranularEngine();
-  if (granularInputSource && micStream) return;
+  if (granularInputSource && micStream && !forceReconnect) return;
   disconnectGranularInput({ stopTracks: true });
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-  });
+  const audioConstraints = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+  };
+  if (INPUT_SOURCE.selectedId && INPUT_SOURCE.selectedId !== 'default') {
+    audioConstraints.deviceId = { exact: INPUT_SOURCE.selectedId };
+  }
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   granularInputSource = audioCtx.createMediaStreamSource(micStream);
   granularInputSource.connect(node);
+  const activeDeviceId = micStream.getAudioTracks()[0]?.getSettings?.().deviceId;
+  if (activeDeviceId && INPUT_SOURCE.devices.some((device) => device.deviceId === activeDeviceId)) {
+    INPUT_SOURCE.selectedId = activeDeviceId;
+  }
+  await refreshInputDevices();
 }
 
 async function syncGranularSourceState(genIdx) {
@@ -3199,6 +3261,20 @@ document.getElementById('startBtn').addEventListener('click', () => {
   started ? stop() : start();
 });
 
+getInputSelect()?.addEventListener('change', async (e) => {
+  INPUT_SOURCE.selectedId = e.target.value;
+  if (started && anyMicSourceSelected()) {
+    try {
+      setStatus('switching input…');
+      await ensureMicInput({ forceReconnect: true });
+      setStatus(getGranularStatusText());
+    } catch (err) {
+      setStatus('error: ' + err.message);
+      console.error(err);
+    }
+  }
+});
+
 getBpmInput()?.addEventListener('input', (e) => {
   const next = Number.parseFloat(e.target.value);
   if (Number.isFinite(next)) setTransportBpm(next);
@@ -3219,12 +3295,17 @@ getRecordBtn()?.addEventListener('click', () => {
   REC.isRecording ? stopRecording() : startRecording();
 });
 
+navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+  refreshInputDevices();
+});
+
 loadPresetStore();
 buildUI();
 setSourceDurationSec(0, LIVE_SOURCE_SECONDS);
 setSourceDurationSec(1, LIVE_SOURCE_SECONDS);
 buildFxUI();
 buildPresetUI();
+refreshInputDevices();
 initTempoDrag();
 refreshRecordButton();
 setTransportBpm(TRANSPORT.bpm);
