@@ -30,9 +30,9 @@ const GRAIN_SYNC_STEPS = [
   { label: '1/32', beats: 0.125 },
   { label: '1/16', beats: 0.25 },
   { label: '1/8T', beats: 1 / 3 },
-  { label: '1/8',  beats: 0.5 },
+  { label: '1/8', beats: 0.5 },
   { label: '1/4T', beats: 2 / 3 },
-  { label: '1/4',  beats: 1 },
+  { label: '1/4', beats: 1 },
 ];
 const GRAIN_SYNC_CONTROL = { min: 0, max: GRAIN_SYNC_STEPS.length - 1, step: 1, unit: '' };
 const REC = {
@@ -849,8 +849,10 @@ const GEN_DEFAULTS = [
     reverse: false,
     envType: 'hann',
     freeze: false,
-    grainSizeSync: false, grainSizeSyncIndex: 2,
-    densitySync: false,   densitySyncIndex: 2,
+    grainSizeSync: false,
+    grainSizeSyncIndex: 2,
+    densitySync: false,
+    densitySyncIndex: 2,
   },
   {
     grainSizeMs: 80,
@@ -864,8 +866,10 @@ const GEN_DEFAULTS = [
     reverse: false,
     envType: 'hann',
     freeze: false,
-    grainSizeSync: false, grainSizeSyncIndex: 2,
-    densitySync: false,   densitySyncIndex: 2,
+    grainSizeSync: false,
+    grainSizeSyncIndex: 2,
+    densitySync: false,
+    densitySyncIndex: 2,
   },
 ];
 
@@ -1772,19 +1776,20 @@ function buildGeneratorPanel(genIdx) {
   const rows = document.createElement('div');
   rows.className = 'gen-controls';
   PARAMS.forEach((p) => {
-    const onChange = p.key === 'grainSizeMs'
-      ? (v) => {
-          if (state[genIdx].grainSizeSync) state[genIdx].grainSizeSyncIndex = Math.round(v);
-          else setGeneratorParam(genIdx, p.key, v);
-          sendParams(genIdx);
-        }
-      : p.key === 'density'
+    const onChange =
+      p.key === 'grainSizeMs'
         ? (v) => {
-            if (state[genIdx].densitySync) state[genIdx].densitySyncIndex = Math.round(v);
+            if (state[genIdx].grainSizeSync) state[genIdx].grainSizeSyncIndex = Math.round(v);
             else setGeneratorParam(genIdx, p.key, v);
             sendParams(genIdx);
           }
-        : (v) => setGeneratorParam(genIdx, p.key, v);
+        : p.key === 'density'
+          ? (v) => {
+              if (state[genIdx].densitySync) state[genIdx].densitySyncIndex = Math.round(v);
+              else setGeneratorParam(genIdx, p.key, v);
+              sendParams(genIdx);
+            }
+          : (v) => setGeneratorParam(genIdx, p.key, v);
     const control = makeControlRow(p, defaults[p.key], onChange, () => cycleLFOMap(genIdx, p.key));
     genControlBindings[genIdx].set(p.key, control);
     genMapBindings[genIdx].set(p.key, control);
@@ -2212,40 +2217,48 @@ function buildOscPanel() {
 
 const GEN4_DEFS = [
   {
-    id: 'kick', label: 'KICK', color: '#e05858',
+    id: 'kick',
+    label: 'KICK',
+    color: '#e05858',
     paramDefs: [
-      { key: 'tune',  label: 'Tune',  min: 30,    max: 120,   step: 1,     value: 70,   unit: 'Hz' },
-      { key: 'decay', label: 'Decay', min: 0.05,  max: 1.0,   step: 0.01,  value: 0.85, unit: 's'  },
-      { key: 'punch', label: 'Punch', min: 0,     max: 1,     step: 0.01,  value: 0.36, unit: ''   },
-      { key: 'drive', label: 'Drive', min: 0,     max: 1,     step: 0.01,  value: 0,    unit: ''   },
-      { key: 'gain',  label: 'Gain',  min: 0,     max: 1,     step: 0.01,  value: 1,    unit: ''   },
+      { key: 'tune', label: 'Tune', min: 30, max: 120, step: 1, value: 70, unit: 'Hz' },
+      { key: 'decay', label: 'Decay', min: 0.05, max: 1.0, step: 0.01, value: 0.85, unit: 's' },
+      { key: 'punch', label: 'Punch', min: 0, max: 1, step: 0.01, value: 0.36, unit: '' },
+      { key: 'drive', label: 'Drive', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
+      { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 1, unit: '' },
     ],
   },
   {
-    id: 'snare', label: 'SNR', color: '#d4892a',
+    id: 'snare',
+    label: 'SNR',
+    color: '#d4892a',
     paramDefs: [
-      { key: 'tune',  label: 'Tone',  min: 100,   max: 500,  step: 5,    value: 360,  unit: 'Hz' },
-      { key: 'decay', label: 'Decay', min: 0.05,  max: 0.8,  step: 0.01, value: 0.09, unit: 's'  },
-      { key: 'snap',  label: 'Snap',  min: 0,     max: 1,    step: 0.01, value: 1,    unit: ''   },
-      { key: 'gain',  label: 'Gain',  min: 0,     max: 1,    step: 0.01, value: 0.96, unit: ''   },
+      { key: 'tune', label: 'Tone', min: 100, max: 500, step: 5, value: 360, unit: 'Hz' },
+      { key: 'decay', label: 'Decay', min: 0.05, max: 0.8, step: 0.01, value: 0.09, unit: 's' },
+      { key: 'snap', label: 'Snap', min: 0, max: 1, step: 0.01, value: 1, unit: '' },
+      { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 0.96, unit: '' },
     ],
   },
   {
-    id: 'hat', label: 'HAT', color: '#7ad860',
+    id: 'hat',
+    label: 'HAT',
+    color: '#7ad860',
     paramDefs: [
-      { key: 'decay', label: 'Decay', min: 0.005, max: 0.5,   step: 0.005, value: 0.06,   unit: 's'  },
-      { key: 'tone',  label: 'Tone',  min: 3000,  max: 16000, step: 200,   value: 11200,  unit: 'Hz' },
-      { key: 'gain',  label: 'Gain',  min: 0,     max: 1,     step: 0.01,  value: 0.6,    unit: ''   },
+      { key: 'decay', label: 'Decay', min: 0.005, max: 0.5, step: 0.005, value: 0.06, unit: 's' },
+      { key: 'tone', label: 'Tone', min: 3000, max: 16000, step: 200, value: 11200, unit: 'Hz' },
+      { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 0.6, unit: '' },
     ],
   },
   {
-    id: 'perc', label: 'PERC', color: '#9f7de8',
+    id: 'perc',
+    label: 'PERC',
+    color: '#9f7de8',
     paramDefs: [
-      { key: 'tune',  label: 'Tune',  min: 80,   max: 800,  step: 5,    value: 165,  unit: 'Hz' },
-      { key: 'ratio', label: 'Ratio', min: 0.5,  max: 8,    step: 0.1,  value: 1.6,  unit: ''   },
-      { key: 'index', label: 'Index', min: 0,    max: 10,   step: 0.1,  value: 1.6,  unit: ''   },
-      { key: 'decay', label: 'Decay', min: 0.03, max: 0.6,  step: 0.01, value: 0.06, unit: 's'  },
-      { key: 'gain',  label: 'Gain',  min: 0,    max: 1,    step: 0.01, value: 0.7,  unit: ''   },
+      { key: 'tune', label: 'Tune', min: 80, max: 800, step: 5, value: 165, unit: 'Hz' },
+      { key: 'ratio', label: 'Ratio', min: 0.5, max: 8, step: 0.1, value: 1.6, unit: '' },
+      { key: 'index', label: 'Index', min: 0, max: 10, step: 0.1, value: 1.6, unit: '' },
+      { key: 'decay', label: 'Decay', min: 0.03, max: 0.6, step: 0.01, value: 0.06, unit: 's' },
+      { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 0.7, unit: '' },
     ],
   },
 ];
@@ -2295,7 +2308,9 @@ window.addEventListener('mousemove', (e) => {
   gen4StepEls[ci][si]?.style.setProperty('--step-velocity', next);
 });
 
-window.addEventListener('mouseup', () => { gen4DragState.active = false; });
+window.addEventListener('mouseup', () => {
+  gen4DragState.active = false;
+});
 
 function buildGen4Nodes() {
   if (!audioCtx || GEN4.nodes) return;
@@ -2322,7 +2337,9 @@ let gen4FxBtn = null;
 function gen4SetFxBypass(bypass) {
   GEN4.fxBypass = bypass;
   if (GEN4.nodes && fx) {
-    try { GEN4.nodes.analyser.disconnect(); } catch (e) {}
+    try {
+      GEN4.nodes.analyser.disconnect();
+    } catch (e) {}
     GEN4.nodes.analyser.connect(bypass ? fx.limiter.comp : fx.input);
   }
   if (gen4FxBtn) gen4FxBtn.classList.toggle('active', !bypass);
@@ -2344,7 +2361,10 @@ function gen4TriggerKick(time, velocity, p) {
   const osc = ac.createOscillator();
   osc.type = 'sine';
   osc.frequency.setValueAtTime(p.tune * (1 + p.punch * 4), time);
-  osc.frequency.exponentialRampToValueAtTime(Math.max(p.tune * 0.08, 18), time + p.punch * 0.15 + 0.005);
+  osc.frequency.exponentialRampToValueAtTime(
+    Math.max(p.tune * 0.08, 18),
+    time + p.punch * 0.15 + 0.005,
+  );
 
   const shaper = ac.createWaveShaper();
   shaper.curve = gen4DistortionCurve(p.drive * 300 + 1);
@@ -2476,16 +2496,24 @@ function gen4FireChannel(ci, time, velocity) {
   if (ch.muted) return;
   const p = getEffectiveGen4Params(ci);
   switch (ch.id) {
-    case 'kick':  gen4TriggerKick(time, velocity, p);  break;
-    case 'snare': gen4TriggerSnare(time, velocity, p); break;
-    case 'hat':   gen4TriggerHat(time, velocity, p);   break;
-    case 'perc':  gen4TriggerPerc(time, velocity, p);  break;
+    case 'kick':
+      gen4TriggerKick(time, velocity, p);
+      break;
+    case 'snare':
+      gen4TriggerSnare(time, velocity, p);
+      break;
+    case 'hat':
+      gen4TriggerHat(time, velocity, p);
+      break;
+    case 'perc':
+      gen4TriggerPerc(time, velocity, p);
+      break;
   }
 }
 
 function gen4ScheduleTick() {
   if (!audioCtx || !GEN4.nodes || !GEN4.playing) return;
-  const secPerStep = (60.0 / TRANSPORT.bpm) / 4;
+  const secPerStep = 60.0 / TRANSPORT.bpm / 4;
   while (GEN4.nextStepTime < audioCtx.currentTime + GEN4.scheduleAheadTime) {
     const step = (GEN4.schedulerStep + 1) % GEN4.stepCount;
     GEN4.schedulerStep = step;
@@ -2520,7 +2548,9 @@ function gen4SetStepCount(n) {
   if (GEN4.schedulerStep >= n) GEN4.schedulerStep = -1;
   document.querySelectorAll('.drum-steps').forEach((el) => el.style.setProperty('--step-count', n));
   gen4RefreshStepDisplay();
-  gen4StepCountBtns.forEach((btn) => btn.classList.toggle('active', Number(btn.dataset.steps) === n));
+  gen4StepCountBtns.forEach((btn) =>
+    btn.classList.toggle('active', Number(btn.dataset.steps) === n),
+  );
 }
 
 function gen4DisplayTick() {
@@ -2529,7 +2559,10 @@ function gen4DisplayTick() {
   const now = audioCtx.currentTime;
   let found = GEN4.displayStep;
   for (let i = gen4Schedule.length - 1; i >= 0; i--) {
-    if (gen4Schedule[i].time <= now) { found = gen4Schedule[i].step; break; }
+    if (gen4Schedule[i].time <= now) {
+      found = gen4Schedule[i].step;
+      break;
+    }
   }
   if (found !== GEN4.displayStep) {
     GEN4.displayStep = found;
@@ -2764,8 +2797,13 @@ function buildDrumPanel() {
     controls.style.setProperty('--gen-accent', def.color);
 
     def.paramDefs.forEach((p) => {
-      const ctrl = makeControlRow(p, ch.params[p.key], (v) => { ch.params[p.key] = v; },
-        () => cycleLFOMap(4, `${def.id}:${p.key}`)
+      const ctrl = makeControlRow(
+        p,
+        ch.params[p.key],
+        (v) => {
+          ch.params[p.key] = v;
+        },
+        () => cycleLFOMap(4, `${def.id}:${p.key}`),
       );
       gen4ControlBindings[ci].set(p.key, ctrl);
       controls.appendChild(ctrl);
@@ -2824,7 +2862,15 @@ const FX_DEFS = [
     params: [
       { key: 'size', label: 'Size', min: 0.1, max: 5, step: 0.1, value: 2, unit: 's' },
       { key: 'decay', label: 'Decay', min: 0.5, max: 8, step: 0.1, value: 3, unit: '' },
-      { key: 'predelay', label: 'Pre-delay', min: 0, max: 0.25, step: 0.001, value: 0.018, unit: 's' },
+      {
+        key: 'predelay',
+        label: 'Pre-delay',
+        min: 0,
+        max: 0.25,
+        step: 0.001,
+        value: 0.018,
+        unit: 's',
+      },
       { key: 'damping', label: 'Damping', min: 0, max: 1, step: 0.01, value: 0.42, unit: '' },
       { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
     ],
@@ -2931,7 +2977,7 @@ function getSeqActiveStepCount() {
 }
 
 function getSeqStepDuration() {
-  return (60 / Math.max(1, TRANSPORT.bpm) * 4) / getSeqActiveStepCount();
+  return ((60 / Math.max(1, TRANSPORT.bpm)) * 4) / getSeqActiveStepCount();
 }
 
 function refreshSequencerUI() {
@@ -3089,7 +3135,9 @@ function refreshDelayTimeUI() {
       : { ...DELAY_TIME_FREE_CONTROL, resetValue: FX.delay.time },
   );
   control.setFormatter(
-    isSync ? (v) => formatTempoSyncValue(v, (step) => formatTempoSeconds(beatsToSeconds(step.beats))) : null,
+    isSync
+      ? (v) => formatTempoSyncValue(v, (step) => formatTempoSeconds(beatsToSeconds(step.beats)))
+      : null,
   );
   control.setValue(isSync ? FX.delay.syncIndex : FX.delay.time);
   delaySyncModeControl?.setMode(isSync ? 'sync' : 'free');
@@ -3107,7 +3155,11 @@ function refreshLFOControlUI(lfoIdx) {
   );
   control.setFormatter(
     isSync
-      ? (v) => formatTempoSyncValue(v, (step) => `${formatNumericValue(1 / beatsToSeconds(step.beats), 2)}Hz`)
+      ? (v) =>
+          formatTempoSyncValue(
+            v,
+            (step) => `${formatNumericValue(1 / beatsToSeconds(step.beats), 2)}Hz`,
+          )
       : null,
   );
   control.setValue(isSync ? lfo.syncIndex : lfo.rate);
@@ -3117,11 +3169,7 @@ function refreshLFOControlUI(lfoIdx) {
 function setTransportBpm(value, { refresh = true } = {}) {
   if (!Number.isFinite(value)) return;
   const decimals = (BPM_BOUNDS.step.toString().split('.')[1] || '').length;
-  TRANSPORT.bpm = clamp(
-    quantize(value, BPM_BOUNDS.step, decimals),
-    BPM_BOUNDS.min,
-    BPM_BOUNDS.max,
-  );
+  TRANSPORT.bpm = clamp(quantize(value, BPM_BOUNDS.step, decimals), BPM_BOUNDS.min, BPM_BOUNDS.max);
   const bpmInput = getBpmInput();
   if (bpmInput) bpmInput.value = `${TRANSPORT.bpm}`;
   if (!refresh) return;
@@ -3192,9 +3240,12 @@ function formatBackValue(spec, value) {
 }
 
 function getSelectedInputLabel() {
-  const idx = INPUT_SOURCE.devices.findIndex((device) => device.deviceId === INPUT_SOURCE.selectedId);
+  const idx = INPUT_SOURCE.devices.findIndex(
+    (device) => device.deviceId === INPUT_SOURCE.selectedId,
+  );
   return formatInputDeviceLabel(
-    INPUT_SOURCE.devices[idx] || INPUT_SOURCE.devices[0] || { deviceId: 'default', label: 'System Default' },
+    INPUT_SOURCE.devices[idx] ||
+      INPUT_SOURCE.devices[0] || { deviceId: 'default', label: 'System Default' },
     Math.max(0, idx),
   );
 }
@@ -3202,7 +3253,10 @@ function getSelectedInputLabel() {
 function getBackTargetValue(routeKey) {
   const [group, a, b] = routeKey.split(':');
   if (group === '0' || group === '1') {
-    return formatBackValue(getParamBounds(Number(group), a), getEffectiveGeneratorParams(Number(group))[a]);
+    return formatBackValue(
+      getParamBounds(Number(group), a),
+      getEffectiveGeneratorParams(Number(group))[a],
+    );
   }
   if (group === '2') {
     const spec = getGen3ParamBounds(a) || { step: 0.01, unit: '' };
@@ -3228,7 +3282,11 @@ function parseBackRouteKey(routeKey) {
 }
 
 function clearBackPatchSelection() {
-  if (BACK_PANEL.selectedSourceIdx === null && BACK_PANEL.pointerX === null && BACK_PANEL.pointerY === null) {
+  if (
+    BACK_PANEL.selectedSourceIdx === null &&
+    BACK_PANEL.pointerX === null &&
+    BACK_PANEL.pointerY === null
+  ) {
     return;
   }
   BACK_PANEL.selectedSourceIdx = null;
@@ -3395,7 +3453,9 @@ function buildBackPanel() {
       slider.className = 'back-sc-slider';
       slider.dataset.scParam = label;
       slider.dataset.scUnit = unit;
-      slider.min = `${min}`; slider.max = `${max}`; slider.step = `${step}`;
+      slider.min = `${min}`;
+      slider.max = `${max}`;
+      slider.step = `${step}`;
       slider.value = `${initial}`;
       slider.addEventListener('input', () => {
         const v = parseFloat(slider.value);
@@ -3406,8 +3466,20 @@ function buildBackPanel() {
       return [row, sliderRow];
     };
 
-    const [amtRow, amtSliderRow] = buildScCtrl('amount', 0, 1, 0.01, KICK_SC.amount, '', (v) => { KICK_SC.amount = v; });
-    const [relRow, relSliderRow] = buildScCtrl('release', 0.01, 1, 0.01, KICK_SC.release, 's', (v) => { KICK_SC.release = v; });
+    const [amtRow, amtSliderRow] = buildScCtrl('amount', 0, 1, 0.01, KICK_SC.amount, '', (v) => {
+      KICK_SC.amount = v;
+    });
+    const [relRow, relSliderRow] = buildScCtrl(
+      'release',
+      0.01,
+      1,
+      0.01,
+      KICK_SC.release,
+      's',
+      (v) => {
+        KICK_SC.release = v;
+      },
+    );
 
     const jackRow = document.createElement('div');
     jackRow.className = 'back-source-readout';
@@ -3416,7 +3488,10 @@ function buildBackPanel() {
     const jack = document.createElement('button');
     jack.type = 'button';
     jack.className = 'patch-jack source';
-    jack.addEventListener('click', (e) => { e.stopPropagation(); setBackPatchSelection(3); });
+    jack.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setBackPatchSelection(3);
+    });
     jackRow.append(jackLabel, jack);
 
     body.append(readout, meter, amtRow, amtSliderRow, relRow, relSliderRow, jackRow);
@@ -3430,36 +3505,66 @@ function buildBackPanel() {
   const destGrid = document.createElement('div');
   destGrid.className = 'back-dest-grid';
   const destinationGroups = [
-    { title: 'Gen 1', subtitle: 'Granular A', params: PARAMS.map((p) => ({ routeKey: `0:${p.key}`, label: p.label })) },
-    { title: 'Gen 2', subtitle: 'Granular B', params: PARAMS.map((p) => ({ routeKey: `1:${p.key}`, label: p.label })) },
+    {
+      title: 'Gen 1',
+      subtitle: 'Granular A',
+      params: PARAMS.map((p) => ({ routeKey: `0:${p.key}`, label: p.label })),
+    },
+    {
+      title: 'Gen 2',
+      subtitle: 'Granular B',
+      params: PARAMS.map((p) => ({ routeKey: `1:${p.key}`, label: p.label })),
+    },
     {
       title: 'Gen 3',
       subtitle: 'Oscillator',
-      params: GEN3_LFO_PARAMS.map((p) => ({ routeKey: `2:${p.key}`, label: getGen3ParamLabel(p.key) })),
+      params: GEN3_LFO_PARAMS.map((p) => ({
+        routeKey: `2:${p.key}`,
+        label: getGen3ParamLabel(p.key),
+      })),
     },
     {
       title: 'Delay',
       subtitle: 'FX routing',
-      params: ['time', 'feedback', 'mix'].map((key) => ({ routeKey: `3:delay:${key}`, label: getFxParamDef('delay', key)?.label || key })),
+      params: ['time', 'feedback', 'mix'].map((key) => ({
+        routeKey: `3:delay:${key}`,
+        label: getFxParamDef('delay', key)?.label || key,
+      })),
     },
     {
       title: 'Filter',
       subtitle: 'Tone shaping',
-      params: ['cutoff', 'q', 'mix'].map((key) => ({ routeKey: `3:filter:${key}`, label: getFxParamDef('filter', key)?.label || key })),
+      params: ['cutoff', 'q', 'mix'].map((key) => ({
+        routeKey: `3:filter:${key}`,
+        label: getFxParamDef('filter', key)?.label || key,
+      })),
     },
     {
       title: 'Bit + Verb',
       subtitle: 'Texture / space',
       params: [
-        { routeKey: '3:bitreduce:rate', label: getFxParamDef('bitreduce', 'rate')?.label || 'Rate' },
+        {
+          routeKey: '3:bitreduce:rate',
+          label: getFxParamDef('bitreduce', 'rate')?.label || 'Rate',
+        },
         { routeKey: '3:bitreduce:mix', label: getFxParamDef('bitreduce', 'mix')?.label || 'Mix' },
-        { routeKey: '3:reverb:predelay', label: getFxParamDef('reverb', 'predelay')?.label || 'Pre-delay' },
+        {
+          routeKey: '3:reverb:predelay',
+          label: getFxParamDef('reverb', 'predelay')?.label || 'Pre-delay',
+        },
         { routeKey: '3:reverb:mix', label: getFxParamDef('reverb', 'mix')?.label || 'Mix' },
       ],
     },
     ...GEN4_DEFS.map((def) => ({
       title: `Drm·${def.label}`,
-      subtitle: def.id === 'kick' ? 'Bass drum' : def.id === 'snare' ? 'Snare' : def.id === 'hat' ? 'Hi-hat' : 'Percussion',
+      subtitle:
+        def.id === 'kick'
+          ? 'Bass drum'
+          : def.id === 'snare'
+            ? 'Snare'
+            : def.id === 'hat'
+              ? 'Hi-hat'
+              : 'Percussion',
       params: def.paramDefs.map((pd) => ({ routeKey: `4:${def.id}:${pd.key}`, label: pd.label })),
     })),
   ];
@@ -3529,7 +3634,46 @@ function buildBackPanel() {
     clearBackPatchSelection();
   });
 
-  patchfield.append(sourceColumn, destGrid);
+  // ── Master Limiter Column ──
+  const masterColumn = document.createElement('div');
+  masterColumn.className = 'back-column';
+
+  const limiterModule = document.createElement('div');
+  limiterModule.className = 'back-module back-dest-module';
+
+  const limTitleEl = document.createElement('div');
+  limTitleEl.className = 'back-module-title';
+  limTitleEl.textContent = 'Limiter';
+
+  const limSubtitleEl = document.createElement('div');
+  limSubtitleEl.className = 'back-module-subtitle';
+  limSubtitleEl.textContent = 'Master bus';
+
+  const limBody = document.createElement('div');
+  limBody.className = 'back-source-body';
+
+  const limReadout = document.createElement('div');
+  limReadout.className = 'back-source-readout';
+  const limLabel = document.createElement('span');
+  limLabel.textContent = 'Gain Reduction';
+  const limValueEl = document.createElement('span');
+  limValueEl.textContent = '0.0 dB';
+  limReadout.append(limLabel, limValueEl);
+
+  const limMeter = document.createElement('div');
+  limMeter.className = 'back-source-meter';
+  const limFill = document.createElement('div');
+  limFill.className = 'back-source-fill src-limiter unipolar';
+  limMeter.appendChild(limFill);
+
+  limBody.append(limReadout, limMeter);
+  limiterModule.append(limTitleEl, limSubtitleEl, limBody);
+  masterColumn.appendChild(limiterModule);
+
+  BACK_PANEL.limiterValueEl = limValueEl;
+  BACK_PANEL.limiterFill = limFill;
+
+  patchfield.append(sourceColumn, destGrid, masterColumn);
   board.append(patchfield);
   root.appendChild(board);
   BACK_PANEL.built = true;
@@ -3640,6 +3784,15 @@ function renderBackPanelConnections() {
       svg.appendChild(path);
     }
   }
+
+  // ── Limiter gain reduction meter (live) ──
+  if (BACK_PANEL.limiterValueEl && BACK_PANEL.limiterFill && fx?.limiter?.comp) {
+    const reduction = Math.abs(fx.limiter.comp.reduction || 0);
+    BACK_PANEL.limiterValueEl.textContent = `${formatNumericValue(reduction, 1)} dB`;
+    BACK_PANEL.limiterFill.style.setProperty('--source-level', `${Math.min(1, reduction / 12)}`);
+  }
+
+  if (UI_VIEW.mode === 'back') requestAnimationFrame(renderBackPanelConnections);
 }
 
 function refreshBackPanelState() {
@@ -3650,7 +3803,9 @@ function refreshBackPanelState() {
   [0, 1, 2, 3].forEach((idx) => {
     const meta = BACK_PANEL.sourceMeta.get(idx);
     if (!meta) return;
-    const routeCount = [...lfoMappings.values()].filter((mapping) => mapping.sourceIdx === idx).length;
+    const routeCount = [...lfoMappings.values()].filter(
+      (mapping) => mapping.sourceIdx === idx,
+    ).length;
     meta.module.dataset.routes = `${routeCount}`;
     meta.module.classList.toggle('mapped', routeCount > 0);
     meta.module.classList.toggle('selected', BACK_PANEL.selectedSourceIdx === idx);
@@ -3659,7 +3814,9 @@ function refreshBackPanelState() {
   BACK_PANEL.sourceMeta.get(0) &&
     (() => {
       const meta = BACK_PANEL.sourceMeta.get(0);
-      const routeCount = [...lfoMappings.values()].filter((mapping) => mapping.sourceIdx === 0).length;
+      const routeCount = [...lfoMappings.values()].filter(
+        (mapping) => mapping.sourceIdx === 0,
+      ).length;
       meta.subtitleEl.textContent = `${LFOS[0].shape.toUpperCase()} • ${LFOS[0].sync ? getTempoStep(LFOS[0].syncIndex).label : `${formatNumericValue(LFOS[0].rate, 2)}Hz`} • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
       meta.valueEl.textContent = `${LFOS[0].currentValue >= 0 ? '+' : ''}${formatNumericValue(LFOS[0].currentValue, 2)}`;
       meta.module.classList.toggle('active', true);
@@ -3667,7 +3824,9 @@ function refreshBackPanelState() {
   BACK_PANEL.sourceMeta.get(1) &&
     (() => {
       const meta = BACK_PANEL.sourceMeta.get(1);
-      const routeCount = [...lfoMappings.values()].filter((mapping) => mapping.sourceIdx === 1).length;
+      const routeCount = [...lfoMappings.values()].filter(
+        (mapping) => mapping.sourceIdx === 1,
+      ).length;
       meta.subtitleEl.textContent = `${LFOS[1].shape.toUpperCase()} • ${LFOS[1].sync ? getTempoStep(LFOS[1].syncIndex).label : `${formatNumericValue(LFOS[1].rate, 2)}Hz`} • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
       meta.valueEl.textContent = `${LFOS[1].currentValue >= 0 ? '+' : ''}${formatNumericValue(LFOS[1].currentValue, 2)}`;
       meta.module.classList.toggle('active', true);
@@ -3675,7 +3834,9 @@ function refreshBackPanelState() {
   BACK_PANEL.sourceMeta.get(2) &&
     (() => {
       const meta = BACK_PANEL.sourceMeta.get(2);
-      const routeCount = [...lfoMappings.values()].filter((mapping) => mapping.sourceIdx === 2).length;
+      const routeCount = [...lfoMappings.values()].filter(
+        (mapping) => mapping.sourceIdx === 2,
+      ).length;
       meta.subtitleEl.textContent = `1/${STEP_SEQ.subdivision} • step ${STEP_SEQ.currentStep + 1} • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
       meta.valueEl.textContent = `${STEP_SEQ.currentValue >= 0 ? '+' : ''}${formatNumericValue(STEP_SEQ.currentValue, 2)}`;
       meta.module.classList.toggle('active', true);
@@ -3683,7 +3844,9 @@ function refreshBackPanelState() {
   BACK_PANEL.sourceMeta.get(3) &&
     (() => {
       const meta = BACK_PANEL.sourceMeta.get(3);
-      const routeCount = [...lfoMappings.values()].filter((mapping) => mapping.sourceIdx === 3).length;
+      const routeCount = [...lfoMappings.values()].filter(
+        (mapping) => mapping.sourceIdx === 3,
+      ).length;
       meta.subtitleEl.textContent = `${formatNumericValue(KICK_SC.release, 2)}s release • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
       meta.valueEl.textContent = formatNumericValue(KICK_SC.envelope, 2);
       meta.module.classList.toggle('active', KICK_SC.envelope > 0.01);
@@ -3708,7 +3871,10 @@ function refreshBackPanelState() {
       const source = getSourceState(0);
       module.subtitleEl.textContent =
         source.mode === 'file' ? source.fileName || 'File source' : getSelectedInputLabel();
-      module.el.classList.toggle('active', source.mode === 'file' ? !!source.bufferData : anyMicSourceSelected());
+      module.el.classList.toggle(
+        'active',
+        source.mode === 'file' ? !!source.bufferData : anyMicSourceSelected(),
+      );
     })();
   BACK_PANEL.audioModules.get('gen-1') &&
     (() => {
@@ -3722,7 +3888,10 @@ function refreshBackPanelState() {
       const source = getSourceState(1);
       module.subtitleEl.textContent =
         source.mode === 'file' ? source.fileName || 'File source' : getSelectedInputLabel();
-      module.el.classList.toggle('active', source.mode === 'file' ? !!source.bufferData : anyMicSourceSelected());
+      module.el.classList.toggle(
+        'active',
+        source.mode === 'file' ? !!source.bufferData : anyMicSourceSelected(),
+      );
     })();
   BACK_PANEL.audioModules.get('gen-2') &&
     (() => {
@@ -3782,7 +3951,8 @@ function refreshBackPanelState() {
   BACK_PANEL.audioModules.get('output') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('output');
-      module.subtitleEl.textContent = started || GEN3.activeNotes.size > 0 ? getGranularStatusText() : 'idle';
+      module.subtitleEl.textContent =
+        started || GEN3.activeNotes.size > 0 ? getGranularStatusText() : 'idle';
       module.el.classList.toggle('active', started || GEN3.activeNotes.size > 0);
     })();
 
@@ -4215,7 +4385,11 @@ function applyFx(id, key, val) {
   if (!fx) return;
   if (id === 'delay') {
     if (key === 'time')
-      fx.delay.tap.delayTime.setTargetAtTime(clamp(val, 0, MAX_DELAY_SECONDS), audioCtx.currentTime, 0.02);
+      fx.delay.tap.delayTime.setTargetAtTime(
+        clamp(val, 0, MAX_DELAY_SECONDS),
+        audioCtx.currentTime,
+        0.02,
+      );
     if (key === 'feedback')
       fx.delay.fb.gain.setTargetAtTime(Math.min(0.98, val), audioCtx.currentTime, 0.02);
     if (key === 'hp')
@@ -4248,7 +4422,8 @@ function applyFx(id, key, val) {
       fx.sat.dry.gain.value = 1 - val;
     }
   } else if (id === 'reverb') {
-    if (key === 'size' || key === 'decay' || key === 'damping') fx.reverb.conv.buffer = makeReverbIR();
+    if (key === 'size' || key === 'decay' || key === 'damping')
+      fx.reverb.conv.buffer = makeReverbIR();
     if (key === 'predelay')
       fx.reverb.pre.delayTime.setTargetAtTime(val, audioCtx.currentTime, 0.02);
     if (key === 'damping')
@@ -4342,7 +4517,11 @@ function capturePreset() {
       })),
     },
     kickSc: { release: KICK_SC.release, amount: KICK_SC.amount },
-    mappings: [...lfoMappings.values()].map(({ genIdx, key, sourceIdx }) => ({ genIdx, key, sourceIdx })),
+    mappings: [...lfoMappings.values()].map(({ genIdx, key, sourceIdx }) => ({
+      genIdx,
+      key,
+      sourceIdx,
+    })),
   };
 }
 
@@ -4359,9 +4538,11 @@ function applyPreset(preset) {
     if (typeof gen.reverse === 'boolean') state[genIdx].reverse = gen.reverse;
     if (typeof gen.envType === 'string') state[genIdx].envType = gen.envType;
     if (typeof gen.grainSizeSync === 'boolean') state[genIdx].grainSizeSync = gen.grainSizeSync;
-    if (typeof gen.grainSizeSyncIndex === 'number') state[genIdx].grainSizeSyncIndex = gen.grainSizeSyncIndex;
+    if (typeof gen.grainSizeSyncIndex === 'number')
+      state[genIdx].grainSizeSyncIndex = gen.grainSizeSyncIndex;
     if (typeof gen.densitySync === 'boolean') state[genIdx].densitySync = gen.densitySync;
-    if (typeof gen.densitySyncIndex === 'number') state[genIdx].densitySyncIndex = gen.densitySyncIndex;
+    if (typeof gen.densitySyncIndex === 'number')
+      state[genIdx].densitySyncIndex = gen.densitySyncIndex;
     refreshGeneratorUI(genIdx);
   });
 
@@ -4417,16 +4598,24 @@ function applyPreset(preset) {
       const def = GEN4_DEFS[ci];
       if (!ch || !saved || !def) return;
       if (Array.isArray(saved.steps)) {
-        saved.steps.forEach((v, si) => { if (si < 16) ch.steps[si] = !!v; });
+        saved.steps.forEach((v, si) => {
+          if (si < 16) ch.steps[si] = !!v;
+        });
       }
       if (Array.isArray(saved.velocity)) {
-        saved.velocity.forEach((v, si) => { if (si < 16) ch.velocity[si] = clamp(v, 0.05, 1.0); });
+        saved.velocity.forEach((v, si) => {
+          if (si < 16) ch.velocity[si] = clamp(v, 0.05, 1.0);
+        });
       }
       if (Array.isArray(saved.stutter)) {
-        saved.stutter.forEach((v, si) => { if (si < 16) ch.stutter[si] = clamp(Math.round(v), 1, 4); });
+        saved.stutter.forEach((v, si) => {
+          if (si < 16) ch.stutter[si] = clamp(Math.round(v), 1, 4);
+        });
       }
       if (Array.isArray(saved.probability)) {
-        saved.probability.forEach((v, si) => { if (si < 16) ch.probability[si] = clamp(v, 0.0, 1.0); });
+        saved.probability.forEach((v, si) => {
+          if (si < 16) ch.probability[si] = clamp(v, 0.0, 1.0);
+        });
       }
       if (saved.params) {
         def.paramDefs.forEach((pd) => {
@@ -4461,14 +4650,17 @@ function applyPreset(preset) {
     const isGen3Param = genIdx === 2 && GEN3_LFO_PARAMS.some((p) => p.key === key);
     const [fxId, fxKey] = typeof key === 'string' ? key.split(':') : [];
     const isFxParam = genIdx === 3 && !!getFxParamBounds(fxId, fxKey);
-    const isGen4Param = genIdx === 4 && (() => {
-      const [chId, paramKey] = typeof key === 'string' ? key.split(':') : [];
-      return GEN4_DEFS.some((d) => d.id === chId && d.paramDefs.some((p) => p.key === paramKey));
-    })();
+    const isGen4Param =
+      genIdx === 4 &&
+      (() => {
+        const [chId, paramKey] = typeof key === 'string' ? key.split(':') : [];
+        return GEN4_DEFS.some((d) => d.id === chId && d.paramDefs.some((p) => p.key === paramKey));
+      })();
     const modSourceIdx = typeof sourceIdx === 'number' ? sourceIdx : lfoIdx;
     if (
       (isGranularParam || isGen3Param || isFxParam || isGen4Param) &&
-      modSourceIdx >= 0 && modSourceIdx <= 3
+      modSourceIdx >= 0 &&
+      modSourceIdx <= 3
     ) {
       lfoMappings.set(`${genIdx}:${key}`, { genIdx, key, sourceIdx: modSourceIdx });
     }

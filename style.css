@@ -468,7 +468,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   flex: 1;
   min-height: 520px;
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
+  grid-template-columns: 180px minmax(0, 1fr) 180px;
   gap: 18px;
   padding: 14px 18px 18px;
   border: 1px solid rgba(64, 94, 70, 0.66);
@@ -704,10 +704,17 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   bottom: auto;
 }
 
+.back-source-fill.unipolar {
+  bottom: 0;
+  height: calc(100% * var(--source-level, 0));
+  background: linear-gradient(0deg, var(--source-color, #ef4444) 0%, rgba(255,255,255,0.28) 100%);
+}
+
 .back-source-fill.src-0 { --source-color: #7aacdc; }
 .back-source-fill.src-1 { --source-color: #6ed4a0; }
 .back-source-fill.src-2 { --source-color: #e0a45a; }
 .back-source-fill.src-3 { --source-color: #d05858; }
+.back-source-fill.src-limiter { --source-color: #ef4444; }
 
 .back-sc-slider-row {
   padding: 2px 0 6px;
