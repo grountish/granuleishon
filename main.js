@@ -2250,6 +2250,8 @@ const GEN4_DEFS = [
   },
 ];
 
+let gen4StepCountBtns = [];
+
 const GEN4 = {
   playing: false,
   schedulerStep: -1,
@@ -2259,14 +2261,15 @@ const GEN4 = {
   scheduleAheadTime: 0.1,
   scheduleInterval: 25,
   fxBypass: false,
+  stepCount: 16,
   nodes: null,
   channels: GEN4_DEFS.map((def) => ({
     id: def.id,
     muted: false,
-    steps: new Array(16).fill(false),
-    velocity: new Array(16).fill(1.0),
-    stutter: new Array(16).fill(1),
-    probability: new Array(16).fill(1.0),
+    steps: new Array(32).fill(false),
+    velocity: new Array(32).fill(1.0),
+    stutter: new Array(32).fill(1),
+    probability: new Array(32).fill(1.0),
     params: Object.fromEntries(def.paramDefs.map((p) => [p.key, p.value])),
   })),
 };
@@ -2278,7 +2281,7 @@ const KICK_SC = {
 };
 
 const gen4Schedule = [];
-const gen4StepEls = GEN4_DEFS.map(() => new Array(16).fill(null));
+const gen4StepEls = GEN4_DEFS.map(() => new Array(32).fill(null));
 const gen4ControlBindings = GEN4_DEFS.map(() => new Map());
 let gen4PlayBtnEl = null;
 let gen4DisplayFrame = null;
@@ -2484,7 +2487,7 @@ function gen4ScheduleTick() {
   if (!audioCtx || !GEN4.nodes || !GEN4.playing) return;
   const secPerStep = (60.0 / TRANSPORT.bpm) / 4;
   while (GEN4.nextStepTime < audioCtx.currentTime + GEN4.scheduleAheadTime) {
-    const step = (GEN4.schedulerStep + 1) % 16;
+    const step = (GEN4.schedulerStep + 1) % GEN4.stepCount;
     GEN4.schedulerStep = step;
     gen4Schedule.push({ step, time: GEN4.nextStepTime });
     if (gen4Schedule.length > 48) gen4Schedule.shift();
@@ -2502,10 +2505,22 @@ function gen4ScheduleTick() {
 
 function gen4RefreshStepDisplay() {
   GEN4_DEFS.forEach((_, ci) => {
-    for (let si = 0; si < 16; si++) {
-      gen4StepEls[ci][si]?.classList.toggle('current', si === GEN4.displayStep);
+    for (let si = 0; si < 32; si++) {
+      const el = gen4StepEls[ci][si];
+      if (!el) continue;
+      const inactive = si >= GEN4.stepCount;
+      el.classList.toggle('current', !inactive && si === GEN4.displayStep);
+      el.classList.toggle('step-inactive', inactive);
     }
   });
+}
+
+function gen4SetStepCount(n) {
+  GEN4.stepCount = n;
+  if (GEN4.schedulerStep >= n) GEN4.schedulerStep = -1;
+  document.querySelectorAll('.drum-steps').forEach((el) => el.style.setProperty('--step-count', n));
+  gen4RefreshStepDisplay();
+  gen4StepCountBtns.forEach((btn) => btn.classList.toggle('active', Number(btn.dataset.steps) === n));
 }
 
 function gen4DisplayTick() {
@@ -2603,6 +2618,24 @@ function buildDrumPanel() {
   title.innerHTML = '<span class="col-dot"></span>Gen 4 · Drums';
   const actions = document.createElement('div');
   actions.className = 'gen-header-actions';
+
+  const stepCounts = [12, 15, 16, 32];
+  const stepsGroup = document.createElement('div');
+  stepsGroup.className = 'drum-step-count-group';
+  gen4StepCountBtns = stepCounts.map((n) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'drum-step-count-btn';
+    btn.dataset.steps = String(n);
+    btn.textContent = String(n);
+    btn.title = `${n} steps`;
+    btn.classList.toggle('active', n === GEN4.stepCount);
+    btn.addEventListener('click', () => gen4SetStepCount(n));
+    stepsGroup.appendChild(btn);
+    return btn;
+  });
+  actions.appendChild(stepsGroup);
+
   const fxBtn = document.createElement('button');
   fxBtn.className = 'drum-fx-btn active';
   fxBtn.textContent = 'FX';
@@ -2648,8 +2681,9 @@ function buildDrumPanel() {
 
     const stepsEl = document.createElement('div');
     stepsEl.className = 'drum-steps';
+    stepsEl.style.setProperty('--step-count', GEN4.stepCount);
 
-    for (let si = 0; si < 16; si++) {
+    for (let si = 0; si < 32; si++) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'drum-step';
@@ -4298,6 +4332,7 @@ function capturePreset() {
     seq: { steps: [...STEP_SEQ.steps], subdivision: STEP_SEQ.subdivision },
     gen4: {
       fxBypass: GEN4.fxBypass,
+      stepCount: GEN4.stepCount,
       channels: GEN4.channels.map((ch) => ({
         steps: [...ch.steps],
         velocity: [...ch.velocity],
@@ -4401,9 +4436,10 @@ function applyPreset(preset) {
           }
         });
       }
-      for (let si = 0; si < 16; si++) gen4ApplyStepBtn(ci, si);
+      for (let si = 0; si < 32; si++) gen4ApplyStepBtn(ci, si);
     });
     if (typeof preset.gen4.fxBypass === 'boolean') gen4SetFxBypass(preset.gen4.fxBypass);
+    if ([12, 15, 16, 32].includes(preset.gen4.stepCount)) gen4SetStepCount(preset.gen4.stepCount);
   }
 
   if (preset.kickSc) {

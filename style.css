@@ -1526,7 +1526,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 
 .drum-steps {
   display: grid;
-  grid-template-columns: repeat(16, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--step-count, 16), minmax(0, 1fr));
   gap: 3px;
   flex: 1;
   min-width: 0;
@@ -1665,4 +1665,38 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 .drum-play-btn.active:hover {
   background: #b84848;
   border-color: #b84848;
+}
+
+.drum-step-count-group {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+}
+
+.drum-step-count-btn {
+  padding: 1px 6px;
+  font-size: 10px;
+  color: var(--muted);
+  border-color: #2e2e2e;
+  background: #1e1e1e;
+  border-radius: 3px;
+  line-height: 1.6;
+}
+
+.drum-step-count-btn:hover {
+  border-color: #444;
+  color: var(--text);
+  background: #242424;
+}
+
+.drum-step-count-btn.active {
+  background: #2a2a40;
+  border-color: #5050a0;
+  color: #9090e0;
+  font-weight: 700;
+}
+
+.drum-step.step-inactive {
+  opacity: 0.22;
+  pointer-events: none;
 }
