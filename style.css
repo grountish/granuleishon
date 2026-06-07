@@ -1639,6 +1639,15 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 }
 
 .drum-fx-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0;
+  display: grid;
+  place-items: center;
   color: var(--muted);
   border-color: #2e2e2e;
   background: #1e1e1e;

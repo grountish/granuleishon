@@ -2273,12 +2273,12 @@ const GEN4 = {
   schedulerTimer: null,
   scheduleAheadTime: 0.1,
   scheduleInterval: 25,
-  fxBypass: false,
   stepCount: 16,
   nodes: null,
   channels: GEN4_DEFS.map((def) => ({
     id: def.id,
     muted: false,
+    fxSend: true,
     steps: new Array(32).fill(false),
     velocity: new Array(32).fill(1.0),
     stutter: new Array(32).fill(1),
@@ -2316,33 +2316,32 @@ function buildGen4Nodes() {
   if (!audioCtx || GEN4.nodes) return;
   const ac = audioCtx;
 
-  const output = ac.createGain();
-  output.gain.value = 1.0;
-
-  const analyser = ac.createAnalyser();
-  analyser.fftSize = 1024;
-
   const noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
   const noiseData = noiseBuf.getChannelData(0);
   for (let i = 0; i < ac.sampleRate; i++) noiseData[i] = Math.random() * 2 - 1;
 
-  output.connect(analyser);
-  analyser.connect(GEN4.fxBypass ? fx.limiter.comp : fx.input);
+  const channelOuts = GEN4.channels.map((ch) => {
+    const g = ac.createGain();
+    g.gain.value = 1.0;
+    g.connect(ch.fxSend ? fx.input : fx.limiter.comp);
+    return g;
+  });
 
-  GEN4.nodes = { output, analyser, noiseBuf };
+  GEN4.nodes = { channelOuts, noiseBuf };
 }
 
-let gen4FxBtn = null;
+const gen4FxSendBtns = [];
 
-function gen4SetFxBypass(bypass) {
-  GEN4.fxBypass = bypass;
-  if (GEN4.nodes && fx) {
-    try {
-      GEN4.nodes.analyser.disconnect();
-    } catch (e) {}
-    GEN4.nodes.analyser.connect(bypass ? fx.limiter.comp : fx.input);
+function gen4SetChannelFxSend(ci, send) {
+  const ch = GEN4.channels[ci];
+  ch.fxSend = send;
+  if (GEN4.nodes?.channelOuts?.[ci] && fx) {
+    const out = GEN4.nodes.channelOuts[ci];
+    try { out.disconnect(); } catch (e) {}
+    out.connect(send ? fx.input : fx.limiter.comp);
   }
-  if (gen4FxBtn) gen4FxBtn.classList.toggle('active', !bypass);
+  const btn = gen4FxSendBtns[ci];
+  if (btn) btn.classList.toggle('active', send);
 }
 
 function gen4DistortionCurve(amount) {
@@ -2355,7 +2354,7 @@ function gen4DistortionCurve(amount) {
   return curve;
 }
 
-function gen4TriggerKick(time, velocity, p) {
+function gen4TriggerKick(time, velocity, p, dest) {
   KICK_SC.envelope = 1.0;
   const ac = audioCtx;
   const osc = ac.createOscillator();
@@ -2377,12 +2376,12 @@ function gen4TriggerKick(time, velocity, p) {
 
   osc.connect(shaper);
   shaper.connect(env);
-  env.connect(GEN4.nodes.output);
+  env.connect(dest);
   osc.start(time);
   osc.stop(time + p.decay + 0.05);
 }
 
-function gen4TriggerSnare(time, velocity, p) {
+function gen4TriggerSnare(time, velocity, p, dest) {
   const ac = audioCtx;
 
   const osc = ac.createOscillator();
@@ -2394,7 +2393,7 @@ function gen4TriggerSnare(time, velocity, p) {
   oscEnv.gain.linearRampToValueAtTime(velocity * p.gain * p.snap, time + 0.002);
   oscEnv.gain.exponentialRampToValueAtTime(0.001, time + p.decay * 0.6);
   osc.connect(oscEnv);
-  oscEnv.connect(GEN4.nodes.output);
+  oscEnv.connect(dest);
 
   const noise = ac.createBufferSource();
   noise.buffer = GEN4.nodes.noiseBuf;
@@ -2408,7 +2407,7 @@ function gen4TriggerSnare(time, velocity, p) {
   noiseEnv.gain.exponentialRampToValueAtTime(0.001, time + p.decay);
   noise.connect(bpf);
   bpf.connect(noiseEnv);
-  noiseEnv.connect(GEN4.nodes.output);
+  noiseEnv.connect(dest);
 
   osc.start(time);
   osc.stop(time + p.decay + 0.05);
@@ -2416,7 +2415,7 @@ function gen4TriggerSnare(time, velocity, p) {
   noise.stop(time + p.decay + 0.05);
 }
 
-function gen4TriggerHat(time, velocity, p) {
+function gen4TriggerHat(time, velocity, p, dest) {
   const ac = audioCtx;
   const noise = ac.createBufferSource();
   noise.buffer = GEN4.nodes.noiseBuf;
@@ -2439,12 +2438,12 @@ function gen4TriggerHat(time, velocity, p) {
   noise.connect(hpf);
   hpf.connect(bpf);
   bpf.connect(env);
-  env.connect(GEN4.nodes.output);
+  env.connect(dest);
   noise.start(time);
   noise.stop(time + p.decay + 0.02);
 }
 
-function gen4TriggerPerc(time, velocity, p) {
+function gen4TriggerPerc(time, velocity, p, dest) {
   const ac = audioCtx;
   const modFreq = p.tune * p.ratio;
 
@@ -2469,7 +2468,7 @@ function gen4TriggerPerc(time, velocity, p) {
   env.gain.exponentialRampToValueAtTime(0.001, time + p.decay);
 
   car.connect(env);
-  env.connect(GEN4.nodes.output);
+  env.connect(dest);
   mod.start(time);
   mod.stop(time + p.decay + 0.05);
   car.start(time);
@@ -2495,19 +2494,12 @@ function gen4FireChannel(ci, time, velocity) {
   const ch = GEN4.channels[ci];
   if (ch.muted) return;
   const p = getEffectiveGen4Params(ci);
+  const dest = GEN4.nodes.channelOuts[ci];
   switch (ch.id) {
-    case 'kick':
-      gen4TriggerKick(time, velocity, p);
-      break;
-    case 'snare':
-      gen4TriggerSnare(time, velocity, p);
-      break;
-    case 'hat':
-      gen4TriggerHat(time, velocity, p);
-      break;
-    case 'perc':
-      gen4TriggerPerc(time, velocity, p);
-      break;
+    case 'kick':  gen4TriggerKick(time, velocity, p, dest);  break;
+    case 'snare': gen4TriggerSnare(time, velocity, p, dest); break;
+    case 'hat':   gen4TriggerHat(time, velocity, p, dest);   break;
+    case 'perc':  gen4TriggerPerc(time, velocity, p, dest);  break;
   }
 }
 
@@ -2669,14 +2661,6 @@ function buildDrumPanel() {
   });
   actions.appendChild(stepsGroup);
 
-  const fxBtn = document.createElement('button');
-  fxBtn.className = 'drum-fx-btn active';
-  fxBtn.textContent = 'FX';
-  fxBtn.title = 'Route through FX chain — click to bypass to limiter only';
-  gen4FxBtn = fxBtn;
-  fxBtn.addEventListener('click', () => gen4SetFxBypass(!GEN4.fxBypass));
-  actions.appendChild(fxBtn);
-
   const playBtn = document.createElement('button');
   playBtn.className = 'drum-play-btn';
   playBtn.textContent = '▶ Play';
@@ -2693,6 +2677,8 @@ function buildDrumPanel() {
   const hints = document.createElement('div');
   hints.className = 'drum-hints';
   hints.innerHTML =
+    '<span class="drum-hint"><span class="drum-hint-key">drag</span> active step → velocity</span>' +
+    '<span class="drum-hints-sep">·</span>' +
     '<span class="drum-hint"><span class="drum-hint-key">shift + click</span> active step → cycle probability</span>' +
     '<span class="drum-hints-sep">·</span>' +
     '<span class="drum-hint"><span class="drum-hint-key">right-click</span> active step → cycle stutter</span>';
@@ -2776,7 +2762,16 @@ function buildDrumPanel() {
       muteBtn.classList.toggle('muted', ch.muted);
     });
 
-    row.append(lbl, stepsEl, muteBtn);
+    const fxBtn = document.createElement('button');
+    fxBtn.type = 'button';
+    fxBtn.className = 'drum-fx-btn';
+    fxBtn.classList.toggle('active', ch.fxSend);
+    fxBtn.textContent = 'FX';
+    fxBtn.title = 'Send to FX chain — click to bypass to limiter only';
+    gen4FxSendBtns[ci] = fxBtn;
+    fxBtn.addEventListener('click', () => gen4SetChannelFxSend(ci, !ch.fxSend));
+
+    row.append(lbl, stepsEl, fxBtn, muteBtn);
     grid.appendChild(row);
   });
 
@@ -4506,9 +4501,9 @@ function capturePreset() {
     })),
     seq: { steps: [...STEP_SEQ.steps], subdivision: STEP_SEQ.subdivision },
     gen4: {
-      fxBypass: GEN4.fxBypass,
       stepCount: GEN4.stepCount,
       channels: GEN4.channels.map((ch) => ({
+        fxSend: ch.fxSend,
         steps: [...ch.steps],
         velocity: [...ch.velocity],
         stutter: [...ch.stutter],
@@ -4597,25 +4592,18 @@ function applyPreset(preset) {
       const ch = GEN4.channels[ci];
       const def = GEN4_DEFS[ci];
       if (!ch || !saved || !def) return;
+      if (typeof saved.fxSend === 'boolean') gen4SetChannelFxSend(ci, saved.fxSend);
       if (Array.isArray(saved.steps)) {
-        saved.steps.forEach((v, si) => {
-          if (si < 16) ch.steps[si] = !!v;
-        });
+        saved.steps.forEach((v, si) => { ch.steps[si] = !!v; });
       }
       if (Array.isArray(saved.velocity)) {
-        saved.velocity.forEach((v, si) => {
-          if (si < 16) ch.velocity[si] = clamp(v, 0.05, 1.0);
-        });
+        saved.velocity.forEach((v, si) => { ch.velocity[si] = clamp(v, 0.05, 1.0); });
       }
       if (Array.isArray(saved.stutter)) {
-        saved.stutter.forEach((v, si) => {
-          if (si < 16) ch.stutter[si] = clamp(Math.round(v), 1, 4);
-        });
+        saved.stutter.forEach((v, si) => { ch.stutter[si] = clamp(Math.round(v), 1, 4); });
       }
       if (Array.isArray(saved.probability)) {
-        saved.probability.forEach((v, si) => {
-          if (si < 16) ch.probability[si] = clamp(v, 0.0, 1.0);
-        });
+        saved.probability.forEach((v, si) => { ch.probability[si] = clamp(v, 0.0, 1.0); });
       }
       if (saved.params) {
         def.paramDefs.forEach((pd) => {
@@ -4627,7 +4615,6 @@ function applyPreset(preset) {
       }
       for (let si = 0; si < 32; si++) gen4ApplyStepBtn(ci, si);
     });
-    if (typeof preset.gen4.fxBypass === 'boolean') gen4SetFxBypass(preset.gen4.fxBypass);
     if ([12, 15, 16, 32].includes(preset.gen4.stepCount)) gen4SetStepCount(preset.gen4.stepCount);
   }
 
