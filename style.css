@@ -229,6 +229,29 @@ button.primary {
 
 button.primary:hover { background: var(--accent-0-dim); border-color: var(--accent-0-dim); }
 
+.transport-stop-btn {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.transport-stop-btn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.transport-stop-btn.active {
+  background: #3a1a1a;
+  border-color: #c04040;
+  color: #e07070;
+}
+
+.transport-stop-btn.active:hover {
+  background: #4a2020;
+  border-color: #d05050;
+  color: #f08080;
+}
+
 .record-btn.active {
   background: #c44a4a;
   border-color: #c44a4a;
@@ -1438,6 +1461,11 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 
 .piano-cell.black-key:hover { background: #313c3a; }
 
+.piano-cell.locked {
+  background: rgba(64, 184, 208, 0.22) !important;
+  border-color: rgba(64, 184, 208, 0.55) !important;
+}
+
 .piano-cell.active {
   background: #40b8d0 !important;
   border-color: #40b8d0 !important;
@@ -1466,6 +1494,21 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 
 .osc-shape:hover  { border-color: #40b8d0; color: var(--text); }
 .osc-shape.active { background: #40b8d0; border-color: #40b8d0; color: #061820; }
+
+.osc-sus-btn {
+  font-size: 8px;
+  font-weight: 700;
+  padding: 3px 6px;
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  margin-left: 4px;
+}
+
+.osc-sus-btn:hover { border-color: #5a5a5a; color: var(--text); }
+.osc-sus-btn.active { background: #1a3028; border-color: #3a7050; color: #6ec8a0; }
 
 /* ── Gen 4: Glitch Drums ─────────────────────────────────────── */
 
@@ -1636,6 +1679,12 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   background: rgba(255, 255, 255, 0.42);
   pointer-events: none;
   transition: width 0.1s;
+}
+
+.drum-fx-spacer {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
 }
 
 .drum-fx-btn {

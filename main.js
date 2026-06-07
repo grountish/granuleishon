@@ -888,6 +888,7 @@ const lfoControlBindings = [new Map(), new Map()];
 const lfoShapeButtons = [new Map(), new Map()];
 const lfoSyncModeControls = [null, null];
 const gen3ShapeButtons = new Map();
+let gen3SusBtnEl = null;
 const filterModeButtons = new Map();
 let delaySyncModeControl = null;
 const genSourceModeButtons = [new Map(), new Map()];
@@ -1867,6 +1868,8 @@ const GEN3 = {
   decay: 0.18,
   sustain: 0.7,
   release: 0.5,
+  sustainMode: true,
+  lockedMidis: new Set(),
   activeNotes: new Map(),
   releasingVoices: new Set(),
   nodes: null,
@@ -1875,7 +1878,17 @@ let gen3ScopeFrame = null;
 const gen3NoteEls = new Map();
 
 function setGen3NoteActive(midi, active) {
-  gen3NoteEls.get(midi)?.classList.toggle('active', active);
+  const el = gen3NoteEls.get(midi);
+  if (!el) return;
+  el.classList.toggle('active', active);
+  el.classList.toggle('locked', GEN3.lockedMidis.has(midi));
+}
+
+function refreshGen3KeyStates() {
+  gen3NoteEls.forEach((el, midi) => {
+    el.classList.toggle('active', GEN3.activeNotes.has(midi));
+    el.classList.toggle('locked', GEN3.lockedMidis.has(midi));
+  });
 }
 
 function buildGen3Nodes() {
@@ -2002,9 +2015,14 @@ function releaseGen3Voice(voice) {
 }
 
 function addGen3Note(midi, freq) {
-  const entry = { freq, ...createGen3Voice(freq) };
+  const entry = { freq, autoReleaseTimer: null, ...createGen3Voice(freq) };
   GEN3.activeNotes.set(midi, entry);
   setGen3NoteActive(midi, true);
+  if (!GEN3.sustainMode) {
+    const ms = Math.max(0, GEN3.attack + GEN3.decay) * 1000;
+    entry.autoReleaseTimer = setTimeout(() => removeGen3Note(midi), ms);
+  }
+  refreshTransportStopBtn();
   refreshBackPanelState();
 }
 
@@ -2012,7 +2030,11 @@ function removeGen3Note(midi) {
   const entry = GEN3.activeNotes.get(midi);
   GEN3.activeNotes.delete(midi);
   setGen3NoteActive(midi, false);
-  if (entry) releaseGen3Voice(entry);
+  if (entry) {
+    if (entry.autoReleaseTimer) { clearTimeout(entry.autoReleaseTimer); entry.autoReleaseTimer = null; }
+    releaseGen3Voice(entry);
+  }
+  refreshTransportStopBtn();
   refreshBackPanelState();
 }
 
@@ -2103,12 +2125,26 @@ function buildPianoRoll() {
       cell.title = label;
 
       cell.addEventListener('click', async () => {
-        if (GEN3.activeNotes.has(midi)) {
-          removeGen3Note(midi);
-          return;
+        if (GEN3.sustainMode) {
+          // Sustain mode: toggle note on/off and track in lockedMidis
+          if (GEN3.activeNotes.has(midi)) {
+            GEN3.lockedMidis.delete(midi);
+            removeGen3Note(midi);
+          } else {
+            GEN3.lockedMidis.add(midi);
+            await ensureAudioEngine();
+            if (GEN3.nodes) addGen3Note(midi, freq);
+          }
+        } else {
+          // Sequencer mode: toggle locked state only — sequencer drives playback
+          if (GEN3.lockedMidis.has(midi)) {
+            GEN3.lockedMidis.delete(midi);
+            cell.classList.remove('locked');
+          } else {
+            GEN3.lockedMidis.add(midi);
+            cell.classList.add('locked');
+          }
         }
-        await ensureAudioEngine();
-        if (GEN3.nodes) addGen3Note(midi, freq);
       });
 
       if (GEN3.activeNotes.has(midi)) cell.classList.add('active');
@@ -2154,7 +2190,30 @@ function buildOscPanel() {
     gen3ShapeButtons.set(type, btn);
     shapes.appendChild(btn);
   });
-  header.append(title, shapes);
+  const susBtn = document.createElement('button');
+  susBtn.className = 'osc-sus-btn' + (GEN3.sustainMode ? ' active' : '');
+  susBtn.textContent = 'SUS';
+  susBtn.title = 'Sustain mode — when off, notes auto-release after attack + decay';
+  gen3SusBtnEl = susBtn;
+  susBtn.addEventListener('click', async () => {
+    GEN3.sustainMode = !GEN3.sustainMode;
+    susBtn.classList.toggle('active', GEN3.sustainMode);
+    if (GEN3.sustainMode) {
+      // Switched to sustain: play all locked notes
+      await ensureAudioEngine();
+      GEN3.lockedMidis.forEach((m) => {
+        if (!GEN3.activeNotes.has(m) && GEN3.nodes) {
+          addGen3Note(m, 440 * Math.pow(2, (m - 69) / 12));
+        }
+      });
+    } else {
+      // Switched to sequencer: stop all playing, keep locked visual
+      stopAllGen3Notes();
+      refreshGen3KeyStates();
+    }
+  });
+
+  header.append(title, shapes, susBtn);
   panel.appendChild(header);
 
   // Body: scope (4/5) + piano roll (1/5)
@@ -2260,6 +2319,12 @@ const GEN4_DEFS = [
       { key: 'decay', label: 'Decay', min: 0.03, max: 0.6, step: 0.01, value: 0.06, unit: 's' },
       { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 0.7, unit: '' },
     ],
+  },
+  {
+    id: 'osc',
+    label: 'OSC',
+    color: '#40b8d0',
+    paramDefs: [],
   },
 ];
 
@@ -2475,6 +2540,20 @@ function gen4TriggerPerc(time, velocity, p, dest) {
   car.stop(time + p.decay + 0.05);
 }
 
+const GEN4_OSC_MIDI = 200; // reserved virtual MIDI slot for sequencer-triggered Gen3 notes
+
+function gen4TriggerOsc(time) {
+  if (!audioCtx || GEN3.sustainMode || GEN3.lockedMidis.size === 0) return;
+  const delayMs = Math.max(0, time - audioCtx.currentTime) * 1000;
+  setTimeout(() => {
+    if (!audioCtx) return;
+    GEN3.lockedMidis.forEach((midi) => {
+      if (GEN3.activeNotes.has(midi)) removeGen3Note(midi);
+      addGen3Note(midi, 440 * Math.pow(2, (midi - 69) / 12));
+    });
+  }, delayMs);
+}
+
 function getEffectiveGen4Params(ci) {
   const ch = GEN4.channels[ci];
   const def = GEN4_DEFS[ci];
@@ -2500,6 +2579,7 @@ function gen4FireChannel(ci, time, velocity) {
     case 'snare': gen4TriggerSnare(time, velocity, p, dest); break;
     case 'hat':   gen4TriggerHat(time, velocity, p, dest);   break;
     case 'perc':  gen4TriggerPerc(time, velocity, p, dest);  break;
+    case 'osc':   gen4TriggerOsc(time);                       break;
   }
 }
 
@@ -2562,6 +2642,14 @@ function gen4DisplayTick() {
   }
 }
 
+function refreshTransportStopBtn() {
+  const btn = document.getElementById('transportStopBtn');
+  if (!btn) return;
+  const anyPlaying = GEN4.playing || (GEN3.activeNotes && GEN3.activeNotes.size > 0);
+  btn.disabled = !anyPlaying;
+  btn.classList.toggle('active', anyPlaying);
+}
+
 function startGen4Sequencer() {
   if (GEN4.playing) return;
   GEN4.playing = true;
@@ -2575,6 +2663,7 @@ function startGen4Sequencer() {
     gen4PlayBtnEl.textContent = '◼ Stop';
     gen4PlayBtnEl.classList.add('active');
   }
+  refreshTransportStopBtn();
 }
 
 function stopGen4Sequencer() {
@@ -2591,6 +2680,7 @@ function stopGen4Sequencer() {
     gen4PlayBtnEl.textContent = '▶ Play';
     gen4PlayBtnEl.classList.remove('active');
   }
+  refreshTransportStopBtn();
 }
 
 const GEN4_PROB_CYCLE = [1.0, 0.75, 0.5, 0.25];
@@ -2762,16 +2852,25 @@ function buildDrumPanel() {
       muteBtn.classList.toggle('muted', ch.muted);
     });
 
-    const fxBtn = document.createElement('button');
-    fxBtn.type = 'button';
-    fxBtn.className = 'drum-fx-btn';
-    fxBtn.classList.toggle('active', ch.fxSend);
-    fxBtn.textContent = 'FX';
-    fxBtn.title = 'Send to FX chain — click to bypass to limiter only';
-    gen4FxSendBtns[ci] = fxBtn;
-    fxBtn.addEventListener('click', () => gen4SetChannelFxSend(ci, !ch.fxSend));
+    const rowControls = [stepsEl];
+    if (def.id !== 'osc') {
+      const fxBtn = document.createElement('button');
+      fxBtn.type = 'button';
+      fxBtn.className = 'drum-fx-btn';
+      fxBtn.classList.toggle('active', ch.fxSend);
+      fxBtn.textContent = 'FX';
+      fxBtn.title = 'Send to FX chain — click to bypass to limiter only';
+      gen4FxSendBtns[ci] = fxBtn;
+      fxBtn.addEventListener('click', () => gen4SetChannelFxSend(ci, !ch.fxSend));
+      rowControls.push(fxBtn);
+    } else {
+      const spacer = document.createElement('div');
+      spacer.className = 'drum-fx-spacer';
+      rowControls.push(spacer);
+    }
+    rowControls.push(muteBtn);
 
-    row.append(lbl, stepsEl, fxBtn, muteBtn);
+    row.append(lbl, ...rowControls);
     grid.appendChild(row);
   });
 
@@ -3116,6 +3215,7 @@ function cycleLFOMap(genIdx, key) {
   else if (genIdx === 3) applyFxModulation();
   else if (genIdx === 4) applyGen4Modulation();
   else sendParams(genIdx);
+  rebuildBackWireSVG();
   refreshBackPanelState();
   return nextSourceIdx;
 }
@@ -3319,6 +3419,7 @@ function patchBackPanelRoute(routeKey) {
     });
   }
   applyModulationTargetUpdate(parsed.genIdx);
+  rebuildBackWireSVG();
   refreshLFOMappingUI();
 }
 
@@ -3675,27 +3776,37 @@ function buildBackPanel() {
   refreshBackPanelState();
 }
 
-function renderBackPanelConnections() {
-  if (!BACK_PANEL.built || !BACK_PANEL.routeLayer || UI_VIEW.mode !== 'back') return;
+// Build wire SVG elements once; called when routes change or panel opens.
+// Per-frame loop only updates CSS opacity vars — no layout reads.
+function rebuildBackWireSVG() {
+  if (!BACK_PANEL.built || !BACK_PANEL.routeLayer) return;
   const svg = BACK_PANEL.routeLayer;
-  const rect = svg.getBoundingClientRect();
-  svg.textContent = '';
+
+  // Remove old static wires, keep preview group
+  Array.from(svg.children).forEach((el) => {
+    if (!el.classList.contains('preview')) el.remove();
+  });
+
+  BACK_PANEL.wireGlowEls = new Map();
+  BACK_PANEL.wireEls = new Map();
+
+  const svgRect = svg.getBoundingClientRect();
   const routes = [...lfoMappings.values()].sort((a, b) => {
     if (a.sourceIdx !== b.sourceIdx) return a.sourceIdx - b.sourceIdx;
     if (a.genIdx !== b.genIdx) return a.genIdx - b.genIdx;
     return `${a.key}`.localeCompare(`${b.key}`);
   });
+
   routes.forEach(({ genIdx, key, sourceIdx }, routeIdx) => {
     const sourceJack = BACK_PANEL.sourceJacks.get(sourceIdx);
     const targetJack = BACK_PANEL.targetJacks.get(`${genIdx}:${key}`);
     if (!sourceJack || !targetJack) return;
     const s = sourceJack.getBoundingClientRect();
     const t = targetJack.getBoundingClientRect();
-    const sx = s.left - rect.left + s.width / 2;
-    const sy = s.top - rect.top + s.height / 2;
-    const tx = t.left - rect.left + t.width / 2;
-    const ty = t.top - rect.top + t.height / 2;
-    const activity = Math.abs(getModSourceScaledValue(sourceIdx) || 0);
+    const sx = s.left - svgRect.left + s.width / 2;
+    const sy = s.top - svgRect.top + s.height / 2;
+    const tx = t.left - svgRect.left + t.width / 2;
+    const ty = t.top - svgRect.top + t.height / 2;
     const travel = Math.max(120, tx - sx);
     const drop = 34 + (routeIdx % 6) * 16 + sourceIdx * 10;
     const spread = ((routeIdx % 5) - 2) * 18;
@@ -3704,6 +3815,7 @@ function renderBackPanelConnections() {
     const c1y = sy + drop + spread * 0.2;
     const c2y = ty + drop - spread * 0.35;
     const d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${tx.toFixed(1)} ${ty.toFixed(1)}`;
+    const rk = `${genIdx}:${key}`;
 
     const shadow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     shadow.setAttribute('d', d);
@@ -3713,26 +3825,22 @@ function renderBackPanelConnections() {
     const glow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     glow.setAttribute('d', d);
     glow.setAttribute('class', `back-wire-glow src-${sourceIdx}`);
-    glow.style.setProperty('--route-opacity', `${0.34 + activity * 0.34}`);
     svg.appendChild(glow);
+    BACK_PANEL.wireGlowEls.set(rk, glow);
 
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', d);
     path.setAttribute('class', `back-wire src-${sourceIdx}`);
-    path.style.setProperty('--route-opacity', `${0.76 + activity * 0.24}`);
     svg.appendChild(path);
+    BACK_PANEL.wireEls.set(rk, path);
 
-    [
-      [sx, sy],
-      [tx, ty],
-    ].forEach(([cx, cy]) => {
+    [[sx, sy], [tx, ty]].forEach(([cx, cy]) => {
       const plug = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       plug.setAttribute('cx', cx.toFixed(1));
       plug.setAttribute('cy', cy.toFixed(1));
       plug.setAttribute('r', '7.2');
       plug.setAttribute('class', `back-wire-plug src-${sourceIdx}`);
       svg.appendChild(plug);
-
       const core = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       core.setAttribute('cx', cx.toFixed(1));
       core.setAttribute('cy', cy.toFixed(1));
@@ -3741,46 +3849,49 @@ function renderBackPanelConnections() {
       svg.appendChild(core);
     });
   });
+}
 
-  if (
-    BACK_PANEL.selectedSourceIdx !== null &&
-    BACK_PANEL.pointerX !== null &&
-    BACK_PANEL.pointerY !== null
-  ) {
+function renderBackPanelConnections() {
+  if (!BACK_PANEL.built || !BACK_PANEL.routeLayer || UI_VIEW.mode !== 'back') return;
+
+  // ── Update wire glow opacity (no layout reads — just CSS vars) ──
+  lfoMappings.forEach(({ genIdx, key, sourceIdx }) => {
+    const activity = Math.abs(getModSourceScaledValue(sourceIdx) || 0);
+    const rk = `${genIdx}:${key}`;
+    BACK_PANEL.wireGlowEls?.get(rk)?.style.setProperty('--route-opacity', `${(0.34 + activity * 0.34).toFixed(2)}`);
+    BACK_PANEL.wireEls?.get(rk)?.style.setProperty('--route-opacity', `${(0.76 + activity * 0.24).toFixed(2)}`);
+  });
+
+  // ── Preview wire while patching ──
+  const svg = BACK_PANEL.routeLayer;
+  svg.querySelectorAll('.preview').forEach((el) => el.remove());
+  if (BACK_PANEL.selectedSourceIdx !== null && BACK_PANEL.pointerX !== null && BACK_PANEL.pointerY !== null) {
     const sourceJack = BACK_PANEL.sourceJacks.get(BACK_PANEL.selectedSourceIdx);
     if (sourceJack) {
+      const svgRect = svg.getBoundingClientRect();
       const s = sourceJack.getBoundingClientRect();
-      const sx = s.left - rect.left + s.width / 2;
-      const sy = s.top - rect.top + s.height / 2;
+      const sx = s.left - svgRect.left + s.width / 2;
+      const sy = s.top - svgRect.top + s.height / 2;
       const tx = BACK_PANEL.pointerX;
       const ty = BACK_PANEL.pointerY;
       const travel = Math.max(90, tx - sx);
       const c1x = sx + Math.min(Math.max(50, travel * 0.28), 110);
       const c2x = tx - 48;
-      const c1y = sy + 56;
-      const c2y = ty + 34;
-      const d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${tx.toFixed(1)} ${ty.toFixed(1)}`;
-
-      const shadow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      shadow.setAttribute('d', d);
-      shadow.setAttribute('class', 'back-wire-shadow preview');
-      svg.appendChild(shadow);
-
-      const glow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      glow.setAttribute('d', d);
-      glow.setAttribute('class', `back-wire-glow src-${BACK_PANEL.selectedSourceIdx} preview`);
-      glow.style.setProperty('--route-opacity', '0.44');
-      svg.appendChild(glow);
-
-      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path.setAttribute('d', d);
-      path.setAttribute('class', `back-wire src-${BACK_PANEL.selectedSourceIdx} preview`);
-      path.style.setProperty('--route-opacity', '0.82');
-      svg.appendChild(path);
+      const d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} C ${c1x.toFixed(1)} ${(sy + 56).toFixed(1)}, ${c2x.toFixed(1)} ${(ty + 34).toFixed(1)}, ${tx.toFixed(1)} ${ty.toFixed(1)}`;
+      const ci = BACK_PANEL.selectedSourceIdx;
+      [['back-wire-shadow preview', null, null],
+       [`back-wire-glow src-${ci} preview`, '--route-opacity', '0.44'],
+       [`back-wire src-${ci} preview`, '--route-opacity', '0.82']].forEach(([cls, prop, val]) => {
+        const el = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        el.setAttribute('d', d);
+        el.setAttribute('class', cls);
+        if (prop) el.style.setProperty(prop, val);
+        svg.appendChild(el);
+      });
     }
   }
 
-  // ── Limiter gain reduction meter (live) ──
+  // ── Limiter gain reduction meter ──
   if (BACK_PANEL.limiterValueEl && BACK_PANEL.limiterFill && fx?.limiter?.comp) {
     const reduction = Math.abs(fx.limiter.comp.reduction || 0);
     BACK_PANEL.limiterValueEl.textContent = `${formatNumericValue(reduction, 1)} dB`;
@@ -3975,6 +4086,7 @@ function setPanelView(mode) {
     .forEach((btn) => btn.classList.toggle('active', btn.dataset.view === UI_VIEW.mode));
   if (UI_VIEW.mode === 'back') {
     refreshBackPanelState();
+    rebuildBackWireSVG();
     requestAnimationFrame(renderBackPanelConnections);
   }
 }
@@ -4455,6 +4567,7 @@ function refreshGen3UI() {
     gen3ControlBindings.get(key)?.setValue(GEN3[key]);
   });
   gen3ShapeButtons.forEach((btn, type) => btn.classList.toggle('active', GEN3.type === type));
+  if (gen3SusBtnEl) gen3SusBtnEl.classList.toggle('active', GEN3.sustainMode);
 }
 
 function refreshLFOUI() {
@@ -4489,6 +4602,8 @@ function capturePreset() {
       decay: GEN3.decay,
       sustain: GEN3.sustain,
       release: GEN3.release,
+      sustainMode: GEN3.sustainMode,
+      lockedMidis: [...GEN3.lockedMidis],
     },
     fx: JSON.parse(JSON.stringify(FX)),
     lfos: LFOS.map(({ label, rate, sync, syncIndex, shape, depth }) => ({
@@ -4543,7 +4658,10 @@ function applyPreset(preset) {
 
   if (preset.gen3) {
     Object.assign(GEN3, preset.gen3);
+    // lockedMidis is an array in JSON; restore as Set
+    GEN3.lockedMidis = new Set(Array.isArray(preset.gen3.lockedMidis) ? preset.gen3.lockedMidis : []);
     refreshGen3UI();
+    refreshGen3KeyStates();
     if (GEN3.nodes) {
       restartAllGen3Notes();
       applyGen3Modulation();
@@ -4652,6 +4770,7 @@ function applyPreset(preset) {
       lfoMappings.set(`${genIdx}:${key}`, { genIdx, key, sourceIdx: modSourceIdx });
     }
   });
+  rebuildBackWireSVG();
   refreshLFOMappingUI();
   refreshDelayTimeUI();
   refreshLFOUI();
@@ -4990,6 +5109,12 @@ document.getElementById('startBtn').addEventListener('click', () => {
   started ? stop() : start();
 });
 
+document.getElementById('transportStopBtn').addEventListener('click', () => {
+  stopGen4Sequencer();
+  stopAllGen3Notes();
+  refreshTransportStopBtn();
+});
+
 getInputSelect()?.addEventListener('change', async (e) => {
   INPUT_SOURCE.selectedId = e.target.value;
   if (started && anyMicSourceSelected()) {
@@ -5044,7 +5169,7 @@ setPanelView('front');
 getStartBtn().textContent = getIdleStartButtonLabel();
 
 window.addEventListener('resize', () => {
-  if (UI_VIEW.mode === 'back') requestAnimationFrame(renderBackPanelConnections);
+  if (UI_VIEW.mode === 'back') rebuildBackWireSVG();
 });
 
 window.addEventListener('keydown', (event) => {
