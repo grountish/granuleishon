@@ -571,6 +571,22 @@ function drawGenVizEmpty(gi) {
   c.fillRect(0, 0, W, H);
   c.fillStyle = '#252525';
   c.fillRect(0, H / 2 - 0.5, W, 1);
+
+  // Only the two granular generators take a mic/WAV source; Gen 3 is a synth scope.
+  if (gi > 1) return;
+
+  // Empty-state hint: spell out the two ways to feed this generator.
+  c.save();
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.font = '600 11px ui-monospace, monospace';
+  c.fillStyle = GEN_VIZ[gi]?.line || '#3cb870';
+  c.globalAlpha = 0.85;
+  c.fillText('MIC — use system input', W / 2, H / 2 - 11);
+  c.fillStyle = '#9aa3a3';
+  c.font = '500 10px ui-monospace, monospace';
+  c.fillText('or drop a .wav file here', W / 2, H / 2 + 9);
+  c.restore();
 }
 
 function ensureGenVizState(gi) {
@@ -2919,7 +2935,50 @@ function gen4RefreshStepDisplay() {
   });
 }
 
-function gen4SetStepCount(n) {
+function gen4IsStepDefault(ch, stepIdx) {
+  return (
+    !ch.steps[stepIdx] &&
+    ch.velocity[stepIdx] === 1.0 &&
+    ch.stutter[stepIdx] === 1 &&
+    ch.probability[stepIdx] === 1.0
+  );
+}
+
+function gen4CanDuplicateStepRange(fromStepCount, toStepCount) {
+  if (toStepCount !== fromStepCount * 2 || toStepCount > 32) return false;
+  for (const ch of GEN4.channels) {
+    for (let si = fromStepCount; si < toStepCount; si++) {
+      if (!gen4IsStepDefault(ch, si)) return false;
+    }
+  }
+  return true;
+}
+
+function gen4DuplicateStepRange(fromStepCount, toStepCount) {
+  const copyLength = Math.min(fromStepCount, toStepCount - fromStepCount);
+  GEN4.channels.forEach((ch, ci) => {
+    for (let offset = 0; offset < copyLength; offset++) {
+      const src = offset;
+      const dest = fromStepCount + offset;
+      ch.steps[dest] = ch.steps[src];
+      ch.velocity[dest] = ch.velocity[src];
+      ch.stutter[dest] = ch.stutter[src];
+      ch.probability[dest] = ch.probability[src];
+      gen4ApplyStepBtn(ci, dest);
+    }
+  });
+}
+
+function gen4SetStepCount(n, { duplicateOnExpand = true } = {}) {
+  const prevStepCount = GEN4.stepCount;
+  if (
+    duplicateOnExpand &&
+    prevStepCount === 16 &&
+    n === 32 &&
+    gen4CanDuplicateStepRange(prevStepCount, n)
+  ) {
+    gen4DuplicateStepRange(prevStepCount, n);
+  }
   GEN4.stepCount = n;
   if (GEN4.schedulerStep >= n) GEN4.schedulerStep = -1;
   document.querySelectorAll('.drum-steps').forEach((el) => el.style.setProperty('--step-count', n));
@@ -5224,7 +5283,9 @@ function applyPreset(preset) {
       }
       for (let si = 0; si < 32; si++) gen4ApplyStepBtn(ci, si);
     });
-    if ([12, 15, 16, 32].includes(preset.gen4.stepCount)) gen4SetStepCount(preset.gen4.stepCount);
+    if ([12, 15, 16, 32].includes(preset.gen4.stepCount)) {
+      gen4SetStepCount(preset.gen4.stepCount, { duplicateOnExpand: false });
+    }
   }
 
   if (preset.kickSc) {
