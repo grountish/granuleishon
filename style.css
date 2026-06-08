@@ -1727,7 +1727,7 @@ button.primary:hover {
   align-items: center;
   gap: 10px;
   padding: 4px 10px;
-  font-size: 9px;
+  font-size: 11px;
   color: var(--muted);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -1746,7 +1746,7 @@ button.primary:hover {
   border: 1px solid #383838;
   border-radius: 2px;
   padding: 1px 5px;
-  font-size: 9px;
+  font-size: 11px;
   color: #888;
   font-family: monospace;
   line-height: 1.4;
@@ -1794,7 +1794,7 @@ button.primary:hover {
 
 .drum-steps {
   display: grid;
-  grid-template-columns: repeat(var(--step-count, 16), 26px);
+  grid-template-columns: repeat(32, 26px);
   gap: 3px;
   flex-shrink: 0;
   height: 100%;
@@ -1879,7 +1879,7 @@ button.primary:hover {
   position: absolute;
   top: 2px;
   right: 2px;
-  font-size: 6px;
+  font-size: 9px;
   line-height: 1;
   color: rgba(255, 255, 255, 0.92);
   font-weight: 700;
@@ -1974,5 +1974,6 @@ button.primary:hover {
 }
 
 .drum-step.step-inactive {
-  display: none;
+  opacity: 0.18;
+  pointer-events: none;
 }

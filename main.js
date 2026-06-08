@@ -2031,7 +2031,10 @@ function removeGen3Note(midi) {
   GEN3.activeNotes.delete(midi);
   setGen3NoteActive(midi, false);
   if (entry) {
-    if (entry.autoReleaseTimer) { clearTimeout(entry.autoReleaseTimer); entry.autoReleaseTimer = null; }
+    if (entry.autoReleaseTimer) {
+      clearTimeout(entry.autoReleaseTimer);
+      entry.autoReleaseTimer = null;
+    }
     releaseGen3Voice(entry);
   }
   refreshTransportStopBtn();
@@ -2340,16 +2343,18 @@ const GEN4 = {
   scheduleInterval: 25,
   stepCount: 16,
   nodes: null,
-  channels: GEN4_DEFS.map((def) => ({
-    id: def.id,
-    muted: false,
-    fxSend: true,
-    steps: new Array(32).fill(false),
-    velocity: new Array(32).fill(1.0),
-    stutter: new Array(32).fill(1),
-    probability: new Array(32).fill(1.0),
-    params: Object.fromEntries(def.paramDefs.map((p) => [p.key, p.value])),
-  })),
+  channels: GEN4_DEFS.map((def) => {
+    return {
+      id: def.id,
+      muted: false,
+      fxSend: def.id === 'kick',
+      steps: new Array(32).fill(false),
+      velocity: new Array(32).fill(1.0),
+      stutter: new Array(32).fill(1),
+      probability: new Array(32).fill(1.0),
+      params: Object.fromEntries(def.paramDefs.map((p) => [p.key, p.value])),
+    };
+  }),
 };
 
 const KICK_SC = {
@@ -2365,7 +2370,7 @@ let gen4PlayBtnEl = null;
 let gen4DisplayFrame = null;
 const gen4DragState = { active: false, ci: 0, si: 0, startY: 0, startVel: 1 };
 
-window.addEventListener('mousemove', (e) => {
+addEventListener('mousemove', (e) => {
   if (!gen4DragState.active) return;
   const { ci, si, startY, startVel } = gen4DragState;
   const next = clamp(startVel + (startY - e.clientY) / 80, 0.05, 1.0);
@@ -2402,7 +2407,9 @@ function gen4SetChannelFxSend(ci, send) {
   ch.fxSend = send;
   if (GEN4.nodes?.channelOuts?.[ci] && fx) {
     const out = GEN4.nodes.channelOuts[ci];
-    try { out.disconnect(); } catch (e) {}
+    try {
+      out.disconnect();
+    } catch (e) {}
     out.connect(send ? fx.input : fx.limiter.comp);
   }
   const btn = gen4FxSendBtns[ci];
@@ -2575,11 +2582,21 @@ function gen4FireChannel(ci, time, velocity) {
   const p = getEffectiveGen4Params(ci);
   const dest = GEN4.nodes.channelOuts[ci];
   switch (ch.id) {
-    case 'kick':  gen4TriggerKick(time, velocity, p, dest);  break;
-    case 'snare': gen4TriggerSnare(time, velocity, p, dest); break;
-    case 'hat':   gen4TriggerHat(time, velocity, p, dest);   break;
-    case 'perc':  gen4TriggerPerc(time, velocity, p, dest);  break;
-    case 'osc':   gen4TriggerOsc(time);                       break;
+    case 'kick':
+      gen4TriggerKick(time, velocity, p, dest);
+      break;
+    case 'snare':
+      gen4TriggerSnare(time, velocity, p, dest);
+      break;
+    case 'hat':
+      gen4TriggerHat(time, velocity, p, dest);
+      break;
+    case 'perc':
+      gen4TriggerPerc(time, velocity, p, dest);
+      break;
+    case 'osc':
+      gen4TriggerOsc(time);
+      break;
   }
 }
 
@@ -3833,7 +3850,10 @@ function rebuildBackWireSVG() {
     svg.appendChild(path);
     BACK_PANEL.wireEls.set(rk, path);
 
-    [[sx, sy], [tx, ty]].forEach(([cx, cy]) => {
+    [
+      [sx, sy],
+      [tx, ty],
+    ].forEach(([cx, cy]) => {
       const plug = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       plug.setAttribute('cx', cx.toFixed(1));
       plug.setAttribute('cy', cy.toFixed(1));
@@ -3857,14 +3877,22 @@ function renderBackPanelConnections() {
   lfoMappings.forEach(({ genIdx, key, sourceIdx }) => {
     const activity = Math.abs(getModSourceScaledValue(sourceIdx) || 0);
     const rk = `${genIdx}:${key}`;
-    BACK_PANEL.wireGlowEls?.get(rk)?.style.setProperty('--route-opacity', `${(0.34 + activity * 0.34).toFixed(2)}`);
-    BACK_PANEL.wireEls?.get(rk)?.style.setProperty('--route-opacity', `${(0.76 + activity * 0.24).toFixed(2)}`);
+    BACK_PANEL.wireGlowEls
+      ?.get(rk)
+      ?.style.setProperty('--route-opacity', `${(0.34 + activity * 0.34).toFixed(2)}`);
+    BACK_PANEL.wireEls
+      ?.get(rk)
+      ?.style.setProperty('--route-opacity', `${(0.76 + activity * 0.24).toFixed(2)}`);
   });
 
   // ── Preview wire while patching ──
   const svg = BACK_PANEL.routeLayer;
   svg.querySelectorAll('.preview').forEach((el) => el.remove());
-  if (BACK_PANEL.selectedSourceIdx !== null && BACK_PANEL.pointerX !== null && BACK_PANEL.pointerY !== null) {
+  if (
+    BACK_PANEL.selectedSourceIdx !== null &&
+    BACK_PANEL.pointerX !== null &&
+    BACK_PANEL.pointerY !== null
+  ) {
     const sourceJack = BACK_PANEL.sourceJacks.get(BACK_PANEL.selectedSourceIdx);
     if (sourceJack) {
       const svgRect = svg.getBoundingClientRect();
@@ -3878,9 +3906,11 @@ function renderBackPanelConnections() {
       const c2x = tx - 48;
       const d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} C ${c1x.toFixed(1)} ${(sy + 56).toFixed(1)}, ${c2x.toFixed(1)} ${(ty + 34).toFixed(1)}, ${tx.toFixed(1)} ${ty.toFixed(1)}`;
       const ci = BACK_PANEL.selectedSourceIdx;
-      [['back-wire-shadow preview', null, null],
-       [`back-wire-glow src-${ci} preview`, '--route-opacity', '0.44'],
-       [`back-wire src-${ci} preview`, '--route-opacity', '0.82']].forEach(([cls, prop, val]) => {
+      [
+        ['back-wire-shadow preview', null, null],
+        [`back-wire-glow src-${ci} preview`, '--route-opacity', '0.44'],
+        [`back-wire src-${ci} preview`, '--route-opacity', '0.82'],
+      ].forEach(([cls, prop, val]) => {
         const el = document.createElementNS('http://www.w3.org/2000/svg', 'path');
         el.setAttribute('d', d);
         el.setAttribute('class', cls);
@@ -4658,7 +4688,9 @@ function applyPreset(preset) {
   if (preset.gen3) {
     Object.assign(GEN3, preset.gen3);
     // lockedMidis is an array in JSON; restore as Set
-    GEN3.lockedMidis = new Set(Array.isArray(preset.gen3.lockedMidis) ? preset.gen3.lockedMidis : []);
+    GEN3.lockedMidis = new Set(
+      Array.isArray(preset.gen3.lockedMidis) ? preset.gen3.lockedMidis : [],
+    );
     refreshGen3UI();
     refreshGen3KeyStates();
     if (GEN3.nodes) {
@@ -4711,16 +4743,24 @@ function applyPreset(preset) {
       if (!ch || !saved || !def) return;
       if (typeof saved.fxSend === 'boolean') gen4SetChannelFxSend(ci, saved.fxSend);
       if (Array.isArray(saved.steps)) {
-        saved.steps.forEach((v, si) => { ch.steps[si] = !!v; });
+        saved.steps.forEach((v, si) => {
+          ch.steps[si] = !!v;
+        });
       }
       if (Array.isArray(saved.velocity)) {
-        saved.velocity.forEach((v, si) => { ch.velocity[si] = clamp(v, 0.05, 1.0); });
+        saved.velocity.forEach((v, si) => {
+          ch.velocity[si] = clamp(v, 0.05, 1.0);
+        });
       }
       if (Array.isArray(saved.stutter)) {
-        saved.stutter.forEach((v, si) => { ch.stutter[si] = clamp(Math.round(v), 1, 4); });
+        saved.stutter.forEach((v, si) => {
+          ch.stutter[si] = clamp(Math.round(v), 1, 4);
+        });
       }
       if (Array.isArray(saved.probability)) {
-        saved.probability.forEach((v, si) => { ch.probability[si] = clamp(v, 0.0, 1.0); });
+        saved.probability.forEach((v, si) => {
+          ch.probability[si] = clamp(v, 0.0, 1.0);
+        });
       }
       if (saved.params) {
         def.paramDefs.forEach((pd) => {
