@@ -331,6 +331,7 @@ async function ensureAudioEngine() {
     buildGen3Nodes();
     buildGen4Nodes();
     fx.output.connect(audioCtx.destination);
+    ensureVizAnalyser();
   }
   if (audioCtx.state === 'suspended') await audioCtx.resume();
   if (!gen3ScopeFrame) startGen3Scope();
@@ -891,6 +892,7 @@ const gen3ShapeButtons = new Map();
 let gen3SusBtnEl = null;
 const filterModeButtons = new Map();
 let delaySyncModeControl = null;
+const delayModeButtons = new Map();
 const genSourceModeButtons = [new Map(), new Map()];
 const POSITION_PARAM = PARAMS.find((p) => p.key === 'positionSec');
 const GRANULAR_SOURCES = [createGranularSourceState(), createGranularSourceState()];
@@ -1823,6 +1825,291 @@ function buildGeneratorPanel(genIdx) {
   return panel;
 }
 
+// ─── Visualizer ──────────────────────────────────────────────────────────────
+
+let vizAnalyser = null;
+
+// Five moods with distinct visual character. dur = [min, max] in idleT units.
+// idleT += 0.01/frame → 1 unit ≈ 1.67 seconds → 36 units ≈ 1 minute.
+const VIZ_STATES = [
+  { label: 'nebula',  dur: [25, 45], trailAlpha: 0.030, warpMult: 0.45, orbitStr: 0.38, turbStr: 0.50, hueVel: 0.035, hueTarget:  30, maxP: 1600, sat: 75, lum: 48 },
+  { label: 'warp',    dur: [18, 32], trailAlpha: 0.062, warpMult: 2.80, orbitStr: 0.16, turbStr: 0.25, hueVel: 0.180, hueTarget: 185, maxP:  700, sat: 95, lum: 68 },
+  { label: 'chaos',   dur: [14, 26], trailAlpha: 0.078, warpMult: 1.60, orbitStr: 0.78, turbStr: 1.90, hueVel: 0.320, hueTarget: null,maxP: 1400, sat:100, lum: 62 },
+  { label: 'void',    dur: [28, 50], trailAlpha: 0.020, warpMult: 0.85, orbitStr: 0.28, turbStr: 0.20, hueVel: 0.012, hueTarget: 270, maxP:  450, sat: 52, lum: 36 },
+  { label: 'storm',   dur: [14, 24], trailAlpha: 0.092, warpMult: 2.20, orbitStr: 1.02, turbStr: 1.40, hueVel: 0.220, hueTarget: 320, maxP: 1800, sat: 90, lum: 58 },
+];
+
+const VIZ = {
+  canvas: null,
+  ctx: null,
+  animId: null,
+  freqBuf: null,
+  timeBuf: null,
+  particles: [],
+  warp: [],
+  beatEnergyAvg: 0,
+  beatCooldown: 0,
+  beatFlash: 0,
+  flowTime: 0,
+  masterHue: 200,
+  idleT: 0,
+  // State machine
+  stateIdx: 0,
+  stateTimer: 0,
+  stateDur: 30,
+  // Current interpolated params (lerp toward active state's targets)
+  p: {
+    trailAlpha: 0.040,
+    warpMult:   1.00,
+    orbitStr:   0.55,
+    turbStr:    0.70,
+    hueVel:     0.07,
+    maxP:       1600,
+    sat:        85,
+    lum:        55,
+  },
+};
+
+function ensureVizAnalyser() {
+  if (vizAnalyser || !audioCtx || !fx?.output) return;
+  vizAnalyser = audioCtx.createAnalyser();
+  vizAnalyser.fftSize = 2048;
+  vizAnalyser.smoothingTimeConstant = 0.84;
+  fx.output.connect(vizAnalyser);
+  VIZ.freqBuf = new Uint8Array(vizAnalyser.frequencyBinCount);
+  VIZ.timeBuf = new Uint8Array(vizAnalyser.fftSize);
+}
+
+function buildVisualPanel() {
+  const panel = document.getElementById('visualPanel');
+  if (!panel) return;
+  const canvas = document.createElement('canvas');
+  canvas.className = 'viz-canvas';
+  panel.appendChild(canvas);
+  VIZ.canvas = canvas;
+  VIZ.ctx = canvas.getContext('2d');
+  const ro = new ResizeObserver(() => {
+    canvas.width = canvas.offsetWidth;
+    canvas.height = canvas.offsetHeight;
+  });
+  ro.observe(canvas);
+}
+
+function startViz() {
+  if (VIZ.animId) return;
+  ensureVizAnalyser();
+  (function frame() {
+    VIZ.animId = requestAnimationFrame(frame);
+    renderViz();
+  })();
+}
+
+function stopViz() {
+  if (VIZ.animId) cancelAnimationFrame(VIZ.animId);
+  VIZ.animId = null;
+}
+
+function vizFlowField(x, y, cx, cy, t, bass, mid, orbitStr, turbStr) {
+  const dx = x - cx, dy = y - cy;
+  const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+  const orb = (orbitStr + bass * 1.3) / dist;
+  const ox = -dy * orb;
+  const oy =  dx * orb;
+  const s = 0.0035;
+  const a = Math.sin(x * s + t * 0.38) * Math.cos(y * s * 0.9 - t * 0.27) * (turbStr + mid * 1.2);
+  return { vx: ox + Math.cos(a * 6.28), vy: oy + Math.sin(a * 6.28) };
+}
+
+function renderViz() {
+  const { canvas, ctx } = VIZ;
+  if (!canvas || !ctx || canvas.width === 0) return;
+
+  ensureVizAnalyser();
+
+  const W = canvas.width, H = canvas.height;
+  const cx = W / 2, cy = H / 2;
+  const minDim = Math.min(W, H);
+  VIZ.idleT += 0.01;
+
+  // ── State machine ─────────────────────────────────────────────
+  VIZ.stateTimer += 0.01;
+  if (VIZ.stateTimer >= VIZ.stateDur) {
+    VIZ.stateIdx = (VIZ.stateIdx + 1) % VIZ_STATES.length;
+    VIZ.stateTimer = 0;
+    const nd = VIZ_STATES[VIZ.stateIdx].dur;
+    VIZ.stateDur = nd[0] + Math.random() * (nd[1] - nd[0]);
+  }
+  const st = VIZ_STATES[VIZ.stateIdx];
+  const vp = VIZ.p;
+  const lp = 0.008;
+  vp.trailAlpha += (st.trailAlpha - vp.trailAlpha) * lp;
+  vp.warpMult   += (st.warpMult   - vp.warpMult)   * lp;
+  vp.orbitStr   += (st.orbitStr   - vp.orbitStr)   * lp;
+  vp.turbStr    += (st.turbStr    - vp.turbStr)    * lp;
+  vp.hueVel     += (st.hueVel     - vp.hueVel)     * lp;
+  vp.maxP       += (st.maxP       - vp.maxP)       * lp;
+  vp.sat        += (st.sat        - vp.sat)        * lp;
+  vp.lum        += (st.lum        - vp.lum)        * lp;
+
+  // ── Audio data ────────────────────────────────────────────────
+  if (vizAnalyser && VIZ.freqBuf) vizAnalyser.getByteFrequencyData(VIZ.freqBuf);
+  const freq = VIZ.freqBuf;
+  const fLen = freq ? freq.length : 1024;
+
+  function bandE(s, e) {
+    if (!freq) return 0;
+    let sum = 0;
+    for (let i = s; i < e && i < fLen; i++) sum += freq[i];
+    return sum / ((e - s) * 255);
+  }
+  const bassE = bandE(0, 5);
+  const midE  = bandE(5, 40);
+  const highE = bandE(40, 120);
+  const allE  = bandE(0, 100);
+
+  // ── Beat detection ────────────────────────────────────────────
+  VIZ.beatEnergyAvg = VIZ.beatEnergyAvg * 0.93 + bassE * 0.07;
+  const isBeat = VIZ.beatCooldown <= 0 && bassE > VIZ.beatEnergyAvg * 1.6 && bassE > 0.1;
+  if (isBeat) {
+    VIZ.beatCooldown = 14;
+    VIZ.beatFlash = 1.0;
+    const n = 55 + Math.floor(bassE * 90);
+    for (let i = 0; i < n && VIZ.particles.length < Math.floor(vp.maxP * 1.1); i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 2 + Math.random() * 6;
+      const bx = cx + (Math.random() - 0.5) * minDim * 0.08;
+      const by = cy + (Math.random() - 0.5) * minDim * 0.08;
+      VIZ.particles.push({
+        x: bx, y: by, px: bx, py: by,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        life: 1, decay: 0.007 + Math.random() * 0.01,
+        hue: (VIZ.masterHue + Math.random() * 80 - 40 + 360) % 360,
+        size: 1.5 + Math.random() * 3,
+      });
+    }
+  }
+  if (VIZ.beatCooldown > 0) VIZ.beatCooldown--;
+  VIZ.beatFlash *= 0.85;
+
+  // Ambient trickle — keep field alive even without beats
+  const trickle = 2 + Math.floor(allE * 10);
+  for (let i = 0; i < trickle && VIZ.particles.length < Math.floor(vp.maxP); i++) {
+    const px = Math.random() * W, py = Math.random() * H;
+    VIZ.particles.push({
+      x: px, y: py, px, py,
+      vx: 0, vy: 0,
+      life: 0.5 + Math.random() * 0.5,
+      decay: 0.002 + Math.random() * 0.003,
+      hue: (VIZ.masterHue + Math.random() * 200 - 100 + 360) % 360,
+      size: 0.6 + Math.random() * 1.6,
+    });
+  }
+
+  // Warp tunnel — particles born near centre, fly radially outward
+  const warpRate = Math.floor((2 + allE * 10) * vp.warpMult);
+  const warpCap  = Math.floor(300 * Math.max(0.3, vp.warpMult));
+  for (let i = 0; i < warpRate && VIZ.warp.length < warpCap; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.random() * minDim * 0.04;
+    const wx = cx + Math.cos(angle) * r;
+    const wy = cy + Math.sin(angle) * r;
+    VIZ.warp.push({
+      x: wx, y: wy, px: wx, py: wy,
+      angle,
+      speed: (0.4 + Math.random() * 1.2) * Math.max(0.4, vp.warpMult),
+      life: 1,
+      decay: 0.008 + Math.random() * 0.007,
+      hue: 170 + Math.random() * 70,  // teal → cyan
+      width: 0.4 + Math.random() * 0.9,
+    });
+  }
+
+  VIZ.flowTime += 0.007 + allE * 0.05;
+  // Advance hue at state-driven velocity, then nudge toward hueTarget (shortest arc)
+  VIZ.masterHue = (VIZ.masterHue + vp.hueVel + highE * 0.5 + 360) % 360;
+  if (st.hueTarget != null) {
+    const diff = ((st.hueTarget - VIZ.masterHue) + 540) % 360 - 180;
+    VIZ.masterHue = (VIZ.masterHue + diff * 0.003 + 360) % 360;
+  }
+
+  // ── 1. Background fade — alpha from state drives trail length ──
+  ctx.fillStyle = `rgba(4, 3, 6, ${vp.trailAlpha + allE * 0.03})`;
+  ctx.fillRect(0, 0, W, H);
+
+  // ── 2. Warp tunnel — radial streaks from centre ───────────────
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  for (let i = VIZ.warp.length - 1; i >= 0; i--) {
+    const p = VIZ.warp[i];
+    p.px = p.x; p.py = p.y;
+    p.speed *= 1.028 + allE * 0.04;  // accelerate; audio boosts it
+    p.x += Math.cos(p.angle) * p.speed;
+    p.y += Math.sin(p.angle) * p.speed;
+    p.life -= p.decay;
+    if (p.life <= 0 || p.x < -10 || p.x > W + 10 || p.y < -10 || p.y > H + 10) {
+      VIZ.warp.splice(i, 1); continue;
+    }
+    const alpha = p.life * (0.35 + allE * 0.5);
+    ctx.strokeStyle = `hsla(${p.hue}, 90%, ${70 + allE * 20}%, ${alpha})`;
+    ctx.lineWidth = p.width * (1 + allE * 1.5);
+    ctx.beginPath();
+    ctx.moveTo(p.px, p.py);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // ── 3. Orbital flow particles — drawn as streaks ──────────────
+  const ft = VIZ.flowTime;
+  const velMult = 1 + allE * 3.5 + bassE * 2;
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  for (let i = VIZ.particles.length - 1; i >= 0; i--) {
+    const p = VIZ.particles[i];
+    // Save trail origin before moving
+    p.px = p.x; p.py = p.y;
+    const field = vizFlowField(p.x, p.y, cx, cy, ft, bassE, midE, vp.orbitStr, vp.turbStr);
+    p.vx = p.vx * 0.82 + field.vx * velMult * 0.18;
+    p.vy = p.vy * 0.82 + field.vy * velMult * 0.18;
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life -= p.decay;
+    if (p.life <= 0 || p.x < -20 || p.x > W + 20 || p.y < -20 || p.y > H + 20) {
+      VIZ.particles.splice(i, 1); continue;
+    }
+    const spd = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+    const alpha = p.life * Math.min(0.9, 0.25 + spd * 0.1 + allE * 0.35);
+    const h = (p.hue + spd * 9) % 360;
+    const lw = Math.max(0.4, p.size * (0.5 + allE * 1.2) * p.life);
+    ctx.strokeStyle = `hsla(${h}, ${Math.round(vp.sat)}%, ${Math.round(vp.lum + Math.min(spd * 4, 22))}%, ${alpha})`;
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    ctx.moveTo(p.px, p.py);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // ── 5. Beat flash ─────────────────────────────────────────────
+  if (VIZ.beatFlash > 0.02) {
+    const fg = ctx.createRadialGradient(cx, cy, 0, cx, cy, minDim * 0.65);
+    fg.addColorStop(0,    `rgba(255, 245, 255, ${VIZ.beatFlash * 0.22})`);
+    fg.addColorStop(0.45, `rgba(190, 160, 255, ${VIZ.beatFlash * 0.08})`);
+    fg.addColorStop(1,    'rgba(0,0,0,0)');
+    ctx.fillStyle = fg;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // ── 6. Vignette ───────────────────────────────────────────────
+  const vig = ctx.createRadialGradient(cx, cy, minDim * 0.2, cx, cy, minDim * 0.78);
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.72)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// ─── Build UI ────────────────────────────────────────────────────────────────
+
 function buildUI() {
   const container = document.getElementById('generators');
   container.appendChild(buildGeneratorPanel(0));
@@ -2347,7 +2634,7 @@ const GEN4 = {
     return {
       id: def.id,
       muted: false,
-      fxSend: def.id === 'kick',
+      fxSend: def.id !== 'kick',
       steps: new Array(32).fill(false),
       velocity: new Array(32).fill(1.0),
       stutter: new Array(32).fill(1),
@@ -3001,7 +3288,7 @@ const FX_DEFS = [
 
 // Source of truth for FX state — applied to audio nodes when they exist.
 const FX = {
-  delay: { time: 0.3, feedback: 0.35, mix: 0, sync: false, syncIndex: 4, hp: 20 },
+  delay: { time: 0.3, feedback: 0.35, mix: 0, sync: false, syncIndex: 4, hp: 20, mode: 'stereo' },
   filter: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 0 },
   bitreduce: { bits: 8, rate: 1, mix: 0 },
   sat: { drive: 0.3, mix: 0 },
@@ -3067,16 +3354,26 @@ const DELAY_TIME_SYNC_CONTROL = {
   step: 1,
   unit: '',
 };
+const STEP_SEQ_STEP_BEAT_OPTIONS = [
+  { label: '1/4', beats: 0.25 },
+  { label: '1/2', beats: 0.5 },
+  { label: '1', beats: 1 },
+  { label: '2', beats: 2 },
+  { label: '4', beats: 4 },
+  { label: '8', beats: 8 },
+];
 const STEP_SEQ = {
   label: 'Seq 1',
   steps: Array.from({ length: 16 }, () => 0),
   subdivision: 16,
+  stepBeats: 0.25,
   currentStep: 0,
   currentValue: 0,
   elapsed: 0,
 };
 let seqBars = [];
 const seqSubdivisionButtons = new Map();
+const seqStepBeatButtons = new Map();
 // lfoMappings: 'genIdx:paramKey' → { genIdx, key, sourceIdx }
 const lfoMappings = new Map();
 let lfoLastTs = 0,
@@ -3086,8 +3383,23 @@ function getSeqActiveStepCount() {
   return clamp(Math.round(STEP_SEQ.subdivision), 1, STEP_SEQ.steps.length);
 }
 
+function clampSequencerStepBeats(stepBeats) {
+  const min = STEP_SEQ_STEP_BEAT_OPTIONS[0].beats;
+  const max = STEP_SEQ_STEP_BEAT_OPTIONS[STEP_SEQ_STEP_BEAT_OPTIONS.length - 1].beats;
+  return clamp(stepBeats, min, max);
+}
+
+function getLegacySequencerStepBeats(subdivision) {
+  return 4 / clamp(Math.round(subdivision), 1, STEP_SEQ.steps.length);
+}
+
+function formatSequencerStepBeats(stepBeats) {
+  const option = STEP_SEQ_STEP_BEAT_OPTIONS.find(({ beats }) => Math.abs(beats - stepBeats) < 1e-6);
+  return option ? option.label : `${formatNumericValue(stepBeats, stepBeats >= 1 ? 0 : 2)}`;
+}
+
 function getSeqStepDuration() {
-  return ((60 / Math.max(1, TRANSPORT.bpm)) * 4) / getSeqActiveStepCount();
+  return beatsToSeconds(clampSequencerStepBeats(STEP_SEQ.stepBeats));
 }
 
 function refreshSequencerUI() {
@@ -3102,6 +3414,9 @@ function refreshSequencerUI() {
   });
   seqSubdivisionButtons.forEach((btn, subdivision) => {
     btn.classList.toggle('active', STEP_SEQ.subdivision === subdivision);
+  });
+  seqStepBeatButtons.forEach((btn, stepBeats) => {
+    btn.classList.toggle('active', Math.abs(STEP_SEQ.stepBeats - stepBeats) < 1e-6);
   });
 }
 
@@ -3207,6 +3522,14 @@ function setSequencerSubdivision(subdivision) {
   applyMappedModulationTargets();
 }
 
+function setSequencerStepBeats(stepBeats) {
+  STEP_SEQ.stepBeats = clampSequencerStepBeats(stepBeats);
+  STEP_SEQ.elapsed = 0;
+  refreshSequencerUI();
+  refreshBackPanelState();
+  applyMappedModulationTargets();
+}
+
 function cycleLFOMap(genIdx, key) {
   const mapKey = `${genIdx}:${key}`;
   const mapping = lfoMappings.get(mapKey);
@@ -3252,6 +3575,10 @@ function refreshDelayTimeUI() {
   );
   control.setValue(isSync ? FX.delay.syncIndex : FX.delay.time);
   delaySyncModeControl?.setMode(isSync ? 'sync' : 'free');
+}
+
+function refreshDelayModeUI() {
+  delayModeButtons.forEach((btn, mode) => btn.classList.toggle('active', FX.delay.mode === mode));
 }
 
 function refreshLFOControlUI(lfoIdx) {
@@ -3972,7 +4299,7 @@ function refreshBackPanelState() {
       const routeCount = [...lfoMappings.values()].filter(
         (mapping) => mapping.sourceIdx === 2,
       ).length;
-      meta.subtitleEl.textContent = `1/${STEP_SEQ.subdivision} • step ${STEP_SEQ.currentStep + 1} • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
+      meta.subtitleEl.textContent = `${getSeqActiveStepCount()} steps • ${formatSequencerStepBeats(STEP_SEQ.stepBeats)}b/step • step ${STEP_SEQ.currentStep + 1} • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
       meta.valueEl.textContent = `${STEP_SEQ.currentValue >= 0 ? '+' : ''}${formatNumericValue(STEP_SEQ.currentValue, 2)}`;
       meta.module.classList.toggle('active', true);
     })();
@@ -4050,7 +4377,7 @@ function refreshBackPanelState() {
   BACK_PANEL.audioModules.get('delay') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('delay');
-      module.subtitleEl.textContent = `${formatBackValue(getFxParamDef('delay', 'mix'), FX.delay.mix)} wet`;
+      module.subtitleEl.textContent = `${FX.delay.mode === 'pingpong' ? 'PINGPONG' : 'STEREO'} • ${formatBackValue(getFxParamDef('delay', 'mix'), FX.delay.mix)} wet`;
       module.el.classList.toggle('active', FX.delay.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('filter') &&
@@ -4107,17 +4434,19 @@ function refreshBackPanelState() {
 }
 
 function setPanelView(mode) {
-  UI_VIEW.mode = mode === 'back' ? 'back' : 'front';
-  getFrontWorkspace()?.classList.toggle('hidden-panel', UI_VIEW.mode !== 'front');
-  getBackPanel()?.classList.toggle('hidden-panel', UI_VIEW.mode !== 'back');
+  UI_VIEW.mode = mode;
+  getFrontWorkspace()?.classList.toggle('hidden-panel', mode !== 'front');
+  getBackPanel()?.classList.toggle('hidden-panel', mode !== 'back');
+  document.getElementById('visualPanel')?.classList.toggle('hidden-panel', mode !== 'visual');
   getViewToggle()
     ?.querySelectorAll('.view-btn')
-    .forEach((btn) => btn.classList.toggle('active', btn.dataset.view === UI_VIEW.mode));
-  if (UI_VIEW.mode === 'back') {
+    .forEach((btn) => btn.classList.toggle('active', btn.dataset.view === mode));
+  if (mode === 'back') {
     refreshBackPanelState();
     rebuildBackWireSVG();
     requestAnimationFrame(renderBackPanelConnections);
   }
+  if (mode === 'visual') startViz(); else stopViz();
 }
 
 function initViewToggle() {
@@ -4169,13 +4498,17 @@ function createFxSection(label, className = '') {
 function buildSequencerSection() {
   const { section, content } = createFxSection(STEP_SEQ.label, 'seq-section');
   const subdivisionRow = document.createElement('div');
-  subdivisionRow.className = 'fx-mode-row seq-subdivision-row';
+  subdivisionRow.className = 'fx-mode-row seq-setting-row seq-subdivision-row';
+  const subdivisionLabel = document.createElement('span');
+  subdivisionLabel.className = 'seq-row-label';
+  subdivisionLabel.textContent = 'Steps';
+  subdivisionRow.appendChild(subdivisionLabel);
   [
-    [4, '1/4'],
-    [5, '1/5'],
-    [8, '1/8'],
-    [12, '1/12'],
-    [16, '1/16'],
+    [4, '4'],
+    [5, '5'],
+    [8, '8'],
+    [12, '12'],
+    [16, '16'],
   ].forEach(([subdivision, label]) => {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -4188,6 +4521,26 @@ function buildSequencerSection() {
     subdivisionRow.appendChild(btn);
   });
   content.appendChild(subdivisionRow);
+
+  const stepBeatRow = document.createElement('div');
+  stepBeatRow.className = 'fx-mode-row seq-setting-row seq-step-beat-row';
+  const stepBeatLabel = document.createElement('span');
+  stepBeatLabel.className = 'seq-row-label';
+  stepBeatLabel.textContent = 'Beat/step';
+  stepBeatRow.appendChild(stepBeatLabel);
+  STEP_SEQ_STEP_BEAT_OPTIONS.forEach(({ label, beats }) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'fx-mode-btn';
+    btn.textContent = label;
+    btn.title = `${label} beat${beats === 1 ? '' : 's'} per step`;
+    btn.addEventListener('click', () => {
+      setSequencerStepBeats(beats);
+    });
+    seqStepBeatButtons.set(beats, btn);
+    stepBeatRow.appendChild(btn);
+  });
+  content.appendChild(stepBeatRow);
 
   const actionRow = document.createElement('div');
   actionRow.className = 'fx-mode-row seq-action-row';
@@ -4385,6 +4738,22 @@ function getReverbDampingCutoff() {
   return 900 + Math.pow(1 - clamp(FX.reverb.damping, 0, 1), 1.45) * 13500;
 }
 
+function applyDelayMode() {
+  if (!fx?.delay) return;
+  const isPingPong = FX.delay.mode === 'pingpong';
+  const normalGain = isPingPong ? 0 : 1;
+  const pingGain = isPingPong ? 1 : 0;
+
+  fx.delay.normalSend.gain.setValueAtTime(normalGain, audioCtx.currentTime);
+  fx.delay.normalFeedbackMode.gain.setValueAtTime(normalGain, audioCtx.currentTime);
+  fx.delay.normalWetMode.gain.setValueAtTime(normalGain, audioCtx.currentTime);
+
+  fx.delay.pingInputMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
+  fx.delay.pingLFeedbackMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
+  fx.delay.pingRFeedbackMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
+  fx.delay.pingWetMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
+}
+
 function applyFilterMode() {
   if (!fx?.filter?.biquad) return;
   fx.filter.biquad.type = FX.filter.mode;
@@ -4397,20 +4766,66 @@ function buildFxNodes() {
   const dlyIn = ac.createGain();
   const dlyDry = ac.createGain();
   const dlyWet = ac.createGain();
+  const dlyNormalSend = ac.createGain();
+  const dlyNormalFeedbackMode = ac.createGain();
+  const dlyNormalWetMode = ac.createGain();
   const dlyTap = ac.createDelay(MAX_DELAY_SECONDS);
   const dlyFb = ac.createGain();
   const dlyHpf = ac.createBiquadFilter();
   dlyHpf.type = 'highpass';
   dlyHpf.frequency.value = FX.delay.hp;
   dlyHpf.Q.value = 0.5;
+  const dlyPingSplit = ac.createChannelSplitter(2);
+  const dlyPingMonoIn = ac.createGain();
+  dlyPingMonoIn.channelCount = 1;
+  dlyPingMonoIn.channelCountMode = 'explicit';
+  const dlyPingInputMode = ac.createGain();
+  const dlyPingL = ac.createDelay(MAX_DELAY_SECONDS);
+  const dlyPingR = ac.createDelay(MAX_DELAY_SECONDS);
+  const dlyPingLFb = ac.createGain();
+  const dlyPingRFb = ac.createGain();
+  const dlyPingLFeedbackMode = ac.createGain();
+  const dlyPingRFeedbackMode = ac.createGain();
+  const dlyPingLHpf = ac.createBiquadFilter();
+  dlyPingLHpf.type = 'highpass';
+  dlyPingLHpf.frequency.value = FX.delay.hp;
+  dlyPingLHpf.Q.value = 0.5;
+  const dlyPingRHpf = ac.createBiquadFilter();
+  dlyPingRHpf.type = 'highpass';
+  dlyPingRHpf.frequency.value = FX.delay.hp;
+  dlyPingRHpf.Q.value = 0.5;
+  const dlyPingMerge = ac.createChannelMerger(2);
+  const dlyPingWetMode = ac.createGain();
   const dlyOut = ac.createGain();
 
   dlyIn.connect(dlyDry);
-  dlyIn.connect(dlyTap);
-  dlyTap.connect(dlyFb);
+  dlyIn.connect(dlyNormalSend);
+  dlyNormalSend.connect(dlyTap);
+  dlyTap.connect(dlyNormalFeedbackMode);
+  dlyNormalFeedbackMode.connect(dlyFb);
   dlyFb.connect(dlyHpf);
   dlyHpf.connect(dlyTap); // filtered feedback loop
-  dlyTap.connect(dlyWet);
+  dlyTap.connect(dlyNormalWetMode);
+  dlyNormalWetMode.connect(dlyWet);
+
+  dlyIn.connect(dlyPingSplit);
+  dlyPingSplit.connect(dlyPingMonoIn, 0);
+  dlyPingSplit.connect(dlyPingMonoIn, 1);
+  dlyPingMonoIn.connect(dlyPingInputMode);
+  dlyPingInputMode.connect(dlyPingL);
+  dlyPingL.connect(dlyPingMerge, 0, 0);
+  dlyPingL.connect(dlyPingLFeedbackMode);
+  dlyPingLFeedbackMode.connect(dlyPingLFb);
+  dlyPingLFb.connect(dlyPingLHpf);
+  dlyPingLHpf.connect(dlyPingR);
+  dlyPingR.connect(dlyPingMerge, 0, 1);
+  dlyPingR.connect(dlyPingRFeedbackMode);
+  dlyPingRFeedbackMode.connect(dlyPingRFb);
+  dlyPingRFb.connect(dlyPingRHpf);
+  dlyPingRHpf.connect(dlyPingL);
+  dlyPingMerge.connect(dlyPingWetMode);
+  dlyPingWetMode.connect(dlyWet);
+
   dlyDry.connect(dlyOut);
   dlyWet.connect(dlyOut);
 
@@ -4506,7 +4921,26 @@ function buildFxNodes() {
   fx = {
     input: dlyIn,
     output: masterOut,
-    delay: { tap: dlyTap, fb: dlyFb, hpf: dlyHpf, dry: dlyDry, wet: dlyWet },
+    delay: {
+      tap: dlyTap,
+      fb: dlyFb,
+      hpf: dlyHpf,
+      dry: dlyDry,
+      wet: dlyWet,
+      normalSend: dlyNormalSend,
+      normalFeedbackMode: dlyNormalFeedbackMode,
+      normalWetMode: dlyNormalWetMode,
+      pingInputMode: dlyPingInputMode,
+      pingL: dlyPingL,
+      pingR: dlyPingR,
+      pingLFb: dlyPingLFb,
+      pingRFb: dlyPingRFb,
+      pingLFeedbackMode: dlyPingLFeedbackMode,
+      pingRFeedbackMode: dlyPingRFeedbackMode,
+      pingLHpf: dlyPingLHpf,
+      pingRHpf: dlyPingRHpf,
+      pingWetMode: dlyPingWetMode,
+    },
     filter: { biquad: fltBiquad, dry: fltDry, wet: fltWet },
     bitreduce: { node: bitNode, dry: bitDry, wet: bitWet },
     sat: { shaper: satShaper, dry: satDry, wet: satWet },
@@ -4521,15 +4955,17 @@ function applyFx(id, key, val) {
   if (!fx) return;
   if (id === 'delay') {
     if (key === 'time')
-      fx.delay.tap.delayTime.setTargetAtTime(
-        clamp(val, 0, MAX_DELAY_SECONDS),
-        audioCtx.currentTime,
-        0.02,
+      [fx.delay.tap, fx.delay.pingL, fx.delay.pingR].forEach((tap) =>
+        tap.delayTime.setTargetAtTime(clamp(val, 0, MAX_DELAY_SECONDS), audioCtx.currentTime, 0.02),
       );
     if (key === 'feedback')
-      fx.delay.fb.gain.setTargetAtTime(Math.min(0.98, val), audioCtx.currentTime, 0.02);
+      [fx.delay.fb, fx.delay.pingLFb, fx.delay.pingRFb].forEach((gain) =>
+        gain.gain.setTargetAtTime(Math.min(0.98, val), audioCtx.currentTime, 0.02),
+      );
     if (key === 'hp')
-      fx.delay.hpf.frequency.setTargetAtTime(clamp(val, 20, 2000), audioCtx.currentTime, 0.02);
+      [fx.delay.hpf, fx.delay.pingLHpf, fx.delay.pingRHpf].forEach((filter) =>
+        filter.frequency.setTargetAtTime(clamp(val, 20, 2000), audioCtx.currentTime, 0.02),
+      );
     if (key === 'mix') {
       fx.delay.wet.gain.value = val;
       fx.delay.dry.gain.value = 1 - val;
@@ -4587,6 +5023,7 @@ function applyAllFx() {
   FX_DEFS.forEach(({ id, params }) =>
     params.forEach(({ key }) => applyFx(id, key, getBaseFxValue(id, key))),
   );
+  applyDelayMode();
   applyFilterMode();
   applyFxModulation();
 }
@@ -4643,7 +5080,11 @@ function capturePreset() {
       shape,
       depth,
     })),
-    seq: { steps: [...STEP_SEQ.steps], subdivision: STEP_SEQ.subdivision },
+    seq: {
+      steps: [...STEP_SEQ.steps],
+      subdivision: STEP_SEQ.subdivision,
+      stepBeats: STEP_SEQ.stepBeats,
+    },
     gen4: {
       stepCount: GEN4.stepCount,
       channels: GEN4.channels.map((ch) => ({
@@ -4707,9 +5148,13 @@ function applyPreset(preset) {
     refreshFilterUI();
     ['delay', 'filter', 'bitreduce', 'sat', 'reverb', 'limiter'].forEach((id) => {
       Object.entries(FX[id]).forEach(([key, value]) => {
-        if (key !== 'mode') fxControlBindings.get(`${id}:${key}`)?.setValue(value);
+        if (key === 'mode') return;
+        if (id === 'delay' && key === 'time') return;
+        fxControlBindings.get(`${id}:${key}`)?.setValue(value);
       });
     });
+    refreshDelayTimeUI();
+    refreshDelayModeUI();
   }
 
   if (preset.lfos) {
@@ -4729,11 +5174,18 @@ function applyPreset(preset) {
       if (typeof value === 'number') STEP_SEQ.steps[idx] = clamp(value, -1, 1);
     });
   }
+  const nextSeqSubdivision =
+    typeof preset.seq?.subdivision === 'number' ? preset.seq.subdivision : STEP_SEQ.subdivision;
   if (typeof preset.seq?.subdivision === 'number') setSequencerSubdivision(preset.seq.subdivision);
   else {
     STEP_SEQ.currentStep = Math.min(STEP_SEQ.currentStep, getSeqActiveStepCount() - 1);
     STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
     refreshSequencerUI();
+  }
+  if (typeof preset.seq?.stepBeats === 'number') {
+    setSequencerStepBeats(preset.seq.stepBeats);
+  } else if (preset.seq) {
+    setSequencerStepBeats(getLegacySequencerStepBeats(nextSeqSubdivision));
   }
 
   if (preset.gen4?.channels) {
@@ -4812,6 +5264,7 @@ function applyPreset(preset) {
   rebuildBackWireSVG();
   refreshLFOMappingUI();
   refreshDelayTimeUI();
+  refreshDelayModeUI();
   refreshLFOUI();
   sendParams(0);
   sendParams(1);
@@ -4902,6 +5355,29 @@ function buildFxUI() {
       content.appendChild(modeRow);
     }
 
+    if (def.id === 'delay') {
+      const modeRow = document.createElement('div');
+      modeRow.className = 'fx-mode-row';
+      [
+        ['stereo', 'Stereo'],
+        ['pingpong', 'PingPong'],
+      ].forEach(([mode, label]) => {
+        const btn = document.createElement('button');
+        btn.className = 'fx-mode-btn' + (FX.delay.mode === mode ? ' active' : '');
+        btn.type = 'button';
+        btn.textContent = label;
+        btn.addEventListener('click', () => {
+          FX.delay.mode = mode;
+          applyDelayMode();
+          refreshDelayModeUI();
+          refreshBackPanelState();
+        });
+        delayModeButtons.set(mode, btn);
+        modeRow.appendChild(btn);
+      });
+      content.appendChild(modeRow);
+    }
+
     def.params.forEach((p) => {
       const isMappable = !!getFxParamBounds(def.id, p.key);
       const control = makeControlRow(
@@ -4948,6 +5424,7 @@ function buildFxUI() {
   });
 
   refreshDelayTimeUI();
+  refreshDelayModeUI();
 }
 
 async function start() {
@@ -5199,6 +5676,7 @@ setSourceDurationSec(1, LIVE_SOURCE_SECONDS);
 buildFxUI();
 buildPresetUI();
 buildBackPanel();
+buildVisualPanel();
 refreshInputDevices();
 initTempoDrag();
 initViewToggle();

@@ -362,6 +362,20 @@ button.primary:hover {
     linear-gradient(180deg, #0b120d 0%, #09100b 100%);
 }
 
+.visual-panel {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background: #0a0a0c;
+}
+
+.viz-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .back-board {
   position: relative;
   min-height: 100%;
@@ -1445,6 +1459,19 @@ button.primary:hover {
 
 .seq-subdivision-row {
   padding-bottom: 4px;
+}
+
+.seq-setting-row {
+  align-items: center;
+}
+
+.seq-row-label {
+  flex: 0 0 52px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .seq-action-row {
