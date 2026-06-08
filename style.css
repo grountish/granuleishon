@@ -1,21 +1,31 @@
 :root {
-  --bg:          #1c1c1c;
-  --surface:     #242424;
-  --surface-2:   #2c2c2c;
-  --border:      #3a3a3a;
-  --text:        #c8c8c8;
-  --muted:       #5a5a5a;
-  --accent-0:    #3cb870;
-  --accent-0-dim:#2d9458;
-  --accent-1:    #8b6ed4;
-  --accent-1-dim:#6e52b0;
-  --accent-fx:   #d4892a;
-  --accent-fx-dim:#ae6e1c;
+  --bg: #1c1c1c;
+  --surface: #242424;
+  --surface-2: #2c2c2c;
+  --border: #3a3a3a;
+  --text: #c8c8c8;
+  --muted: #5a5a5a;
+  --accent-0: #3cb870;
+  --accent-0-dim: #2d9458;
+  --accent-1: #8b6ed4;
+  --accent-1-dim: #6e52b0;
+  --accent-fx: #d4892a;
+  --accent-fx-dim: #ae6e1c;
 }
 
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
 
-html, body { height: 100%; overflow: hidden; }
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
 
 body {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -218,7 +228,10 @@ button:hover:not(:disabled) {
   background: #343434;
 }
 
-button:disabled { opacity: 0.3; cursor: not-allowed; }
+button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
 
 button.primary {
   background: var(--accent-0);
@@ -227,7 +240,10 @@ button.primary {
   font-weight: 700;
 }
 
-button.primary:hover { background: var(--accent-0-dim); border-color: var(--accent-0-dim); }
+button.primary:hover {
+  background: var(--accent-0-dim);
+  border-color: var(--accent-0-dim);
+}
 
 .transport-stop-btn {
   font-size: 9px;
@@ -310,9 +326,18 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   overflow-y: auto;
 }
 
-#generators::-webkit-scrollbar { width: 4px; }
-#generators::-webkit-scrollbar-track { background: transparent; }
-#generators::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+#generators::-webkit-scrollbar {
+  width: 4px;
+}
+
+#generators::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#generators::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
 
 #fx-chain {
   flex: 1;
@@ -323,7 +348,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   overflow-y: auto;
   background: var(--bg);
   /* FX column uses amber accent throughout */
-  --gen-accent:     var(--accent-fx);
+  --gen-accent: var(--accent-fx);
   --gen-accent-dim: var(--accent-fx-dim);
 }
 
@@ -354,7 +379,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
     0 28px 54px rgba(0, 0, 0, 0.38);
 }
 
-.back-board > * {
+.back-board>* {
   position: relative;
   z-index: 2;
 }
@@ -419,10 +444,25 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
     0 0 0 1px rgba(0, 0, 0, 0.26);
 }
 
-.back-mount-hole.hole-1 { top: 14px; left: 14px; }
-.back-mount-hole.hole-2 { top: 14px; right: 14px; }
-.back-mount-hole.hole-3 { bottom: 14px; left: 14px; }
-.back-mount-hole.hole-4 { bottom: 14px; right: 14px; }
+.back-mount-hole.hole-1 {
+  top: 14px;
+  left: 14px;
+}
+
+.back-mount-hole.hole-2 {
+  top: 14px;
+  right: 14px;
+}
+
+.back-mount-hole.hole-3 {
+  bottom: 14px;
+  left: 14px;
+}
+
+.back-mount-hole.hole-4 {
+  bottom: 14px;
+  right: 14px;
+}
 
 .back-audio-strip {
   position: relative;
@@ -546,8 +586,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   stroke-width: 4.6;
   opacity: var(--route-opacity, 0.52);
   filter:
-    drop-shadow(0 1px 1px rgba(0, 0, 0, 0.82))
-    drop-shadow(0 0 9px color-mix(in srgb, var(--route-color, #7aacdc) 55%, transparent));
+    drop-shadow(0 1px 1px rgba(0, 0, 0, 0.82)) drop-shadow(0 0 9px color-mix(in srgb, var(--route-color, #7aacdc) 55%, transparent));
 }
 
 .back-wire-shadow {
@@ -569,23 +608,69 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   filter: blur(4px);
 }
 
-.back-wire.src-0 { --route-color: #56d6f5; stroke: #56d6f5; }
-.back-wire.src-1 { --route-color: #7ad860; stroke: #7ad860; }
-.back-wire.src-2 { --route-color: #f05a4f; stroke: #f05a4f; }
-.back-wire.src-3 { --route-color: #f050a0; stroke: #f050a0; }
-.back-wire-glow.src-0 { --route-color: #56d6f5; stroke: color-mix(in srgb, #56d6f5 92%, white); }
-.back-wire-glow.src-1 { --route-color: #7ad860; stroke: color-mix(in srgb, #7ad860 90%, white); }
-.back-wire-glow.src-2 { --route-color: #f05a4f; stroke: color-mix(in srgb, #f05a4f 90%, white); }
-.back-wire-glow.src-3 { --route-color: #f050a0; stroke: color-mix(in srgb, #f050a0 90%, white); }
+.back-wire.src-0 {
+  --route-color: #56d6f5;
+  stroke: #56d6f5;
+}
+
+.back-wire.src-1 {
+  --route-color: #7ad860;
+  stroke: #7ad860;
+}
+
+.back-wire.src-2 {
+  --route-color: #f05a4f;
+  stroke: #f05a4f;
+}
+
+.back-wire.src-3 {
+  --route-color: #f050a0;
+  stroke: #f050a0;
+}
+
+.back-wire-glow.src-0 {
+  --route-color: #56d6f5;
+  stroke: color-mix(in srgb, #56d6f5 92%, white);
+}
+
+.back-wire-glow.src-1 {
+  --route-color: #7ad860;
+  stroke: color-mix(in srgb, #7ad860 90%, white);
+}
+
+.back-wire-glow.src-2 {
+  --route-color: #f05a4f;
+  stroke: color-mix(in srgb, #f05a4f 90%, white);
+}
+
+.back-wire-glow.src-3 {
+  --route-color: #f050a0;
+  stroke: color-mix(in srgb, #f050a0 90%, white);
+}
 
 .back-wire-plug {
   stroke-width: 2.2;
 }
 
-.back-wire-plug.src-0 { fill: color-mix(in srgb, #56d6f5 82%, black); stroke: #262b2c; }
-.back-wire-plug.src-1 { fill: color-mix(in srgb, #7ad860 82%, black); stroke: #262b2c; }
-.back-wire-plug.src-2 { fill: color-mix(in srgb, #f05a4f 82%, black); stroke: #262b2c; }
-.back-wire-plug.src-3 { fill: color-mix(in srgb, #f050a0 82%, black); stroke: #262b2c; }
+.back-wire-plug.src-0 {
+  fill: color-mix(in srgb, #56d6f5 82%, black);
+  stroke: #262b2c;
+}
+
+.back-wire-plug.src-1 {
+  fill: color-mix(in srgb, #7ad860 82%, black);
+  stroke: #262b2c;
+}
+
+.back-wire-plug.src-2 {
+  fill: color-mix(in srgb, #f05a4f 82%, black);
+  stroke: #262b2c;
+}
+
+.back-wire-plug.src-3 {
+  fill: color-mix(in srgb, #f050a0 82%, black);
+  stroke: #262b2c;
+}
 
 .back-wire-plug-core {
   fill: rgba(8, 10, 11, 0.92);
@@ -600,9 +685,9 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
     repeating-linear-gradient(180deg, rgba(176, 144, 82, 0.88) 0 3px, transparent 3px 10px) right 4px top 14px / 6px calc(100% - 28px) no-repeat,
     linear-gradient(180deg, rgba(26, 31, 28, 0.98) 0%, rgba(13, 15, 14, 0.99) 100%);
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.04),
-    inset 0 -14px 20px rgba(0,0,0,0.22),
-    0 10px 24px rgba(0,0,0,0.24);
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    inset 0 -14px 20px rgba(0, 0, 0, 0.22),
+    0 10px 24px rgba(0, 0, 0, 0.24);
 }
 
 .back-module::after {
@@ -655,10 +740,10 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 .back-audio-module.active {
   border-color: #617f6b;
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.05),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
     0 0 0 1px rgba(98, 143, 100, 0.14),
     0 0 12px rgba(87, 124, 88, 0.08),
-    0 10px 26px rgba(0,0,0,0.24);
+    0 10px 26px rgba(0, 0, 0, 0.24);
 }
 
 .back-source-module {
@@ -668,7 +753,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 .back-source-module.mapped {
   border-color: #7a936f;
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.05),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
     0 0 0 1px rgba(122, 147, 111, 0.18),
     0 0 18px rgba(122, 147, 111, 0.14);
 }
@@ -676,7 +761,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 .back-source-module.selected {
   border-color: #d8e2d4;
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
     0 0 0 1px rgba(216, 226, 212, 0.24),
     0 0 20px rgba(216, 226, 212, 0.14);
 }
@@ -709,7 +794,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   right: 0;
   top: 50%;
   height: 1px;
-  background: rgba(255,255,255,0.08);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .back-source-fill {
@@ -718,7 +803,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   right: 0;
   bottom: 50%;
   height: calc(50% * var(--source-level, 0));
-  background: linear-gradient(180deg, rgba(255,255,255,0.28), var(--source-color, #7aacdc));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.28), var(--source-color, #7aacdc));
   box-shadow: 0 0 10px color-mix(in srgb, var(--source-color, #7aacdc) 55%, transparent);
 }
 
@@ -730,18 +815,33 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 .back-source-fill.unipolar {
   bottom: 0;
   height: calc(100% * var(--source-level, 0));
-  background: linear-gradient(0deg, var(--source-color, #ef4444) 0%, rgba(255,255,255,0.28) 100%);
+  background: linear-gradient(0deg, var(--source-color, #ef4444) 0%, rgba(255, 255, 255, 0.28) 100%);
 }
 
-.back-source-fill.src-0 { --source-color: #7aacdc; }
-.back-source-fill.src-1 { --source-color: #6ed4a0; }
-.back-source-fill.src-2 { --source-color: #e0a45a; }
-.back-source-fill.src-3 { --source-color: #d05858; }
-.back-source-fill.src-limiter { --source-color: #ef4444; }
+.back-source-fill.src-0 {
+  --source-color: #7aacdc;
+}
+
+.back-source-fill.src-1 {
+  --source-color: #6ed4a0;
+}
+
+.back-source-fill.src-2 {
+  --source-color: #e0a45a;
+}
+
+.back-source-fill.src-3 {
+  --source-color: #d05858;
+}
+
+.back-source-fill.src-limiter {
+  --source-color: #ef4444;
+}
 
 .back-sc-slider-row {
   padding: 2px 0 6px;
 }
+
 .back-sc-slider {
   width: 100%;
   height: 2px;
@@ -752,6 +852,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   cursor: pointer;
   accent-color: #d05858;
 }
+
 .back-sc-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 8px;
@@ -805,11 +906,11 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   margin-right: -6px;
   padding: 3px 6px;
   border-radius: 3px;
-  background: linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0));
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0));
 }
 
 .back-param-row.patch-ready:not(.mapped) {
-  background: linear-gradient(90deg, rgba(255,255,255,0.035), rgba(255,255,255,0));
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0));
 }
 
 .back-param-row.mapped::after {
@@ -829,10 +930,21 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   color: #d7e0d6;
 }
 
-.back-param-row.src-0 { --row-accent: rgba(86, 214, 245, 0.92); }
-.back-param-row.src-1 { --row-accent: rgba(122, 216, 96, 0.92); }
-.back-param-row.src-2 { --row-accent: rgba(240, 90, 79, 0.92); }
-.back-param-row.src-3 { --row-accent: rgba(240, 80, 160, 0.92); }
+.back-param-row.src-0 {
+  --row-accent: rgba(86, 214, 245, 0.92);
+}
+
+.back-param-row.src-1 {
+  --row-accent: rgba(122, 216, 96, 0.92);
+}
+
+.back-param-row.src-2 {
+  --row-accent: rgba(240, 90, 79, 0.92);
+}
+
+.back-param-row.src-3 {
+  --row-accent: rgba(240, 80, 160, 0.92);
+}
 
 .back-param-label {
   font-size: 8px;
@@ -856,12 +968,12 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   border-radius: 50%;
   border: 2px solid #a48a58;
   background:
-    radial-gradient(circle at 35% 35%, rgba(255,255,255,0.35), rgba(255,255,255,0) 42%),
+    radial-gradient(circle at 35% 35%, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0) 42%),
     radial-gradient(circle, rgba(8, 12, 9, 0.96) 0 34%, transparent 34%),
     #2a322b;
   box-shadow:
-    inset 0 0 0 1px rgba(0,0,0,0.24),
-    0 0 0 1px rgba(0,0,0,0.18);
+    inset 0 0 0 1px rgba(0, 0, 0, 0.24),
+    0 0 0 1px rgba(0, 0, 0, 0.18);
   cursor: pointer;
 }
 
@@ -873,8 +985,8 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 .back-source-module.selected .patch-jack.source {
   transform: scale(1.08);
   box-shadow:
-    0 0 0 1px rgba(255,255,255,0.18),
-    0 0 12px rgba(255,255,255,0.14);
+    0 0 0 1px rgba(255, 255, 255, 0.18),
+    0 0 12px rgba(255, 255, 255, 0.14);
 }
 
 /* ── Per-generator waveform canvas ──────────────────────────── */
@@ -908,7 +1020,9 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   background: var(--bg);
 }
 
-.generator + .generator { border-top: 1px solid var(--border); }
+.generator+.generator {
+  border-top: 1px solid var(--border);
+}
 
 .gen-header-actions {
   display: flex;
@@ -959,8 +1073,17 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   opacity: 1;
 }
 
-.gen-0 { --gen-accent: var(--accent-0); --gen-accent-dim: var(--accent-0-dim); height: 300px; }
-.gen-1 { --gen-accent: var(--accent-1); --gen-accent-dim: var(--accent-1-dim); height: 300px; }
+.gen-0 {
+  --gen-accent: var(--accent-0);
+  --gen-accent-dim: var(--accent-0-dim);
+  height: 300px;
+}
+
+.gen-1 {
+  --gen-accent: var(--accent-1);
+  --gen-accent-dim: var(--accent-1-dim);
+  height: 300px;
+}
 
 /* ── Column headers (shared by generators and FX) ────────────── */
 
@@ -1019,7 +1142,9 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 
 /* ── Control rows (FX / shared base) ────────────────────────── */
 
-.fx-section { flex-shrink: 0; }
+.fx-section {
+  flex-shrink: 0;
+}
 
 .control {
   display: flex;
@@ -1029,7 +1154,9 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   gap: 8px;
 }
 
-.control:hover { background: var(--surface-2); }
+.control:hover {
+  background: var(--surface-2);
+}
 
 .control label {
   font-size: 9px;
@@ -1068,13 +1195,16 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: auto;      /* overrides base .control { height: 26px } */
+  height: auto;
+  /* overrides base .control { height: 26px } */
   padding: 12px 4px;
   gap: 5px;
   border-right: 1px solid #1e1e1e;
 }
 
-.generator .control:last-child { border-right: none; }
+.generator .control:last-child {
+  border-right: none;
+}
 
 .generator .control label {
   width: auto;
@@ -1126,7 +1256,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 #fx-chain .knob {
   width: 28px;
   height: 28px;
-  margin-bottom:2px;
+  margin-bottom: 2px;
   transform: translateY(2px);
   transform-origin: center;
 }
@@ -1143,16 +1273,46 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   -webkit-user-select: none;
 }
 
-.knob-track  { stroke: #2e2e2e; }
-.knob-value  { stroke: var(--gen-accent); }
-.knob-mod-value { stroke: var(--gen-accent); opacity: 0.42; }
-.knob-dot    { fill: var(--gen-accent); }
-.knob-mod-dot { fill: var(--gen-accent); opacity: 0; }
-.knob-body   { fill: #1e1e1e; stroke: #383838; stroke-width: 1; }
+.knob-track {
+  stroke: #2e2e2e;
+}
 
-.knob:hover .knob-body    { fill: #252525; }
-.knob--drag               { cursor: grabbing; opacity: 0.9; }
-.knob--drag .knob-body    { fill: #2a2a2a; }
+.knob-value {
+  stroke: var(--gen-accent);
+}
+
+.knob-mod-value {
+  stroke: var(--gen-accent);
+  opacity: 0.42;
+}
+
+.knob-dot {
+  fill: var(--gen-accent);
+}
+
+.knob-mod-dot {
+  fill: var(--gen-accent);
+  opacity: 0;
+}
+
+.knob-body {
+  fill: #1e1e1e;
+  stroke: #383838;
+  stroke-width: 1;
+}
+
+.knob:hover .knob-body {
+  fill: #252525;
+}
+
+.knob--drag {
+  cursor: grabbing;
+  opacity: 0.9;
+}
+
+.knob--drag .knob-body {
+  fill: #2a2a2a;
+}
 
 /* ── LFO LED (on generator knobs) ───────────────────────────── */
 
@@ -1174,9 +1334,11 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   transition: background 0.1s, border-color 0.1s, box-shadow 0.1s;
 }
 
-.lfo-led:hover   { border-color: var(--gen-accent); }
+.lfo-led:hover {
+  border-color: var(--gen-accent);
+}
 
-.lfo-led.active  {
+.lfo-led.active {
   box-shadow: 0 0 5px var(--lfo-led-glow, var(--gen-accent));
 }
 
@@ -1202,14 +1364,16 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 /* ── LFO section (in FX column) ─────────────────────────────── */
 
 .lfo-section {
-  --gen-accent:     #7aacdc;
+  --gen-accent: #7aacdc;
   --gen-accent-dim: #5590c0;
 }
 
-.lfo-section > .fx-section-label { color: var(--gen-accent); }
+.lfo-section>.fx-section-label {
+  color: var(--gen-accent);
+}
 
 .lfo-section-2 {
-  --gen-accent:     #6ed4a0;
+  --gen-accent: #6ed4a0;
   --gen-accent-dim: #48ab79;
 }
 
@@ -1259,15 +1423,23 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   transition: background 0.1s, color 0.1s, border-color 0.1s;
 }
 
-.lfo-shape:hover      { border-color: #7aacdc; color: var(--text); }
-.lfo-shape.active     { background: #7aacdc; border-color: #7aacdc; color: #0a1822; }
+.lfo-shape:hover {
+  border-color: #7aacdc;
+  color: var(--text);
+}
+
+.lfo-shape.active {
+  background: #7aacdc;
+  border-color: #7aacdc;
+  color: #0a1822;
+}
 
 .seq-section {
-  --gen-accent:     #e0a45a;
+  --gen-accent: #e0a45a;
   --gen-accent-dim: #bf8040;
 }
 
-.seq-section > .fx-section-label {
+.seq-section>.fx-section-label {
   color: var(--gen-accent);
 }
 
@@ -1306,7 +1478,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   right: 0;
   top: 50%;
   height: 1px;
-  background: rgba(255,255,255,0.08);
+  background: rgba(255, 255, 255, 0.08);
   transform: translateY(-0.5px);
 }
 
@@ -1344,7 +1516,9 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 
 /* ── FX sections ─────────────────────────────────────────────── */
 
-.fx-section { border-bottom: 1px solid var(--border); }
+.fx-section {
+  border-bottom: 1px solid var(--border);
+}
 
 .fx-section-label {
   height: 22px;
@@ -1389,7 +1563,7 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 /* ── Gen 3 Oscillator ────────────────────────────────────────── */
 
 .gen-3 {
-  --gen-accent:     #40b8d0;
+  --gen-accent: #40b8d0;
   --gen-accent-dim: #2d8fa0;
   height: 360px;
 }
@@ -1448,10 +1622,23 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   transition: background 0.08s, border-color 0.08s, color 0.08s;
 }
 
-.piano-row:nth-child(odd) .piano-cell.white-key  { background: #55615f; }
-.piano-row:nth-child(even) .piano-cell.white-key { background: #4d5857; }
-.piano-cell.black-key { background: #202928; border-color: #1a2322; color: #7b8784; }
-.piano-row:nth-child(even) .piano-cell.black-key { background: #252e2d; }
+.piano-row:nth-child(odd) .piano-cell.white-key {
+  background: #55615f;
+}
+
+.piano-row:nth-child(even) .piano-cell.white-key {
+  background: #4d5857;
+}
+
+.piano-cell.black-key {
+  background: #202928;
+  border-color: #1a2322;
+  color: #7b8784;
+}
+
+.piano-row:nth-child(even) .piano-cell.black-key {
+  background: #252e2d;
+}
 
 .piano-cell:hover {
   border-color: #6a7976;
@@ -1459,7 +1646,9 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   color: #d8e1df;
 }
 
-.piano-cell.black-key:hover { background: #313c3a; }
+.piano-cell.black-key:hover {
+  background: #313c3a;
+}
 
 .piano-cell.locked {
   background: rgba(64, 184, 208, 0.22) !important;
@@ -1492,8 +1681,16 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   transition: background 0.1s, color 0.1s, border-color 0.1s;
 }
 
-.osc-shape:hover  { border-color: #40b8d0; color: var(--text); }
-.osc-shape.active { background: #40b8d0; border-color: #40b8d0; color: #061820; }
+.osc-shape:hover {
+  border-color: #40b8d0;
+  color: var(--text);
+}
+
+.osc-shape.active {
+  background: #40b8d0;
+  border-color: #40b8d0;
+  color: #061820;
+}
 
 .osc-sus-btn {
   font-size: 8px;
@@ -1507,13 +1704,21 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   margin-left: 4px;
 }
 
-.osc-sus-btn:hover { border-color: #5a5a5a; color: var(--text); }
-.osc-sus-btn.active { background: #1a3028; border-color: #3a7050; color: #6ec8a0; }
+.osc-sus-btn:hover {
+  border-color: #5a5a5a;
+  color: var(--text);
+}
+
+.osc-sus-btn.active {
+  background: #1a3028;
+  border-color: #3a7050;
+  color: #6ec8a0;
+}
 
 /* ── Gen 4: Glitch Drums ─────────────────────────────────────── */
 
 .gen-4 {
-  --gen-accent:     #d05858;
+  --gen-accent: #d05858;
   --gen-accent-dim: #a84444;
 }
 
@@ -1521,30 +1726,35 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 3px 10px;
-  font-size: 8px;
+  padding: 4px 10px;
+  font-size: 9px;
   color: var(--muted);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   flex-wrap: wrap;
 }
+
 .drum-hint {
   display: flex;
   align-items: center;
   gap: 3px;
   white-space: nowrap;
 }
+
 .drum-hint-key {
   background: #252525;
   border: 1px solid #383838;
   border-radius: 2px;
-  padding: 1px 4px;
-  font-size: 8px;
+  padding: 1px 5px;
+  font-size: 9px;
   color: #888;
   font-family: monospace;
   line-height: 1.4;
 }
-.drum-hints-sep { color: #333; }
+
+.drum-hints-sep {
+  color: #333;
+}
 
 .drum-grid {
   flex-shrink: 0;
@@ -1557,10 +1767,18 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 }
 
 .drum-row {
+  display: grid;
+  grid-template-columns: 38px auto 1fr;
+  align-items: center;
+  column-gap: 6px;
+  height: 26px;
+}
+
+.drum-row-actions {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 26px;
+  justify-self: end;
 }
 
 .drum-row-label {
@@ -1576,10 +1794,9 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 
 .drum-steps {
   display: grid;
-  grid-template-columns: repeat(var(--step-count, 16), minmax(0, 1fr));
+  grid-template-columns: repeat(var(--step-count, 16), 26px);
   gap: 3px;
-  flex: 1;
-  min-width: 0;
+  flex-shrink: 0;
   height: 100%;
 }
 
@@ -1681,11 +1898,6 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
   transition: width 0.1s;
 }
 
-.drum-fx-spacer {
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-}
 
 .drum-fx-btn {
   flex-shrink: 0;
@@ -1762,6 +1974,5 @@ button.primary:hover { background: var(--accent-0-dim); border-color: var(--acce
 }
 
 .drum-step.step-inactive {
-  opacity: 0.22;
-  pointer-events: none;
+  display: none;
 }

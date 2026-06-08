@@ -2808,6 +2808,7 @@ function buildDrumPanel() {
       probEl.hidden = true;
       btn.appendChild(probEl);
 
+      if (si >= GEN4.stepCount) btn.classList.add('step-inactive');
       gen4ApplyStepBtn(ci, si);
 
       btn.addEventListener('click', (e) => {
@@ -2852,7 +2853,8 @@ function buildDrumPanel() {
       muteBtn.classList.toggle('muted', ch.muted);
     });
 
-    const rowControls = [stepsEl];
+    const actions = document.createElement('div');
+    actions.className = 'drum-row-actions';
     if (def.id !== 'osc') {
       const fxBtn = document.createElement('button');
       fxBtn.type = 'button';
@@ -2862,15 +2864,11 @@ function buildDrumPanel() {
       fxBtn.title = 'Send to FX chain — click to bypass to limiter only';
       gen4FxSendBtns[ci] = fxBtn;
       fxBtn.addEventListener('click', () => gen4SetChannelFxSend(ci, !ch.fxSend));
-      rowControls.push(fxBtn);
-    } else {
-      const spacer = document.createElement('div');
-      spacer.className = 'drum-fx-spacer';
-      rowControls.push(spacer);
+      actions.appendChild(fxBtn);
     }
-    rowControls.push(muteBtn);
+    actions.appendChild(muteBtn);
 
-    row.append(lbl, ...rowControls);
+    row.append(lbl, stepsEl, actions);
     grid.appendChild(row);
   });
 
@@ -2908,6 +2906,7 @@ function buildDrumPanel() {
   });
 
   panel.appendChild(paramsWrap);
+  gen4RefreshStepDisplay();
   return panel;
 }
 
