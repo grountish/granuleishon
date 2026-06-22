@@ -926,6 +926,8 @@ const filterModeButtons = new Map();
 let delaySyncModeControl = null;
 let beatRepeatSyncModeControl = null;
 let beatRepeatGridSyncModeControl = null;
+const fxSectionEls = new Map(); // effect id → its draggable section element
+let fxLimiterSection = null; // the pinned (non-draggable) limiter section
 const delayModeButtons = new Map();
 const genSourceModeButtons = [new Map(), new Map()];
 const POSITION_PARAM = PARAMS.find((p) => p.key === 'positionSec');
@@ -3401,6 +3403,11 @@ const FX = {
   limiter: { threshold: -8, attack: 0.003, release: 0.12, ratio: 20, knee: 0, output: 0.96 },
 };
 
+// Order of the reorderable effects between the input bus and the pinned
+// limiter. Mutated by drag-to-reorder; persisted in presets.
+const DEFAULT_FX_ORDER = ['beatrepeat', 'delay', 'filter', 'bitreduce', 'sat', 'reverb'];
+let FX_ORDER = [...DEFAULT_FX_ORDER];
+
 let fx = null; // audio nodes, created in start(), nulled in stop()
 
 // ─── LFO ───────────────────────────────────────────────────────────────────
@@ -4925,7 +4932,11 @@ function applyFilterMode() {
 function buildFxNodes() {
   const ac = audioCtx;
 
-  // ─ Beat repeat (head of chain) ─
+  // Stable entry bus: generators/drums connect here once; the effect order
+  // between here and the limiter is rewired live by reconnectFxChain().
+  const chainIn = ac.createGain();
+
+  // ─ Beat repeat ─
   const brIn = ac.createGain();
   const brDry = ac.createGain();
   const brWet = ac.createGain();
@@ -5098,19 +5109,14 @@ function buildFxNodes() {
   const masterOut = ac.createGain();
   masterOut.gain.setValueAtTime(FX.limiter.output, ac.currentTime);
 
-  // ─ Chain: granulator → beat repeat → delay → filter → bit reduce → saturation → reverb → limiter ─
-  brOut.connect(dlyIn);
-  dlyOut.connect(fltIn);
-  fltOut.connect(bitIn);
-  bitOut.connect(satIn);
-  satOut.connect(rvbIn);
-  rvbOut.connect(limiter);
+  // The limiter is pinned at the tail of the chain; the reorderable effects
+  // between chainIn and the limiter are wired by reconnectFxChain() below.
   limiter.connect(masterOut);
 
   fx = {
-    input: brIn,
+    input: chainIn,
     output: masterOut,
-    beatrepeat: { node: brNode, dry: brDry, wet: brWet },
+    beatrepeat: { node: brNode, dry: brDry, wet: brWet, in: brIn, out: brOut },
     delay: {
       tap: dlyTap,
       fb: dlyFb,
@@ -5130,15 +5136,44 @@ function buildFxNodes() {
       pingLHpf: dlyPingLHpf,
       pingRHpf: dlyPingRHpf,
       pingWetMode: dlyPingWetMode,
+      in: dlyIn,
+      out: dlyOut,
     },
-    filter: { biquad: fltBiquad, dry: fltDry, wet: fltWet },
-    bitreduce: { node: bitNode, dry: bitDry, wet: bitWet },
-    sat: { shaper: satShaper, dry: satDry, wet: satWet },
-    reverb: { pre: rvbPre, hp: rvbHP, damp: rvbDamp, conv: rvbConv, dry: rvbDry, wet: rvbWet },
+    filter: { biquad: fltBiquad, dry: fltDry, wet: fltWet, in: fltIn, out: fltOut },
+    bitreduce: { node: bitNode, dry: bitDry, wet: bitWet, in: bitIn, out: bitOut },
+    sat: { shaper: satShaper, dry: satDry, wet: satWet, in: satIn, out: satOut },
+    reverb: {
+      pre: rvbPre,
+      hp: rvbHP,
+      damp: rvbDamp,
+      conv: rvbConv,
+      dry: rvbDry,
+      wet: rvbWet,
+      in: rvbIn,
+      out: rvbOut,
+    },
     limiter: { comp: limiter, output: masterOut },
   };
 
+  reconnectFxChain();
   applyAllFx();
+}
+
+// Rewire the reorderable effects between the input bus and the pinned limiter
+// to match FX_ORDER. Safe to call live — each effect is a self-contained
+// in→out pair, so we fully disconnect the movable links and rebuild them.
+function reconnectFxChain() {
+  if (!fx) return;
+  fx.input.disconnect();
+  FX_ORDER.forEach((id) => fx[id]?.out.disconnect());
+  let prev = fx.input;
+  FX_ORDER.forEach((id) => {
+    const eff = fx[id];
+    if (!eff) return;
+    prev.connect(eff.in);
+    prev = eff.out;
+  });
+  prev.connect(fx.limiter.comp);
 }
 
 function applyFx(id, key, val) {
@@ -5275,6 +5310,7 @@ function capturePreset() {
       lockedMidis: [...GEN3.lockedMidis],
     },
     fx: JSON.parse(JSON.stringify(FX)),
+    fxOrder: [...FX_ORDER],
     lfos: LFOS.map(({ label, rate, sync, syncIndex, shape, depth }) => ({
       label,
       rate,
@@ -5371,6 +5407,8 @@ function applyPreset(preset) {
     refreshBeatRepeatIntervalUI();
     refreshBeatRepeatGridUI();
   }
+
+  if (preset.fxOrder) setFxOrder(preset.fxOrder);
 
   if (preset.lfos) {
     preset.lfos.forEach((saved, idx) => {
@@ -5545,8 +5583,12 @@ function buildFxUI() {
   LFOS.forEach((_, lfoIdx) => container.appendChild(buildLFOSection(lfoIdx)));
   container.appendChild(buildSequencerSection());
 
-  // One section per effect, stacked vertically
-  FX_DEFS.forEach((def) => {
+  // One section per effect — reorderable effects in FX_ORDER, then the
+  // master limiter pinned at the tail.
+  const fxDefById = new Map(FX_DEFS.map((def) => [def.id, def]));
+  [...FX_ORDER, 'limiter'].forEach((fxId) => {
+    const def = fxDefById.get(fxId);
+    if (!def) return;
     const { section, content } = createFxSection(def.label);
 
     if (def.id === 'filter') {
@@ -5681,13 +5723,119 @@ function buildFxUI() {
       }
     });
 
+    if (def.id === 'limiter') {
+      fxLimiterSection = section;
+    } else {
+      section.classList.add('fx-reorderable');
+      section.dataset.fxId = def.id;
+      enableFxSectionDrag(section, def.label);
+      fxSectionEls.set(def.id, section);
+    }
     container.appendChild(section);
   });
+
+  initFxReorderDnD(container);
 
   refreshDelayTimeUI();
   refreshDelayModeUI();
   refreshBeatRepeatIntervalUI();
   refreshBeatRepeatGridUI();
+}
+
+// ─── FX reordering (drag & drop) ─────────────────────────────────────────────
+
+function enableFxSectionDrag(section, label) {
+  const header = section.querySelector('.fx-section-label');
+  if (header) {
+    const handle = document.createElement('span');
+    handle.className = 'fx-drag-handle';
+    handle.textContent = '⠿';
+    handle.title = `Drag to reorder ${label}`;
+    // Arm dragging only when grabbing the handle, so sliders/collapse still work.
+    handle.addEventListener('mousedown', () => {
+      section.draggable = true;
+    });
+    handle.addEventListener('click', (e) => e.stopPropagation());
+    header.prepend(handle);
+  }
+  section.addEventListener('dragstart', (e) => {
+    section.classList.add('dragging');
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      try {
+        e.dataTransfer.setData('text/plain', section.dataset.fxId || '');
+      } catch (_) {}
+    }
+  });
+  section.addEventListener('dragend', () => {
+    section.classList.remove('dragging');
+    section.draggable = false;
+    commitFxOrderFromDom();
+  });
+}
+
+function getFxDragAfterElement(container, y) {
+  const els = [...container.querySelectorAll('.fx-section.fx-reorderable:not(.dragging)')];
+  let closest = { offset: -Infinity, element: null };
+  els.forEach((child) => {
+    const box = child.getBoundingClientRect();
+    const offset = y - box.top - box.height / 2;
+    if (offset < 0 && offset > closest.offset) closest = { offset, element: child };
+  });
+  return closest.element;
+}
+
+function initFxReorderDnD(container) {
+  container.addEventListener('dragover', (e) => {
+    const dragging = container.querySelector('.fx-section.dragging');
+    if (!dragging) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    const after = getFxDragAfterElement(container, e.clientY);
+    if (after == null) {
+      // Past the last reorderable effect — drop just above the pinned limiter.
+      if (fxLimiterSection) container.insertBefore(dragging, fxLimiterSection);
+    } else if (after !== dragging) {
+      container.insertBefore(dragging, after);
+    }
+  });
+  // A mouseup anywhere clears the transient draggable flag (e.g. a handle click
+  // that never became a drag).
+  window.addEventListener('mouseup', () => {
+    fxSectionEls.forEach((el) => {
+      el.draggable = false;
+    });
+  });
+}
+
+function commitFxOrderFromDom() {
+  const container = document.getElementById('fx-chain');
+  if (!container) return;
+  const order = [...container.querySelectorAll('.fx-section.fx-reorderable')]
+    .map((el) => el.dataset.fxId)
+    .filter((id) => DEFAULT_FX_ORDER.includes(id));
+  DEFAULT_FX_ORDER.forEach((id) => {
+    if (!order.includes(id)) order.push(id);
+  });
+  FX_ORDER = order;
+  reconnectFxChain();
+}
+
+function setFxOrder(order) {
+  if (!Array.isArray(order)) return;
+  const next = order.filter((id) => DEFAULT_FX_ORDER.includes(id));
+  DEFAULT_FX_ORDER.forEach((id) => {
+    if (!next.includes(id)) next.push(id);
+  });
+  FX_ORDER = next;
+  const container = document.getElementById('fx-chain');
+  if (container) {
+    FX_ORDER.forEach((id) => {
+      const el = fxSectionEls.get(id);
+      if (el) container.insertBefore(el, fxLimiterSection);
+    });
+  }
+  reconnectFxChain();
 }
 
 async function start() {
