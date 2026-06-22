@@ -7,6 +7,7 @@ let granularInputSource = null;
 let started = false;
 let granularModulePromise = null;
 let bitReducerModulePromise = null;
+let beatRepeatModulePromise = null;
 const LIVE_SOURCE_SECONDS = 10;
 const MAX_DELAY_SECONDS = 16;
 const INPUT_SOURCE = {
@@ -132,6 +133,18 @@ function getDelayTimeSeconds() {
     0,
     MAX_DELAY_SECONDS,
   );
+}
+
+function getBeatRepeatIntervalSeconds() {
+  return FX.beatrepeat.sync
+    ? beatsToSeconds(getTempoStep(FX.beatrepeat.syncIndex).beats)
+    : FX.beatrepeat.interval;
+}
+
+function getBeatRepeatGridSeconds() {
+  return FX.beatrepeat.gridSync
+    ? beatsToSeconds(getGrainSyncStep(FX.beatrepeat.gridSyncIndex).beats)
+    : FX.beatrepeat.grid / 1000;
 }
 
 function getLfoRateHz(lfo) {
@@ -347,7 +360,10 @@ async function ensureFxModules() {
   if (!bitReducerModulePromise) {
     bitReducerModulePromise = audioCtx.audioWorklet.addModule('bit-reducer-processor.js');
   }
-  await bitReducerModulePromise;
+  if (!beatRepeatModulePromise) {
+    beatRepeatModulePromise = audioCtx.audioWorklet.addModule('beat-repeat-processor.js');
+  }
+  await Promise.all([bitReducerModulePromise, beatRepeatModulePromise]);
 }
 
 async function ensureGranularModule() {
@@ -908,6 +924,8 @@ const gen3ShapeButtons = new Map();
 let gen3SusBtnEl = null;
 const filterModeButtons = new Map();
 let delaySyncModeControl = null;
+let beatRepeatSyncModeControl = null;
+let beatRepeatGridSyncModeControl = null;
 const delayModeButtons = new Map();
 const genSourceModeButtons = [new Map(), new Map()];
 const POSITION_PARAM = PARAMS.find((p) => p.key === 'positionSec');
@@ -1128,6 +1146,8 @@ function getModSourceScaledValue(sourceIdx) {
 
 function getBaseFxValue(id, key) {
   if (id === 'delay' && key === 'time') return getDelayTimeSeconds();
+  if (id === 'beatrepeat' && key === 'interval') return getBeatRepeatIntervalSeconds();
+  if (id === 'beatrepeat' && key === 'grid') return getBeatRepeatGridSeconds();
   return FX[id]?.[key];
 }
 
@@ -3277,6 +3297,19 @@ function buildDrumPanel() {
 
 const FX_DEFS = [
   {
+    id: 'beatrepeat',
+    label: 'Beat Repeat',
+    params: [
+      { key: 'interval', label: 'Interval', min: 0.02, max: 2, step: 0.01, value: 0.5, unit: 's' },
+      { key: 'grid', label: 'Grid', min: 10, max: 500, step: 1, value: 125, unit: 'ms' },
+      { key: 'gate', label: 'Gate', min: 1, max: 32, step: 1, value: 8, unit: 'x' },
+      { key: 'pitch', label: 'Pitch', min: -24, max: 24, step: 1, value: 0, unit: 'st' },
+      { key: 'decay', label: 'Decay', min: 0, max: 1, step: 0.01, value: 1, unit: '' },
+      { key: 'chance', label: 'Chance', min: 0, max: 1, step: 0.01, value: 1, unit: '' },
+      { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
+    ],
+  },
+  {
     id: 'delay',
     label: 'Delay',
     params: [
@@ -3347,6 +3380,19 @@ const FX_DEFS = [
 
 // Source of truth for FX state — applied to audio nodes when they exist.
 const FX = {
+  beatrepeat: {
+    interval: 0.5,
+    sync: true,
+    syncIndex: 4,
+    grid: 125,
+    gridSync: true,
+    gridSyncIndex: 2,
+    gate: 8,
+    pitch: 0,
+    decay: 1,
+    chance: 1,
+    mix: 0,
+  },
   delay: { time: 0.3, feedback: 0.35, mix: 0, sync: false, syncIndex: 4, hp: 20, mode: 'stereo' },
   filter: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 0 },
   bitreduce: { bits: 8, rate: 1, mix: 0 },
@@ -3410,6 +3456,28 @@ const DELAY_TIME_SYNC_CONTROL = {
   label: 'Time',
   min: 0,
   max: TEMPO_SYNC_STEPS.length - 1,
+  step: 1,
+  unit: '',
+};
+const BEATREPEAT_INTERVAL_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'beatrepeat').params.find(
+  (param) => param.key === 'interval',
+);
+const BEATREPEAT_INTERVAL_SYNC_CONTROL = {
+  key: 'interval',
+  label: 'Interval',
+  min: 0,
+  max: TEMPO_SYNC_STEPS.length - 1,
+  step: 1,
+  unit: '',
+};
+const BEATREPEAT_GRID_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'beatrepeat').params.find(
+  (param) => param.key === 'grid',
+);
+const BEATREPEAT_GRID_SYNC_CONTROL = {
+  key: 'grid',
+  label: 'Grid',
+  min: 0,
+  max: GRAIN_SYNC_STEPS.length - 1,
   step: 1,
   unit: '',
 };
@@ -3636,6 +3704,38 @@ function refreshDelayTimeUI() {
   delaySyncModeControl?.setMode(isSync ? 'sync' : 'free');
 }
 
+function refreshBeatRepeatIntervalUI() {
+  const control = fxControlBindings.get('beatrepeat:interval');
+  if (!control) return;
+  const isSync = !!FX.beatrepeat.sync;
+  control.setConfig(
+    isSync
+      ? { ...BEATREPEAT_INTERVAL_SYNC_CONTROL, resetValue: FX.beatrepeat.syncIndex }
+      : { ...BEATREPEAT_INTERVAL_FREE_CONTROL, resetValue: FX.beatrepeat.interval },
+  );
+  control.setFormatter(
+    isSync
+      ? (v) => formatTempoSyncValue(v, (step) => formatTempoSeconds(beatsToSeconds(step.beats)))
+      : null,
+  );
+  control.setValue(isSync ? FX.beatrepeat.syncIndex : FX.beatrepeat.interval);
+  beatRepeatSyncModeControl?.setMode(isSync ? 'sync' : 'free');
+}
+
+function refreshBeatRepeatGridUI() {
+  const control = fxControlBindings.get('beatrepeat:grid');
+  if (!control) return;
+  const isSync = !!FX.beatrepeat.gridSync;
+  control.setConfig(
+    isSync
+      ? { ...BEATREPEAT_GRID_SYNC_CONTROL, resetValue: FX.beatrepeat.gridSyncIndex }
+      : { ...BEATREPEAT_GRID_FREE_CONTROL, resetValue: FX.beatrepeat.grid },
+  );
+  control.setFormatter(isSync ? (v) => getGrainSyncStep(Math.round(v)).label : null);
+  control.setValue(isSync ? FX.beatrepeat.gridSyncIndex : FX.beatrepeat.grid);
+  beatRepeatGridSyncModeControl?.setMode(isSync ? 'sync' : 'free');
+}
+
 function refreshDelayModeUI() {
   delayModeButtons.forEach((btn, mode) => btn.classList.toggle('active', FX.delay.mode === mode));
 }
@@ -3671,7 +3771,11 @@ function setTransportBpm(value, { refresh = true } = {}) {
   if (bpmInput) bpmInput.value = `${TRANSPORT.bpm}`;
   if (!refresh) return;
   if (FX.delay.sync) applyFx('delay', 'time', getBaseFxValue('delay', 'time'));
+  if (FX.beatrepeat.sync) applyFx('beatrepeat', 'interval', getBaseFxValue('beatrepeat', 'interval'));
+  if (FX.beatrepeat.gridSync) applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
   refreshDelayTimeUI();
+  refreshBeatRepeatIntervalUI();
+  refreshBeatRepeatGridUI();
   refreshLFOUI();
   for (let gi = 0; gi < 2; gi++) {
     if (state[gi].grainSizeSync) refreshGenGrainSizeSyncUI(gi);
@@ -4821,6 +4925,31 @@ function applyFilterMode() {
 function buildFxNodes() {
   const ac = audioCtx;
 
+  // ─ Beat repeat (head of chain) ─
+  const brIn = ac.createGain();
+  const brDry = ac.createGain();
+  const brWet = ac.createGain();
+  const brNode = new AudioWorkletNode(ac, 'beat-repeat-processor', {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [2],
+    parameterData: {
+      interval: getBeatRepeatIntervalSeconds(),
+      grid: getBeatRepeatGridSeconds(),
+      gate: FX.beatrepeat.gate,
+      pitch: FX.beatrepeat.pitch,
+      decay: FX.beatrepeat.decay,
+      chance: FX.beatrepeat.chance,
+    },
+  });
+  const brOut = ac.createGain();
+
+  brIn.connect(brDry);
+  brIn.connect(brNode);
+  brNode.connect(brWet);
+  brDry.connect(brOut);
+  brWet.connect(brOut);
+
   // ─ Delay (feedback loop) ─
   const dlyIn = ac.createGain();
   const dlyDry = ac.createGain();
@@ -4969,7 +5098,8 @@ function buildFxNodes() {
   const masterOut = ac.createGain();
   masterOut.gain.setValueAtTime(FX.limiter.output, ac.currentTime);
 
-  // ─ Chain: granulator → delay → filter → bit reduce → saturation → reverb → limiter ─
+  // ─ Chain: granulator → beat repeat → delay → filter → bit reduce → saturation → reverb → limiter ─
+  brOut.connect(dlyIn);
   dlyOut.connect(fltIn);
   fltOut.connect(bitIn);
   bitOut.connect(satIn);
@@ -4978,8 +5108,9 @@ function buildFxNodes() {
   limiter.connect(masterOut);
 
   fx = {
-    input: dlyIn,
+    input: brIn,
     output: masterOut,
+    beatrepeat: { node: brNode, dry: brDry, wet: brWet },
     delay: {
       tap: dlyTap,
       fb: dlyFb,
@@ -5012,7 +5143,20 @@ function buildFxNodes() {
 
 function applyFx(id, key, val) {
   if (!fx) return;
-  if (id === 'delay') {
+  if (id === 'beatrepeat') {
+    const setParam = (name, value) =>
+      fx.beatrepeat.node.parameters.get(name)?.setValueAtTime(value, audioCtx.currentTime);
+    if (key === 'interval') setParam('interval', clamp(val, 0.02, 30));
+    if (key === 'grid') setParam('grid', clamp(val, 0.005, 1));
+    if (key === 'gate') setParam('gate', clamp(Math.round(val), 1, 64));
+    if (key === 'pitch') setParam('pitch', clamp(val, -24, 24));
+    if (key === 'decay') setParam('decay', clamp(val, 0, 1));
+    if (key === 'chance') setParam('chance', clamp(val, 0, 1));
+    if (key === 'mix') {
+      fx.beatrepeat.wet.gain.value = val;
+      fx.beatrepeat.dry.gain.value = 1 - val;
+    }
+  } else if (id === 'delay') {
     if (key === 'time')
       [fx.delay.tap, fx.delay.pingL, fx.delay.pingR].forEach((tap) =>
         tap.delayTime.setTargetAtTime(clamp(val, 0, MAX_DELAY_SECONDS), audioCtx.currentTime, 0.02),
@@ -5205,15 +5349,27 @@ function applyPreset(preset) {
     });
     applyAllFx();
     refreshFilterUI();
-    ['delay', 'filter', 'bitreduce', 'sat', 'reverb', 'limiter'].forEach((id) => {
+    ['beatrepeat', 'delay', 'filter', 'bitreduce', 'sat', 'reverb', 'limiter'].forEach((id) => {
       Object.entries(FX[id]).forEach(([key, value]) => {
         if (key === 'mode') return;
         if (id === 'delay' && key === 'time') return;
+        if (
+          id === 'beatrepeat' &&
+          (key === 'interval' ||
+            key === 'sync' ||
+            key === 'syncIndex' ||
+            key === 'grid' ||
+            key === 'gridSync' ||
+            key === 'gridSyncIndex')
+        )
+          return;
         fxControlBindings.get(`${id}:${key}`)?.setValue(value);
       });
     });
     refreshDelayTimeUI();
     refreshDelayModeUI();
+    refreshBeatRepeatIntervalUI();
+    refreshBeatRepeatGridUI();
   }
 
   if (preset.lfos) {
@@ -5457,6 +5613,28 @@ function buildFxUI() {
             refreshBackPanelState();
             return;
           }
+          if (def.id === 'beatrepeat' && p.key === 'interval') {
+            if (FX.beatrepeat.sync) {
+              FX.beatrepeat.syncIndex = Math.round(v);
+            } else {
+              FX.beatrepeat.interval = v;
+            }
+            applyFx('beatrepeat', 'interval', getBaseFxValue('beatrepeat', 'interval'));
+            refreshModulationVisuals();
+            refreshBackPanelState();
+            return;
+          }
+          if (def.id === 'beatrepeat' && p.key === 'grid') {
+            if (FX.beatrepeat.gridSync) {
+              FX.beatrepeat.gridSyncIndex = Math.round(v);
+            } else {
+              FX.beatrepeat.grid = v;
+            }
+            applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
+            refreshModulationVisuals();
+            refreshBackPanelState();
+            return;
+          }
           FX[def.id][p.key] = v;
           if (isMappable) applyFxModulation();
           else applyFx(def.id, p.key, v);
@@ -5479,6 +5657,28 @@ function buildFxUI() {
         });
         content.appendChild(delaySyncModeControl);
       }
+
+      if (def.id === 'beatrepeat' && p.key === 'interval') {
+        beatRepeatSyncModeControl = buildSyncModeRow(FX.beatrepeat.sync, (mode) => {
+          FX.beatrepeat.sync = mode === 'sync';
+          refreshBeatRepeatIntervalUI();
+          applyFx('beatrepeat', 'interval', getBaseFxValue('beatrepeat', 'interval'));
+          refreshModulationVisuals();
+          refreshBackPanelState();
+        });
+        content.appendChild(beatRepeatSyncModeControl);
+      }
+
+      if (def.id === 'beatrepeat' && p.key === 'grid') {
+        beatRepeatGridSyncModeControl = buildSyncModeRow(FX.beatrepeat.gridSync, (mode) => {
+          FX.beatrepeat.gridSync = mode === 'sync';
+          refreshBeatRepeatGridUI();
+          applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
+          refreshModulationVisuals();
+          refreshBackPanelState();
+        });
+        content.appendChild(beatRepeatGridSyncModeControl);
+      }
     });
 
     container.appendChild(section);
@@ -5486,6 +5686,8 @@ function buildFxUI() {
 
   refreshDelayTimeUI();
   refreshDelayModeUI();
+  refreshBeatRepeatIntervalUI();
+  refreshBeatRepeatGridUI();
 }
 
 async function start() {
@@ -5657,6 +5859,7 @@ function stop() {
   audioCtx = node = fx = null;
   granularModulePromise = null;
   bitReducerModulePromise = null;
+  beatRepeatModulePromise = null;
   started = false;
 
   // Reset freeze state for both generators.
