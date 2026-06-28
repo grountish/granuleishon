@@ -13,9 +13,20 @@
     <div class="header-bar">
       <span class="logo">⌝</span>
       <span class="tagline"></span>
-      <div class="preset-bar">
-        <button id="presetSaveBtn" class="preset-save">Store</button>
-        <div id="presetSlots" class="preset-slots"></div>
+      <div class="project-bar" id="projectBar">
+        <button id="projectMenuBtn" class="project-menu-btn" type="button">
+          <span id="projectMenuLabel">Projects</span>
+          <span class="project-caret">&#9662;</span>
+        </button>
+        <div id="projectMenu" class="project-menu" hidden>
+          <div class="project-save-row">
+            <input id="projectNameInput" class="project-name-input" type="text"
+              placeholder="project name" maxlength="40" spellcheck="false" autocomplete="off" />
+            <button id="projectSaveBtn" class="project-save-btn" type="button">Save</button>
+          </div>
+          <button id="projectNewBtn" class="project-new" type="button">+ New blank project</button>
+          <div id="projectList" class="project-list"></div>
+        </div>
       </div>
       <div class="view-toggle" id="viewToggle">
         <button type="button" class="view-btn active" data-view="front">Front</button>
@@ -30,6 +41,12 @@
         <label class="input-box" for="inputDeviceSelect">
           <span class="input-label">Input</span>
           <select id="inputDeviceSelect" class="input-select"></select>
+        </label>
+        <label class="gate-box" for="gateThreshold" title="Mute mic into the granulator below this threshold">
+          <input id="gateEnable" class="gate-enable" type="checkbox" />
+          <span class="gate-label">Mic Gate</span>
+          <input id="gateThreshold" class="gate-slider" type="range" min="-60" max="0" step="1" value="-40" disabled />
+          <span id="gateThresholdVal" class="gate-val">-40 dB</span>
         </label>
         <button id="startBtn" class="primary">&#9654; Start input</button>
         <button id="transportStopBtn" class="transport-stop-btn" disabled>&#9632; Stop all</button>

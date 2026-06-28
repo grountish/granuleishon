@@ -44,10 +44,28 @@ const REC = {
   processor: null,
   sink: null,
 };
-const PRESET_STORAGE_KEY = 'grnsh-presets-v1';
-const PRESET_SLOT_COUNT = 4;
-let presetSaveArmed = false;
-let presetStore = Array.from({ length: PRESET_SLOT_COUNT }, () => null);
+
+// Noise gate on the mic feeding the granulators: signal below threshold is
+// muted before it reaches the worklet, so it isn't heard or visualized.
+const INPUT_GATE = {
+  enabled: false,
+  threshold: 0.01, // linear amplitude; -40 dB default
+  node: null, // ScriptProcessor inserted between mic source and worklet
+  env: 0, // smoothed gain envelope 0..1
+  attackMs: 3, // ramp up when signal crosses threshold
+  releaseMs: 120, // ramp down when it drops below
+};
+
+// dB <-> linear amplitude helper for the gate.
+function dbToLinear(db) {
+  return Math.pow(10, db / 20);
+}
+const PROJECT_STORAGE_KEY = 'grnsh-projects-v1';
+const LEGACY_PRESET_STORAGE_KEY = 'grnsh-presets-v1';
+let projectStore = []; // [{ name, data, savedAt }]
+let currentProjectName = null;
+let projectMenuOpen = false;
+let defaultProjectSnapshot = null; // pristine state captured at startup, for "new project"
 const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
 const UI_VIEW = { mode: 'front' };
 const BACK_PANEL = {
@@ -74,12 +92,36 @@ function getRecordBtn() {
   return document.getElementById('recordBtn');
 }
 
-function getPresetSaveBtn() {
-  return document.getElementById('presetSaveBtn');
+function getGateEnable() {
+  return document.getElementById('gateEnable');
 }
 
-function getPresetSlotsEl() {
-  return document.getElementById('presetSlots');
+function getGateSlider() {
+  return document.getElementById('gateThreshold');
+}
+
+function getGateVal() {
+  return document.getElementById('gateThresholdVal');
+}
+
+function getProjectMenuBtn() {
+  return document.getElementById('projectMenuBtn');
+}
+
+function getProjectMenu() {
+  return document.getElementById('projectMenu');
+}
+
+function getProjectMenuLabel() {
+  return document.getElementById('projectMenuLabel');
+}
+
+function getProjectList() {
+  return document.getElementById('projectList');
+}
+
+function getProjectNameInput() {
+  return document.getElementById('projectNameInput');
 }
 
 function getBpmInput() {
@@ -218,20 +260,37 @@ function downloadRecording(blob) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function loadPresetStore() {
+function loadProjectStore() {
   try {
-    const raw = localStorage.getItem(PRESET_STORAGE_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      presetStore = Array.from({ length: PRESET_SLOT_COUNT }, (_, i) => parsed[i] || null);
+    const raw = localStorage.getItem(PROJECT_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        projectStore = parsed.filter((p) => p && typeof p.name === 'string' && p.data);
+        return;
+      }
     }
+    migrateLegacyPresets();
   } catch (e) {}
 }
 
-function savePresetStore() {
+// One-time import of the old 4-slot preset store into named projects.
+function migrateLegacyPresets() {
   try {
-    localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(presetStore));
+    const raw = localStorage.getItem(LEGACY_PRESET_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    parsed.forEach((data, i) => {
+      if (data) projectStore.push({ name: `preset ${i + 1}`, data, savedAt: 0 });
+    });
+    if (projectStore.length) saveProjectStore();
+  } catch (e) {}
+}
+
+function saveProjectStore() {
+  try {
+    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(projectStore));
   } catch (e) {}
 }
 
@@ -5528,46 +5587,171 @@ function applyPreset(preset) {
   refreshBackPanelState();
 }
 
-function refreshPresetUI() {
-  const saveBtn = getPresetSaveBtn();
-  saveBtn?.classList.toggle('active', presetSaveArmed);
-  const slots = getPresetSlotsEl()?.querySelectorAll('.preset-slot') || [];
-  slots.forEach((slot, idx) => {
-    slot.classList.toggle('filled', !!presetStore[idx]);
+function formatProjectDate(ts) {
+  if (!ts) return '';
+  try {
+    const d = new Date(ts);
+    const date = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    return `${date} ${time}`;
+  } catch (e) {
+    return '';
+  }
+}
+
+function findProjectIndex(name) {
+  const norm = name.trim().toLowerCase();
+  return projectStore.findIndex((p) => p.name.trim().toLowerCase() === norm);
+}
+
+function saveProjectFromInput() {
+  const input = getProjectNameInput();
+  if (!input) return;
+  const name = input.value.trim();
+  if (!name) {
+    setStatus('name required');
+    input.focus();
+    return;
+  }
+  const entry = { name, data: capturePreset(), savedAt: Date.now() };
+  const existing = findProjectIndex(name);
+  if (existing >= 0) projectStore[existing] = entry;
+  else projectStore.push(entry);
+  currentProjectName = name;
+  saveProjectStore();
+  refreshProjectUI();
+  setStatus(`saved "${name}"`);
+}
+
+function openProject(name) {
+  const idx = findProjectIndex(name);
+  if (idx < 0) return;
+  const proj = projectStore[idx];
+  applyPreset(proj.data);
+  currentProjectName = proj.name;
+  const input = getProjectNameInput();
+  if (input) input.value = proj.name;
+  closeProjectMenu();
+  refreshProjectUI();
+  setStatus(`opened "${proj.name}"`);
+}
+
+function deleteProject(name) {
+  const idx = findProjectIndex(name);
+  if (idx < 0) return;
+  if (!window.confirm(`Delete project "${projectStore[idx].name}"?`)) return;
+  if (projectStore[idx].name === currentProjectName) currentProjectName = null;
+  projectStore.splice(idx, 1);
+  saveProjectStore();
+  refreshProjectUI();
+  setStatus(`deleted "${name}"`);
+}
+
+function openProjectMenu() {
+  projectMenuOpen = true;
+  getProjectMenu()?.removeAttribute('hidden');
+  getProjectMenuBtn()?.classList.add('open');
+  const input = getProjectNameInput();
+  if (input) {
+    if (currentProjectName) input.value = currentProjectName;
+    input.focus();
+    input.select();
+  }
+}
+
+function closeProjectMenu() {
+  projectMenuOpen = false;
+  getProjectMenu()?.setAttribute('hidden', '');
+  getProjectMenuBtn()?.classList.remove('open');
+}
+
+function toggleProjectMenu() {
+  if (projectMenuOpen) closeProjectMenu();
+  else openProjectMenu();
+}
+
+function refreshProjectUI() {
+  const label = getProjectMenuLabel();
+  if (label) label.textContent = currentProjectName || 'Projects';
+  const listEl = getProjectList();
+  if (!listEl) return;
+  listEl.textContent = '';
+  if (!projectStore.length) {
+    const empty = document.createElement('div');
+    empty.className = 'project-empty';
+    empty.textContent = 'no saved projects';
+    listEl.appendChild(empty);
+    return;
+  }
+  const sorted = [...projectStore].sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+  sorted.forEach((proj) => {
+    const item = document.createElement('div');
+    item.className = 'project-item';
+
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'project-open';
+    openBtn.classList.toggle('current', proj.name === currentProjectName);
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'project-item-name';
+    nameEl.textContent = proj.name;
+    openBtn.appendChild(nameEl);
+
+    const dateStr = formatProjectDate(proj.savedAt);
+    if (dateStr) {
+      const dateEl = document.createElement('span');
+      dateEl.className = 'project-item-date';
+      dateEl.textContent = dateStr;
+      openBtn.appendChild(dateEl);
+    }
+    openBtn.addEventListener('click', () => openProject(proj.name));
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'project-delete';
+    delBtn.textContent = '×';
+    delBtn.title = `delete "${proj.name}"`;
+    delBtn.addEventListener('click', () => deleteProject(proj.name));
+
+    item.appendChild(openBtn);
+    item.appendChild(delBtn);
+    listEl.appendChild(item);
   });
 }
 
-function buildPresetUI() {
-  const slotsEl = getPresetSlotsEl();
-  if (!slotsEl) return;
-  slotsEl.textContent = '';
-  for (let i = 0; i < PRESET_SLOT_COUNT; i++) {
-    const btn = document.createElement('button');
-    btn.className = 'preset-slot';
-    btn.textContent = `P${i + 1}`;
-    btn.addEventListener('click', () => {
-      if (presetSaveArmed) {
-        presetStore[i] = capturePreset();
-        presetSaveArmed = false;
-        savePresetStore();
-        refreshPresetUI();
-        setStatus(`saved preset ${i + 1}`);
-        return;
-      }
-      if (!presetStore[i]) {
-        setStatus(`preset ${i + 1} empty`);
-        return;
-      }
-      applyPreset(presetStore[i]);
-      setStatus(`loaded preset ${i + 1}`);
-    });
-    slotsEl.appendChild(btn);
-  }
-  getPresetSaveBtn()?.addEventListener('click', () => {
-    presetSaveArmed = !presetSaveArmed;
-    refreshPresetUI();
+function newProject() {
+  if (!defaultProjectSnapshot) return;
+  if (!window.confirm('Start a new blank project? Unsaved changes will be lost.')) return;
+  // Clone so the pristine snapshot is never mutated by applyPreset.
+  applyPreset(JSON.parse(JSON.stringify(defaultProjectSnapshot)));
+  currentProjectName = null;
+  const input = getProjectNameInput();
+  if (input) input.value = '';
+  closeProjectMenu();
+  refreshProjectUI();
+  setStatus('new project');
+}
+
+function buildProjectUI() {
+  getProjectMenuBtn()?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleProjectMenu();
   });
-  refreshPresetUI();
+  // Clicks inside the menu shouldn't bubble to the document close-handler.
+  getProjectMenu()?.addEventListener('click', (event) => event.stopPropagation());
+  document.getElementById('projectSaveBtn')?.addEventListener('click', saveProjectFromInput);
+  document.getElementById('projectNewBtn')?.addEventListener('click', newProject);
+  getProjectNameInput()?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      saveProjectFromInput();
+    }
+  });
+  document.addEventListener('click', () => {
+    if (projectMenuOpen) closeProjectMenu();
+  });
+  refreshProjectUI();
 }
 
 function buildFxUI() {
@@ -5887,6 +6071,48 @@ function disconnectGranularInput({ stopTracks = false } = {}) {
   }
 }
 
+// Build (once) the gate ScriptProcessor and wire its output into the granular
+// worklet. Live mic gets routed through this so sub-threshold signal is muted
+// before the granulator can hear or visualize it.
+function ensureInputGateNode() {
+  if (INPUT_GATE.node) return INPUT_GATE.node;
+  const gate = audioCtx.createScriptProcessor(1024, 2, 2);
+  gate.onaudioprocess = (e) => {
+    const inp = e.inputBuffer;
+    const out = e.outputBuffer;
+    const inL = inp.getChannelData(0);
+    const inR = inp.numberOfChannels > 1 ? inp.getChannelData(1) : inL;
+    const outL = out.getChannelData(0);
+    const outR = out.getChannelData(1);
+    if (!INPUT_GATE.enabled) {
+      outL.set(inL);
+      outR.set(inR);
+      INPUT_GATE.env = 1;
+      return;
+    }
+    const sr = audioCtx.sampleRate;
+    const aCoef = 1 - Math.exp(-1 / Math.max(INPUT_GATE.attackMs * 0.001 * sr, 1));
+    const rCoef = 1 - Math.exp(-1 / Math.max(INPUT_GATE.releaseMs * 0.001 * sr, 1));
+    const thr = INPUT_GATE.threshold;
+    let env = INPUT_GATE.env;
+    for (let i = 0; i < inL.length; i++) {
+      const l = inL[i];
+      const r = inR[i];
+      const level = Math.max(l < 0 ? -l : l, r < 0 ? -r : r);
+      const target = level >= thr ? 1 : 0;
+      // fast attack opens the gate, slow release holds it through zero-crossings
+      const coef = target > env ? aCoef : rCoef;
+      env += (target - env) * coef;
+      outL[i] = l * env;
+      outR[i] = r * env;
+    }
+    INPUT_GATE.env = env;
+  };
+  gate.connect(node);
+  INPUT_GATE.node = gate;
+  return gate;
+}
+
 async function ensureMicInput({ forceReconnect = false } = {}) {
   if (!node) await ensureGranularEngine();
   if (granularInputSource && micStream && !forceReconnect) return;
@@ -5901,7 +6127,7 @@ async function ensureMicInput({ forceReconnect = false } = {}) {
   }
   micStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   granularInputSource = audioCtx.createMediaStreamSource(micStream);
-  granularInputSource.connect(node);
+  granularInputSource.connect(ensureInputGateNode());
   const activeDeviceId = micStream.getAudioTracks()[0]?.getSettings?.().deviceId;
   if (activeDeviceId && INPUT_SOURCE.devices.some((device) => device.deviceId === activeDeviceId)) {
     INPUT_SOURCE.selectedId = activeDeviceId;
@@ -6077,16 +6303,34 @@ getRecordBtn()?.addEventListener('click', () => {
   REC.isRecording ? stopRecording() : startRecording();
 });
 
+function syncGateUI() {
+  const enable = getGateEnable();
+  const slider = getGateSlider();
+  const val = getGateVal();
+  const box = enable?.closest('.gate-box');
+  if (!enable || !slider) return;
+  INPUT_GATE.enabled = enable.checked;
+  const db = Number(slider.value);
+  INPUT_GATE.threshold = dbToLinear(db);
+  slider.disabled = !enable.checked;
+  if (val) val.textContent = `${db} dB`;
+  if (box) box.classList.toggle('active', enable.checked);
+}
+
+getGateEnable()?.addEventListener('change', syncGateUI);
+getGateSlider()?.addEventListener('input', syncGateUI);
+syncGateUI();
+
 navigator.mediaDevices?.addEventListener?.('devicechange', () => {
   refreshInputDevices();
 });
 
-loadPresetStore();
+loadProjectStore();
 buildUI();
 setSourceDurationSec(0, LIVE_SOURCE_SECONDS);
 setSourceDurationSec(1, LIVE_SOURCE_SECONDS);
 buildFxUI();
-buildPresetUI();
+buildProjectUI();
 buildBackPanel();
 buildVisualPanel();
 refreshInputDevices();
@@ -6094,6 +6338,8 @@ initTempoDrag();
 initViewToggle();
 refreshRecordButton();
 setTransportBpm(TRANSPORT.bpm);
+// Snapshot the pristine default state now, before any project is loaded.
+defaultProjectSnapshot = capturePreset();
 setPanelView('front');
 getStartBtn().textContent = getIdleStartButtonLabel();
 
@@ -6102,7 +6348,10 @@ window.addEventListener('resize', () => {
 });
 
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') clearBackPatchSelection();
+  if (event.key === 'Escape') {
+    clearBackPatchSelection();
+    closeProjectMenu();
+  }
   if (event.key === 'Tab' && !event.target.closest('input, textarea, select')) {
     event.preventDefault();
     setPanelView(UI_VIEW.mode === 'front' ? 'back' : 'front');
