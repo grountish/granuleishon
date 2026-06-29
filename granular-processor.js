@@ -193,10 +193,15 @@ class GranularProcessor extends AudioWorkletProcessor {
     const input = inputs[0];
     const inChannel = input && input.length > 0 ? input[0] : null;
 
-    const output = outputs[0];
-    const outL = output[0];
-    const outR = output.length > 1 ? output[1] : output[0];
-    const blockSize = outL.length;
+    // Two separate stereo outputs: output 0 = generator 1, output 1 = generator 2,
+    // so each granular voice can feed its own FX bus downstream.
+    const out0 = outputs[0];
+    const out1 = outputs[1] || outputs[0];
+    const out0L = out0[0];
+    const out0R = out0.length > 1 ? out0[1] : out0[0];
+    const out1L = out1[0];
+    const out1R = out1.length > 1 ? out1[1] : out1[0];
+    const blockSize = out0L.length;
 
     for (let i = 0; i < blockSize; i++) {
       if (inChannel) {
@@ -204,9 +209,6 @@ class GranularProcessor extends AudioWorkletProcessor {
         this.writePos = (this.writePos + 1) % this.liveBufferLength;
         if (this.filled < this.liveBufferLength) this.filled++;
       }
-
-      let sumL = 0;
-      let sumR = 0;
 
       for (let gi = 0; gi < 2; gi++) {
         const gen = this.gens[gi];
@@ -220,6 +222,8 @@ class GranularProcessor extends AudioWorkletProcessor {
           gen.spawnCountdown += spawnInterval;
         }
 
+        let sumL = 0;
+        let sumR = 0;
         for (let g = 0; g < gen.grains.length; g++) {
           const grain = gen.grains[g];
           const win = this.grainWindow(gen.params.envType, grain.phase, grain.length);
@@ -240,10 +244,15 @@ class GranularProcessor extends AudioWorkletProcessor {
           if (gen.grains[g].phase < gen.grains[g].length) gen.grains[w++] = gen.grains[g];
         }
         gen.grains.length = w;
-      }
 
-      outL[i] = sumL;
-      outR[i] = sumR;
+        if (gi === 0) {
+          out0L[i] = sumL;
+          out0R[i] = sumR;
+        } else {
+          out1L[i] = sumL;
+          out1R[i] = sumR;
+        }
+      }
     }
 
     if (++this.vizCounter >= 20) {

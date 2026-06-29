@@ -12,14 +12,6 @@ class BitReducerProcessor extends AudioWorkletProcessor {
     this.held = [0, 0];
   }
 
-  quantize(sample, bits) {
-    const clampedBits = Math.max(1, Math.min(16, Math.round(bits)));
-    const levels = Math.max(2, 2 ** clampedBits);
-    const normalized = (Math.max(-1, Math.min(1, sample)) + 1) * 0.5;
-    const quantized = Math.round(normalized * (levels - 1)) / (levels - 1);
-    return quantized * 2 - 1;
-  }
-
   process(inputs, outputs, parameters) {
     const input = inputs[0];
     const output = outputs[0];
@@ -30,8 +22,12 @@ class BitReducerProcessor extends AudioWorkletProcessor {
     const bitsValues = parameters.bits;
     const rateValues = parameters.rate;
 
+    // bits is k-rate (constant for the whole block) — derive the quantization
+    // levels once per block instead of recomputing 2**bits for every sample.
+    const clampedBits = Math.max(1, Math.min(16, Math.round(bitsValues[0])));
+    const levelsMinus1 = Math.max(2, 2 ** clampedBits) - 1;
+
     for (let i = 0; i < frameCount; i++) {
-      const bits = bitsValues.length > 1 ? bitsValues[i] : bitsValues[0];
       const rate = Math.max(0.02, Math.min(1, rateValues.length > 1 ? rateValues[i] : rateValues[0]));
 
       this.phase += rate;
@@ -40,7 +36,8 @@ class BitReducerProcessor extends AudioWorkletProcessor {
         for (let ch = 0; ch < outChannels; ch++) {
           const inChannel = input[ch] || input[0];
           const sample = inChannel ? inChannel[i] : 0;
-          this.held[ch] = this.quantize(sample, bits);
+          const normalized = (Math.max(-1, Math.min(1, sample)) + 1) * 0.5;
+          this.held[ch] = (Math.round(normalized * levelsMinus1) / levelsMinus1) * 2 - 1;
         }
       }
 

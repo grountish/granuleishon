@@ -169,24 +169,19 @@ function formatTempoSyncValue(syncIndex, suffix) {
   return `${step.label} ${suffix(step)}`;
 }
 
-function getDelayTimeSeconds() {
-  return clamp(
-    FX.delay.sync ? beatsToSeconds(getTempoStep(FX.delay.syncIndex).beats) : FX.delay.time,
-    0,
-    MAX_DELAY_SECONDS,
-  );
+function getDelayTimeSeconds(busId = activeBus) {
+  const d = fxStates[busId].delay;
+  return clamp(d.sync ? beatsToSeconds(getTempoStep(d.syncIndex).beats) : d.time, 0, MAX_DELAY_SECONDS);
 }
 
-function getBeatRepeatIntervalSeconds() {
-  return FX.beatrepeat.sync
-    ? beatsToSeconds(getTempoStep(FX.beatrepeat.syncIndex).beats)
-    : FX.beatrepeat.interval;
+function getBeatRepeatIntervalSeconds(busId = activeBus) {
+  const b = fxStates[busId].beatrepeat;
+  return b.sync ? beatsToSeconds(getTempoStep(b.syncIndex).beats) : b.interval;
 }
 
-function getBeatRepeatGridSeconds() {
-  return FX.beatrepeat.gridSync
-    ? beatsToSeconds(getGrainSyncStep(FX.beatrepeat.gridSyncIndex).beats)
-    : FX.beatrepeat.grid / 1000;
+function getBeatRepeatGridSeconds(busId = activeBus) {
+  const b = fxStates[busId].beatrepeat;
+  return b.gridSync ? beatsToSeconds(getGrainSyncStep(b.gridSyncIndex).beats) : b.grid / 1000;
 }
 
 function getLfoRateHz(lfo) {
@@ -402,7 +397,7 @@ async function ensureAudioEngine() {
     buildFxNodes();
     buildGen3Nodes();
     buildGen4Nodes();
-    fx.output.connect(audioCtx.destination);
+    master.output.connect(audioCtx.destination);
     ensureVizAnalyser();
   }
   if (audioCtx.state === 'suspended') await audioCtx.resume();
@@ -439,7 +434,7 @@ async function ensureGranularModule() {
 async function startRecording() {
   if (REC.isRecording) return;
   await ensureAudioEngine();
-  if (!fx?.output || !audioCtx) return;
+  if (!master?.output || !audioCtx) return;
 
   REC.left = [];
   REC.right = [];
@@ -461,7 +456,7 @@ async function startRecording() {
     REC.sampleCount += inL.length;
   };
 
-  fx.output.connect(processor);
+  master.output.connect(processor);
   processor.connect(sink);
   sink.connect(audioCtx.destination);
 
@@ -475,9 +470,9 @@ async function startRecording() {
 function stopRecording() {
   if (!REC.isRecording) return;
 
-  if (REC.processor && fx?.output) {
+  if (REC.processor && master?.output) {
     try {
-      fx.output.disconnect(REC.processor);
+      master.output.disconnect(REC.processor);
     } catch (e) {}
   }
   if (REC.processor) {
@@ -894,9 +889,13 @@ function renderGenViz(gi) {
 }
 
 function genVizLoop() {
-  for (let gi = 0; gi < 2; gi++) {
-    stepGenVizState(gi);
-    renderGenViz(gi);
+  // The granular viz canvases live on the front view; skip the work (but keep
+  // the loop alive so it resumes instantly) when another view is showing.
+  if (UI_VIEW.mode === 'front') {
+    for (let gi = 0; gi < 2; gi++) {
+      stepGenVizState(gi);
+      renderGenViz(gi);
+    }
   }
   genVizFrame = requestAnimationFrame(genVizLoop);
 }
@@ -1205,15 +1204,17 @@ function getModSourceScaledValue(sourceIdx) {
   return null;
 }
 
-function getBaseFxValue(id, key) {
-  if (id === 'delay' && key === 'time') return getDelayTimeSeconds();
-  if (id === 'beatrepeat' && key === 'interval') return getBeatRepeatIntervalSeconds();
-  if (id === 'beatrepeat' && key === 'grid') return getBeatRepeatGridSeconds();
-  return FX[id]?.[key];
+function getBaseFxValue(id, key, busId = activeBus) {
+  if (id === 'delay' && key === 'time') return getDelayTimeSeconds(busId);
+  if (id === 'beatrepeat' && key === 'interval') return getBeatRepeatIntervalSeconds(busId);
+  if (id === 'beatrepeat' && key === 'grid') return getBeatRepeatGridSeconds(busId);
+  return fxStates[busId][id]?.[key];
 }
 
-function getEffectiveFxValue(id, key) {
-  const base = getBaseFxValue(id, key);
+function getEffectiveFxValue(id, key, busId = activeBus) {
+  const base = getBaseFxValue(id, key, busId);
+  // FX modulation routing is global across buses (one mapping wobbles every
+  // bus's copy of the param, each added to that bus's own base value).
   const mapping = lfoMappings.get(`3:${id}:${key}`);
   const paramDef = getFxParamBounds(id, key);
   if (!mapping || !paramDef) return base;
@@ -1223,21 +1224,25 @@ function getEffectiveFxValue(id, key) {
   return Math.max(paramDef.min, Math.min(paramDef.max, base + scaled * half));
 }
 
+let modVisualsActive = false; // were modulation visuals showing last frame?
+
 function applyMappedModulationTargets() {
-  if (lfoMappings.size === 0) {
-    refreshModulationVisuals();
-    refreshBackPanelState();
-    return;
+  const hasMappings = lfoMappings.size > 0;
+  if (hasMappings) {
+    const gens = new Set([...lfoMappings.values()].map((m) => m.genIdx));
+    gens.forEach((gi) => {
+      if (gi === 2) applyGen3Modulation();
+      else if (gi === 3) applyFxModulation();
+      else if (gi === 4) applyGen4Modulation();
+      else sendParams(gi);
+    });
   }
-  const gens = new Set([...lfoMappings.values()].map((m) => m.genIdx));
-  gens.forEach((gi) => {
-    if (gi === 2) applyGen3Modulation();
-    else if (gi === 3) applyFxModulation();
-    else if (gi === 4) applyGen4Modulation();
-    else sendParams(gi);
-  });
-  refreshModulationVisuals();
-  refreshBackPanelState();
+  // Visual refreshes only matter for the panel currently on screen. Skip the
+  // front-control mod visuals once there's nothing to show (one extra frame to
+  // clear), and only run the back panel's live meter while the back view is up.
+  if (UI_VIEW.mode === 'front' && (hasMappings || modVisualsActive)) refreshModulationVisuals();
+  if (UI_VIEW.mode === 'back') refreshBackPanelState();
+  modVisualsActive = hasMappings;
 }
 
 function sendParams(genIdx) {
@@ -1256,8 +1261,12 @@ function applyGen3Modulation() {
 }
 
 function applyFxModulation() {
-  FX_LFO_PARAMS.forEach(({ id, key }) => {
-    applyFx(id, key, getEffectiveFxValue(id, key));
+  // Each bus owns its own copy of every effect; apply base or modulated value
+  // per bus so a wobble set on one instrument stays on that instrument.
+  FX_BUS_IDS.forEach((busId) => {
+    FX_LFO_PARAMS.forEach(({ id, key }) => {
+      applyFx(id, key, getEffectiveFxValue(id, key, busId), busId);
+    });
   });
 }
 
@@ -1968,11 +1977,11 @@ const VIZ = {
 };
 
 function ensureVizAnalyser() {
-  if (vizAnalyser || !audioCtx || !fx?.output) return;
+  if (vizAnalyser || !audioCtx || !master?.output) return;
   vizAnalyser = audioCtx.createAnalyser();
   vizAnalyser.fftSize = 2048;
   vizAnalyser.smoothingTimeConstant = 0.84;
-  fx.output.connect(vizAnalyser);
+  master.output.connect(vizAnalyser);
   VIZ.freqBuf = new Uint8Array(vizAnalyser.frequencyBinCount);
   VIZ.timeBuf = new Uint8Array(vizAnalyser.fftSize);
 }
@@ -2198,10 +2207,16 @@ function renderViz() {
   }
 
   // ── 6. Vignette ───────────────────────────────────────────────
-  const vig = ctx.createRadialGradient(cx, cy, minDim * 0.2, cx, cy, minDim * 0.78);
-  vig.addColorStop(0, 'rgba(0,0,0,0)');
-  vig.addColorStop(1, 'rgba(0,0,0,0.72)');
-  ctx.fillStyle = vig;
+  // Static for a given canvas size — rebuild only when the canvas resizes.
+  if (!VIZ.vignette || VIZ.vignetteW !== W || VIZ.vignetteH !== H) {
+    const vig = ctx.createRadialGradient(cx, cy, minDim * 0.2, cx, cy, minDim * 0.78);
+    vig.addColorStop(0, 'rgba(0,0,0,0)');
+    vig.addColorStop(1, 'rgba(0,0,0,0.72)');
+    VIZ.vignette = vig;
+    VIZ.vignetteW = W;
+    VIZ.vignetteH = H;
+  }
+  ctx.fillStyle = VIZ.vignette;
   ctx.fillRect(0, 0, W, H);
 }
 
@@ -2209,10 +2224,20 @@ function renderViz() {
 
 function buildUI() {
   const container = document.getElementById('generators');
-  container.appendChild(buildGeneratorPanel(0));
-  container.appendChild(buildGeneratorPanel(1));
-  container.appendChild(buildOscPanel());
-  container.appendChild(buildDrumPanel());
+  // Each instrument panel is tagged with its FX bus and selects that bus when
+  // clicked anywhere inside — the FX column then shows that instrument's chain.
+  const panels = [
+    [buildGeneratorPanel(0), 'gen0'],
+    [buildGeneratorPanel(1), 'gen1'],
+    [buildOscPanel(), 'gen3'],
+    [buildDrumPanel(), 'gen4'],
+  ];
+  panels.forEach(([panel, busId]) => {
+    panel.dataset.bus = busId;
+    panel.classList.toggle('active-instrument', busId === activeBus);
+    panel.addEventListener('click', () => setActiveBus(busId));
+    container.appendChild(panel);
+  });
 }
 
 // ─── Gen 3: Oscillator ─────────────────────────────────────────────────────
@@ -2259,6 +2284,7 @@ const GEN3 = {
   nodes: null,
 };
 let gen3ScopeFrame = null;
+let gen3ScopeBuf = null; // reused time-domain buffer for the gen3 scope
 const gen3NoteEls = new Map();
 
 function setGen3NoteActive(midi, active) {
@@ -2282,7 +2308,7 @@ function buildGen3Nodes() {
   const analyser = ac.createAnalyser();
   analyser.fftSize = 2048;
   gain.connect(analyser);
-  analyser.connect(fx.input);
+  if (fxBuses.gen3) analyser.connect(fxBuses.gen3.input);
   GEN3.nodes = { gain, analyser };
 }
 
@@ -2462,7 +2488,9 @@ function drawGen3Scope() {
 
   if (!GEN3.nodes?.analyser) return;
   const analyser = GEN3.nodes.analyser;
-  const data = new Float32Array(analyser.frequencyBinCount);
+  if (!gen3ScopeBuf || gen3ScopeBuf.length !== analyser.frequencyBinCount)
+    gen3ScopeBuf = new Float32Array(analyser.frequencyBinCount);
+  const data = gen3ScopeBuf;
   analyser.getFloatTimeDomainData(data);
 
   c.strokeStyle = GEN3.activeNotes.size + GEN3.releasingVoices.size > 0 ? '#40b8d0' : '#3a3a3a';
@@ -2478,7 +2506,7 @@ function drawGen3Scope() {
 }
 
 function gen3ScopeLoop() {
-  drawGen3Scope();
+  if (UI_VIEW.mode === 'front') drawGen3Scope();
   gen3ScopeFrame = requestAnimationFrame(gen3ScopeLoop);
 }
 function startGen3Scope() {
@@ -2777,7 +2805,8 @@ function buildGen4Nodes() {
   const channelOuts = GEN4.channels.map((ch) => {
     const g = ac.createGain();
     g.gain.value = 1.0;
-    g.connect(ch.fxSend ? fx.input : fx.limiter.comp);
+    // Drum channels share the drums bus; bypass routes straight to the mix sum.
+    g.connect(ch.fxSend ? fxBuses.gen4.input : master.sum);
     return g;
   });
 
@@ -2789,12 +2818,12 @@ const gen4FxSendBtns = [];
 function gen4SetChannelFxSend(ci, send) {
   const ch = GEN4.channels[ci];
   ch.fxSend = send;
-  if (GEN4.nodes?.channelOuts?.[ci] && fx) {
+  if (GEN4.nodes?.channelOuts?.[ci] && fxBuses.gen4 && master) {
     const out = GEN4.nodes.channelOuts[ci];
     try {
       out.disconnect();
     } catch (e) {}
-    out.connect(send ? fx.input : fx.limiter.comp);
+    out.connect(send ? fxBuses.gen4.input : master.sum);
   }
   const btn = gen4FxSendBtns[ci];
   if (btn) btn.classList.toggle('active', send);
@@ -3439,35 +3468,67 @@ const FX_DEFS = [
   },
 ];
 
-// Source of truth for FX state — applied to audio nodes when they exist.
-const FX = {
-  beatrepeat: {
-    interval: 0.5,
-    sync: true,
-    syncIndex: 4,
-    grid: 125,
-    gridSync: true,
-    gridSyncIndex: 2,
-    gate: 8,
-    pitch: 0,
-    decay: 1,
-    chance: 1,
-    mix: 0,
-  },
-  delay: { time: 0.3, feedback: 0.35, mix: 0, sync: false, syncIndex: 4, hp: 20, mode: 'stereo' },
-  filter: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 0 },
-  bitreduce: { bits: 8, rate: 1, mix: 0 },
-  sat: { drive: 0.3, mix: 0 },
-  reverb: { size: 2, decay: 3, predelay: 0.018, damping: 0.42, mix: 0 },
-  limiter: { threshold: -8, attack: 0.003, release: 0.12, ratio: 20, knee: 0, output: 0.96 },
+// Per-instrument FX buses. Each instrument (granular 1/2, synth, drums) owns an
+// independent effect chain; one instrument is "active" and its chain is shown and
+// edited in the FX column. All bus outputs sum into a single global master limiter.
+const FX_BUS_IDS = ['gen0', 'gen1', 'gen3', 'gen4'];
+const FX_BUS_LABELS = { gen0: 'Granular 1', gen1: 'Granular 2', gen3: 'Synth', gen4: 'Drums' };
+
+// Default per-bus effect state (the limiter is global, not per-bus).
+function makeDefaultFxState() {
+  return {
+    beatrepeat: {
+      interval: 0.5,
+      sync: true,
+      syncIndex: 4,
+      grid: 125,
+      gridSync: true,
+      gridSyncIndex: 2,
+      gate: 8,
+      pitch: 0,
+      decay: 1,
+      chance: 1,
+      mix: 0,
+    },
+    delay: { time: 0.3, feedback: 0.35, mix: 0, sync: false, syncIndex: 4, hp: 20, mode: 'stereo' },
+    filter: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 0 },
+    bitreduce: { bits: 8, rate: 1, mix: 0 },
+    sat: { drive: 0.3, mix: 0 },
+    reverb: { size: 2, decay: 3, predelay: 0.018, damping: 0.42, mix: 0 },
+  };
+}
+
+// Source of truth for per-bus FX state — applied to audio nodes when they exist.
+const fxStates = {
+  gen0: makeDefaultFxState(),
+  gen1: makeDefaultFxState(),
+  gen3: makeDefaultFxState(),
+  gen4: makeDefaultFxState(),
 };
 
-// Order of the reorderable effects between the input bus and the pinned
-// limiter. Mutated by drag-to-reorder; persisted in presets.
-const DEFAULT_FX_ORDER = ['beatrepeat', 'delay', 'filter', 'bitreduce', 'sat', 'reverb'];
-let FX_ORDER = [...DEFAULT_FX_ORDER];
+// Global master limiter state (one limiter at the tail of the summed mix).
+const LIMITER = { threshold: -8, attack: 0.003, release: 0.12, ratio: 20, knee: 0, output: 0.96 };
 
-let fx = null; // audio nodes, created in start(), nulled in stop()
+// Order of the reorderable effects between each bus input and bus output.
+// Mutated per-bus by drag-to-reorder; persisted in presets.
+const DEFAULT_FX_ORDER = ['beatrepeat', 'delay', 'filter', 'bitreduce', 'sat', 'reverb'];
+const fxOrders = {
+  gen0: [...DEFAULT_FX_ORDER],
+  gen1: [...DEFAULT_FX_ORDER],
+  gen3: [...DEFAULT_FX_ORDER],
+  gen4: [...DEFAULT_FX_ORDER],
+};
+
+// Which bus the FX column currently shows/edits.
+let activeBus = 'gen0';
+
+// Per-bus audio node graphs, created in ensureAudioEngine(), nulled in stop().
+const fxBuses = { gen0: null, gen1: null, gen3: null, gen4: null };
+let master = null; // { sum, limiter, output } — global tail of the mix
+
+// Live alias to the active bus state, kept in sync by setActiveBus(). Lets the FX
+// UI/refresh code keep referring to FX.* without knowing which bus is active.
+let FX = fxStates[activeBus];
 
 // ─── LFO ───────────────────────────────────────────────────────────────────
 
@@ -3836,9 +3897,15 @@ function setTransportBpm(value, { refresh = true } = {}) {
   const bpmInput = getBpmInput();
   if (bpmInput) bpmInput.value = `${TRANSPORT.bpm}`;
   if (!refresh) return;
-  if (FX.delay.sync) applyFx('delay', 'time', getBaseFxValue('delay', 'time'));
-  if (FX.beatrepeat.sync) applyFx('beatrepeat', 'interval', getBaseFxValue('beatrepeat', 'interval'));
-  if (FX.beatrepeat.gridSync) applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
+  // Every bus has its own sync-locked delay/beat-repeat times — retune them all.
+  FX_BUS_IDS.forEach((busId) => {
+    const st = fxStates[busId];
+    if (st.delay.sync) applyFx('delay', 'time', getBaseFxValue('delay', 'time', busId), busId);
+    if (st.beatrepeat.sync)
+      applyFx('beatrepeat', 'interval', getBaseFxValue('beatrepeat', 'interval', busId), busId);
+    if (st.beatrepeat.gridSync)
+      applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid', busId), busId);
+  });
   refreshDelayTimeUI();
   refreshBeatRepeatIntervalUI();
   refreshBeatRepeatGridUI();
@@ -4477,8 +4544,8 @@ function renderBackPanelConnections() {
   }
 
   // ── Limiter gain reduction meter ──
-  if (BACK_PANEL.limiterValueEl && BACK_PANEL.limiterFill && fx?.limiter?.comp) {
-    const reduction = Math.abs(fx.limiter.comp.reduction || 0);
+  if (BACK_PANEL.limiterValueEl && BACK_PANEL.limiterFill && master?.limiter?.comp) {
+    const reduction = Math.abs(master.limiter.comp.reduction || 0);
     BACK_PANEL.limiterValueEl.textContent = `${formatNumericValue(reduction, 1)} dB`;
     BACK_PANEL.limiterFill.style.setProperty('--source-level', `${Math.min(1, reduction / 12)}`);
   }
@@ -4636,7 +4703,7 @@ function refreshBackPanelState() {
   BACK_PANEL.audioModules.get('limiter') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('limiter');
-      module.subtitleEl.textContent = `${formatNumericValue(FX.limiter.ratio, 1)}:1 • ${formatNumericValue(FX.limiter.threshold, 1)}dB`;
+      module.subtitleEl.textContent = `${formatNumericValue(LIMITER.ratio, 1)}:1 • ${formatNumericValue(LIMITER.threshold, 1)}dB`;
       module.el.classList.toggle('active', true);
     })();
   BACK_PANEL.audioModules.get('output') &&
@@ -4675,6 +4742,9 @@ function setPanelView(mode) {
     rebuildBackWireSVG();
     requestAnimationFrame(renderBackPanelConnections);
   }
+  // Mod visuals are skipped per-frame while the front view is hidden; refresh
+  // once on entry so the FX/gen controls show the current mapping state.
+  if (mode === 'front') refreshModulationVisuals();
   if (mode === 'visual') startViz(); else stopViz();
 }
 
@@ -4908,14 +4978,15 @@ function makeSatCurve(drive) {
   return curve;
 }
 
-function makeReverbIR() {
+function makeReverbIR(busId = activeBus) {
+  const rv = fxStates[busId].reverb;
   const sr = audioCtx.sampleRate;
-  const len = Math.floor(sr * Math.max(0.05, FX.reverb.size));
+  const len = Math.floor(sr * Math.max(0.05, rv.size));
   const buf = audioCtx.createBuffer(2, len, sr);
-  const damping = clamp(FX.reverb.damping, 0, 1);
-  const decay = Math.max(0.5, FX.reverb.decay);
-  const earlyCount = 6 + Math.round(FX.reverb.size * 3);
-  const earlySpacing = Math.max(0.003, FX.reverb.size * 0.0022);
+  const damping = clamp(rv.damping, 0, 1);
+  const decay = Math.max(0.5, rv.decay);
+  const earlyCount = 6 + Math.round(rv.size * 3);
+  const earlySpacing = Math.max(0.003, rv.size * 0.0022);
   const baseBrightness = 0.11 + (1 - damping) * 0.22;
   let peak = 0;
   const seededNoise = (seed) => {
@@ -4963,37 +5034,63 @@ function makeReverbIR() {
   return buf;
 }
 
-function getReverbDampingCutoff() {
-  return 900 + Math.pow(1 - clamp(FX.reverb.damping, 0, 1), 1.45) * 13500;
+function getReverbDampingCutoff(busId = activeBus) {
+  return 900 + Math.pow(1 - clamp(fxStates[busId].reverb.damping, 0, 1), 1.45) * 13500;
 }
 
-function applyDelayMode() {
-  if (!fx?.delay) return;
-  const isPingPong = FX.delay.mode === 'pingpong';
+function applyDelayMode(busId = activeBus) {
+  const bus = fxBuses[busId];
+  if (!bus?.delay) return;
+  const isPingPong = fxStates[busId].delay.mode === 'pingpong';
   const normalGain = isPingPong ? 0 : 1;
   const pingGain = isPingPong ? 1 : 0;
 
-  fx.delay.normalSend.gain.setValueAtTime(normalGain, audioCtx.currentTime);
-  fx.delay.normalFeedbackMode.gain.setValueAtTime(normalGain, audioCtx.currentTime);
-  fx.delay.normalWetMode.gain.setValueAtTime(normalGain, audioCtx.currentTime);
+  bus.delay.normalSend.gain.setValueAtTime(normalGain, audioCtx.currentTime);
+  bus.delay.normalFeedbackMode.gain.setValueAtTime(normalGain, audioCtx.currentTime);
+  bus.delay.normalWetMode.gain.setValueAtTime(normalGain, audioCtx.currentTime);
 
-  fx.delay.pingInputMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
-  fx.delay.pingLFeedbackMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
-  fx.delay.pingRFeedbackMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
-  fx.delay.pingWetMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
+  bus.delay.pingInputMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
+  bus.delay.pingLFeedbackMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
+  bus.delay.pingRFeedbackMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
+  bus.delay.pingWetMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
 }
 
-function applyFilterMode() {
-  if (!fx?.filter?.biquad) return;
-  fx.filter.biquad.type = FX.filter.mode;
+function applyFilterMode(busId = activeBus) {
+  const bus = fxBuses[busId];
+  if (!bus?.filter?.biquad) return;
+  bus.filter.biquad.type = fxStates[busId].filter.mode;
 }
 
-function buildFxNodes() {
+// Build the global master tail once: every bus output sums into master.sum,
+// which feeds the single limiter and the master output gain → destination.
+function buildMaster() {
   const ac = audioCtx;
+  const sum = ac.createGain();
+  const limiter = ac.createDynamicsCompressor();
+  limiter.threshold.setValueAtTime(LIMITER.threshold, ac.currentTime);
+  limiter.knee.setValueAtTime(LIMITER.knee, ac.currentTime);
+  limiter.ratio.setValueAtTime(LIMITER.ratio, ac.currentTime);
+  limiter.attack.setValueAtTime(LIMITER.attack, ac.currentTime);
+  limiter.release.setValueAtTime(LIMITER.release, ac.currentTime);
+  const masterOut = ac.createGain();
+  masterOut.gain.setValueAtTime(LIMITER.output, ac.currentTime);
+  sum.connect(limiter);
+  limiter.connect(masterOut);
+  master = { sum, limiter: { comp: limiter, output: masterOut }, output: masterOut };
+  return master;
+}
 
-  // Stable entry bus: generators/drums connect here once; the effect order
-  // between here and the limiter is rewired live by reconnectFxChain().
+// Build one instrument's independent effect chain. Its output sums into the
+// shared master tail. The effect order between input and output is rewired
+// live by reconnectFxChain(busId).
+function buildBusFx(busId) {
+  const ac = audioCtx;
+  const st = fxStates[busId];
+
+  // Stable entry/exit gains: the generator connects to `input` once, `output`
+  // sums into master; the movable effects between them are wired by reconnect.
   const chainIn = ac.createGain();
+  const busOut = ac.createGain();
 
   // ─ Beat repeat ─
   const brIn = ac.createGain();
@@ -5004,12 +5101,12 @@ function buildFxNodes() {
     numberOfOutputs: 1,
     outputChannelCount: [2],
     parameterData: {
-      interval: getBeatRepeatIntervalSeconds(),
-      grid: getBeatRepeatGridSeconds(),
-      gate: FX.beatrepeat.gate,
-      pitch: FX.beatrepeat.pitch,
-      decay: FX.beatrepeat.decay,
-      chance: FX.beatrepeat.chance,
+      interval: getBeatRepeatIntervalSeconds(busId),
+      grid: getBeatRepeatGridSeconds(busId),
+      gate: st.beatrepeat.gate,
+      pitch: st.beatrepeat.pitch,
+      decay: st.beatrepeat.decay,
+      chance: st.beatrepeat.chance,
     },
   });
   const brOut = ac.createGain();
@@ -5031,7 +5128,7 @@ function buildFxNodes() {
   const dlyFb = ac.createGain();
   const dlyHpf = ac.createBiquadFilter();
   dlyHpf.type = 'highpass';
-  dlyHpf.frequency.value = FX.delay.hp;
+  dlyHpf.frequency.value = st.delay.hp;
   dlyHpf.Q.value = 0.5;
   const dlyPingSplit = ac.createChannelSplitter(2);
   const dlyPingMonoIn = ac.createGain();
@@ -5046,11 +5143,11 @@ function buildFxNodes() {
   const dlyPingRFeedbackMode = ac.createGain();
   const dlyPingLHpf = ac.createBiquadFilter();
   dlyPingLHpf.type = 'highpass';
-  dlyPingLHpf.frequency.value = FX.delay.hp;
+  dlyPingLHpf.frequency.value = st.delay.hp;
   dlyPingLHpf.Q.value = 0.5;
   const dlyPingRHpf = ac.createBiquadFilter();
   dlyPingRHpf.type = 'highpass';
-  dlyPingRHpf.frequency.value = FX.delay.hp;
+  dlyPingRHpf.frequency.value = st.delay.hp;
   dlyPingRHpf.Q.value = 0.5;
   const dlyPingMerge = ac.createChannelMerger(2);
   const dlyPingWetMode = ac.createGain();
@@ -5109,8 +5206,8 @@ function buildFxNodes() {
     numberOfOutputs: 1,
     outputChannelCount: [2],
     parameterData: {
-      bits: FX.bitreduce.bits,
-      rate: FX.bitreduce.rate,
+      bits: st.bitreduce.bits,
+      rate: st.bitreduce.rate,
     },
   });
   const bitOut = ac.createGain();
@@ -5158,23 +5255,9 @@ function buildFxNodes() {
   rvbDry.connect(rvbOut);
   rvbWet.connect(rvbOut);
 
-  // ─ Master limiter ─
-  const limiter = ac.createDynamicsCompressor();
-  limiter.threshold.setValueAtTime(FX.limiter.threshold, ac.currentTime);
-  limiter.knee.setValueAtTime(FX.limiter.knee, ac.currentTime);
-  limiter.ratio.setValueAtTime(FX.limiter.ratio, ac.currentTime);
-  limiter.attack.setValueAtTime(FX.limiter.attack, ac.currentTime);
-  limiter.release.setValueAtTime(FX.limiter.release, ac.currentTime);
-  const masterOut = ac.createGain();
-  masterOut.gain.setValueAtTime(FX.limiter.output, ac.currentTime);
-
-  // The limiter is pinned at the tail of the chain; the reorderable effects
-  // between chainIn and the limiter are wired by reconnectFxChain() below.
-  limiter.connect(masterOut);
-
-  fx = {
+  fxBuses[busId] = {
     input: chainIn,
-    output: masterOut,
+    output: busOut,
     beatrepeat: { node: brNode, dry: brDry, wet: brWet, in: brIn, out: brOut },
     delay: {
       tap: dlyTap,
@@ -5211,31 +5294,42 @@ function buildFxNodes() {
       in: rvbIn,
       out: rvbOut,
     },
-    limiter: { comp: limiter, output: masterOut },
   };
 
-  reconnectFxChain();
-  applyAllFx();
+  // This bus's tail sums into the shared master limiter, once and for good.
+  busOut.connect(master.sum);
+
+  reconnectFxChain(busId);
+  applyAllFx(busId);
 }
 
-// Rewire the reorderable effects between the input bus and the pinned limiter
-// to match FX_ORDER. Safe to call live — each effect is a self-contained
-// in→out pair, so we fully disconnect the movable links and rebuild them.
-function reconnectFxChain() {
-  if (!fx) return;
-  fx.input.disconnect();
-  FX_ORDER.forEach((id) => fx[id]?.out.disconnect());
-  let prev = fx.input;
-  FX_ORDER.forEach((id) => {
-    const eff = fx[id];
+// Build the whole FX graph: one master tail + a chain per instrument bus.
+function buildFxNodes() {
+  buildMaster();
+  FX_BUS_IDS.forEach((busId) => buildBusFx(busId));
+  applyFxModulation();
+}
+
+// Rewire one bus's reorderable effects between its input and its output to match
+// fxOrders[busId]. Safe to call live — each effect is a self-contained in→out
+// pair, so we fully disconnect the movable links and rebuild them.
+function reconnectFxChain(busId = activeBus) {
+  const bus = fxBuses[busId];
+  if (!bus) return;
+  bus.input.disconnect();
+  fxOrders[busId].forEach((id) => bus[id]?.out.disconnect());
+  let prev = bus.input;
+  fxOrders[busId].forEach((id) => {
+    const eff = bus[id];
     if (!eff) return;
     prev.connect(eff.in);
     prev = eff.out;
   });
-  prev.connect(fx.limiter.comp);
+  prev.connect(bus.output);
 }
 
-function applyFx(id, key, val) {
+function applyFx(id, key, val, busId = activeBus) {
+  const fx = fxBuses[busId];
   if (!fx) return;
   if (id === 'beatrepeat') {
     const setParam = (name, value) =>
@@ -5292,12 +5386,12 @@ function applyFx(id, key, val) {
     }
   } else if (id === 'reverb') {
     if (key === 'size' || key === 'decay' || key === 'damping')
-      fx.reverb.conv.buffer = makeReverbIR();
+      fx.reverb.conv.buffer = makeReverbIR(busId);
     if (key === 'predelay')
       fx.reverb.pre.delayTime.setTargetAtTime(val, audioCtx.currentTime, 0.02);
     if (key === 'damping')
       fx.reverb.damp.frequency.setTargetAtTime(
-        getReverbDampingCutoff(),
+        getReverbDampingCutoff(busId),
         audioCtx.currentTime,
         0.03,
       );
@@ -5305,24 +5399,33 @@ function applyFx(id, key, val) {
       fx.reverb.wet.gain.value = val;
       fx.reverb.dry.gain.value = 1 - val;
     }
-  } else if (id === 'limiter') {
-    if (key === 'threshold')
-      fx.limiter.comp.threshold.setTargetAtTime(val, audioCtx.currentTime, 0.02);
-    if (key === 'attack') fx.limiter.comp.attack.setTargetAtTime(val, audioCtx.currentTime, 0.02);
-    if (key === 'release') fx.limiter.comp.release.setTargetAtTime(val, audioCtx.currentTime, 0.02);
-    if (key === 'ratio') fx.limiter.comp.ratio.setTargetAtTime(val, audioCtx.currentTime, 0.02);
-    if (key === 'knee') fx.limiter.comp.knee.setTargetAtTime(val, audioCtx.currentTime, 0.02);
-    if (key === 'output') fx.limiter.output.gain.setTargetAtTime(val, audioCtx.currentTime, 0.02);
   }
 }
 
-function applyAllFx() {
-  FX_DEFS.forEach(({ id, params }) =>
-    params.forEach(({ key }) => applyFx(id, key, getBaseFxValue(id, key))),
-  );
-  applyDelayMode();
-  applyFilterMode();
-  applyFxModulation();
+// Apply one master-limiter parameter (the limiter is global, not per-bus).
+function applyLimiter(key, val) {
+  if (!master?.limiter) return;
+  const t = audioCtx.currentTime;
+  if (key === 'threshold') master.limiter.comp.threshold.setTargetAtTime(val, t, 0.02);
+  if (key === 'attack') master.limiter.comp.attack.setTargetAtTime(val, t, 0.02);
+  if (key === 'release') master.limiter.comp.release.setTargetAtTime(val, t, 0.02);
+  if (key === 'ratio') master.limiter.comp.ratio.setTargetAtTime(val, t, 0.02);
+  if (key === 'knee') master.limiter.comp.knee.setTargetAtTime(val, t, 0.02);
+  if (key === 'output') master.limiter.output.gain.setTargetAtTime(val, t, 0.02);
+}
+
+function applyLimiterAll() {
+  Object.keys(LIMITER).forEach((key) => applyLimiter(key, LIMITER[key]));
+}
+
+// Apply all reorderable-effect params for one bus from its state (no limiter).
+function applyAllFx(busId = activeBus) {
+  FX_DEFS.forEach(({ id, params }) => {
+    if (id === 'limiter') return;
+    params.forEach(({ key }) => applyFx(id, key, getBaseFxValue(id, key, busId), busId));
+  });
+  applyDelayMode(busId);
+  applyFilterMode(busId);
 }
 
 function refreshGen3UI() {
@@ -5368,8 +5471,10 @@ function capturePreset() {
       sustainMode: GEN3.sustainMode,
       lockedMidis: [...GEN3.lockedMidis],
     },
-    fx: JSON.parse(JSON.stringify(FX)),
-    fxOrder: [...FX_ORDER],
+    fxByBus: JSON.parse(JSON.stringify(fxStates)),
+    fxOrderByBus: JSON.parse(JSON.stringify(fxOrders)),
+    limiter: { ...LIMITER },
+    activeBus,
     lfos: LFOS.map(({ label, rate, sync, syncIndex, shape, depth }) => ({
       label,
       rate,
@@ -5438,36 +5543,39 @@ function applyPreset(preset) {
     }
   }
 
-  if (preset.fx) {
-    Object.keys(FX).forEach((id) => {
-      if (preset.fx[id]) Object.assign(FX[id], preset.fx[id]);
-    });
-    applyAllFx();
-    refreshFilterUI();
-    ['beatrepeat', 'delay', 'filter', 'bitreduce', 'sat', 'reverb', 'limiter'].forEach((id) => {
-      Object.entries(FX[id]).forEach(([key, value]) => {
-        if (key === 'mode') return;
-        if (id === 'delay' && key === 'time') return;
-        if (
-          id === 'beatrepeat' &&
-          (key === 'interval' ||
-            key === 'sync' ||
-            key === 'syncIndex' ||
-            key === 'grid' ||
-            key === 'gridSync' ||
-            key === 'gridSyncIndex')
-        )
-          return;
-        fxControlBindings.get(`${id}:${key}`)?.setValue(value);
+  if (preset.fxByBus) {
+    FX_BUS_IDS.forEach((busId) => {
+      const saved = preset.fxByBus[busId];
+      if (!saved) return;
+      Object.keys(fxStates[busId]).forEach((id) => {
+        if (saved[id]) Object.assign(fxStates[busId][id], saved[id]);
       });
     });
-    refreshDelayTimeUI();
-    refreshDelayModeUI();
-    refreshBeatRepeatIntervalUI();
-    refreshBeatRepeatGridUI();
+    if (preset.fxOrderByBus) {
+      FX_BUS_IDS.forEach((busId) => {
+        if (Array.isArray(preset.fxOrderByBus[busId])) setFxOrder(preset.fxOrderByBus[busId], busId);
+      });
+    }
+    // Push every bus's loaded state to its audio nodes, then reapply modulation.
+    FX_BUS_IDS.forEach((busId) => applyAllFx(busId));
+    applyFxModulation();
   }
 
-  if (preset.fxOrder) setFxOrder(preset.fxOrder);
+  if (preset.limiter) {
+    Object.assign(LIMITER, preset.limiter);
+    applyLimiterAll();
+    limiterControls.forEach((control, key) => control.setValue(LIMITER[key]));
+  }
+
+  if (preset.activeBus && FX_BUS_IDS.includes(preset.activeBus)) activeBus = preset.activeBus;
+  FX = fxStates[activeBus];
+  // Rebuild the FX column for the active bus (controls take their loaded values).
+  renderActiveBusFx();
+  updateFxActiveLabel();
+  refreshFilterUI();
+  document.querySelectorAll('#generators [data-bus]').forEach((el) => {
+    el.classList.toggle('active-instrument', el.dataset.bus === activeBus);
+  });
 
   if (preset.lfos) {
     preset.lfos.forEach((saved, idx) => {
@@ -5754,23 +5862,71 @@ function buildProjectUI() {
   refreshProjectUI();
 }
 
+const limiterControls = new Map(); // master-limiter controls (global section)
+
 function buildFxUI() {
   const container = document.getElementById('fx-chain');
 
-  // Column header matching generator style
+  // Column header — names the instrument whose chain is shown/edited.
   const header = document.createElement('div');
   header.className = 'col-header';
-  header.innerHTML = '<span class="col-title"><span class="col-dot"></span>FX Chain</span>';
+  header.innerHTML =
+    '<span class="col-title"><span class="col-dot"></span>FX — <span id="fxActiveLabel"></span></span>';
   container.appendChild(header);
 
-  // LFO modulators first
+  // LFO modulators + sequencer are global (shared across all buses).
   LFOS.forEach((_, lfoIdx) => container.appendChild(buildLFOSection(lfoIdx)));
   container.appendChild(buildSequencerSection());
 
-  // One section per effect — reorderable effects in FX_ORDER, then the
-  // master limiter pinned at the tail.
+  // The active bus's reorderable effect sections live here; rebuilt on switch.
+  const fxEffects = document.createElement('div');
+  fxEffects.id = 'fx-effects';
+  container.appendChild(fxEffects);
+
+  // Master limiter — single, global, pinned after the summed mix.
+  buildLimiterSection(container);
+
+  initFxReorderDnD(fxEffects);
+  renderActiveBusFx();
+  updateFxActiveLabel();
+}
+
+// Build the global master-limiter section once (binds the global LIMITER state).
+function buildLimiterSection(container) {
+  const def = FX_DEFS.find((d) => d.id === 'limiter');
+  if (!def) return;
+  const { section, content } = createFxSection(def.label);
+  limiterControls.clear();
+  def.params.forEach((p) => {
+    const control = makeControlRow(
+      p,
+      LIMITER[p.key],
+      (v) => {
+        LIMITER[p.key] = v;
+        applyLimiter(p.key, v);
+        refreshBackPanelState();
+      },
+      null,
+    );
+    limiterControls.set(p.key, control);
+    content.appendChild(control);
+  });
+  fxLimiterSection = section;
+  container.appendChild(section);
+}
+
+// (Re)build the active bus's reorderable effect sections into #fx-effects.
+function renderActiveBusFx() {
+  const host = document.getElementById('fx-effects');
+  if (!host) return;
+  host.innerHTML = '';
+  fxControlBindings.clear();
+  fxSectionEls.clear();
+  filterModeButtons.clear();
+  delayModeButtons.clear();
+
   const fxDefById = new Map(FX_DEFS.map((def) => [def.id, def]));
-  [...FX_ORDER, 'limiter'].forEach((fxId) => {
+  fxOrders[activeBus].forEach((fxId) => {
     const def = fxDefById.get(fxId);
     if (!def) return;
     const { section, content } = createFxSection(def.label);
@@ -5907,23 +6063,37 @@ function buildFxUI() {
       }
     });
 
-    if (def.id === 'limiter') {
-      fxLimiterSection = section;
-    } else {
-      section.classList.add('fx-reorderable');
-      section.dataset.fxId = def.id;
-      enableFxSectionDrag(section, def.label);
-      fxSectionEls.set(def.id, section);
-    }
-    container.appendChild(section);
+    section.classList.add('fx-reorderable');
+    section.dataset.fxId = def.id;
+    enableFxSectionDrag(section, def.label);
+    fxSectionEls.set(def.id, section);
+    host.appendChild(section);
   });
-
-  initFxReorderDnD(container);
 
   refreshDelayTimeUI();
   refreshDelayModeUI();
   refreshBeatRepeatIntervalUI();
   refreshBeatRepeatGridUI();
+  refreshModulationVisuals();
+}
+
+function updateFxActiveLabel() {
+  const el = document.getElementById('fxActiveLabel');
+  if (el) el.textContent = FX_BUS_LABELS[activeBus] || '';
+}
+
+// Make an instrument the active one: its chain fills the FX column. Controls
+// inside a panel keep working — clicking anywhere in a panel just selects it.
+function setActiveBus(busId) {
+  if (!FX_BUS_IDS.includes(busId)) return;
+  activeBus = busId;
+  FX = fxStates[activeBus];
+  document.querySelectorAll('#generators [data-bus]').forEach((el) => {
+    el.classList.toggle('active-instrument', el.dataset.bus === busId);
+  });
+  updateFxActiveLabel();
+  renderActiveBusFx();
+  refreshBackPanelState();
 }
 
 // ─── FX reordering (drag & drop) ─────────────────────────────────────────────
@@ -5977,8 +6147,8 @@ function initFxReorderDnD(container) {
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     const after = getFxDragAfterElement(container, e.clientY);
     if (after == null) {
-      // Past the last reorderable effect — drop just above the pinned limiter.
-      if (fxLimiterSection) container.insertBefore(dragging, fxLimiterSection);
+      // Past the last effect — drop at the end of this bus's effect list.
+      container.appendChild(dragging);
     } else if (after !== dragging) {
       container.insertBefore(dragging, after);
     }
@@ -5993,7 +6163,7 @@ function initFxReorderDnD(container) {
 }
 
 function commitFxOrderFromDom() {
-  const container = document.getElementById('fx-chain');
+  const container = document.getElementById('fx-effects');
   if (!container) return;
   const order = [...container.querySelectorAll('.fx-section.fx-reorderable')]
     .map((el) => el.dataset.fxId)
@@ -6001,25 +6171,19 @@ function commitFxOrderFromDom() {
   DEFAULT_FX_ORDER.forEach((id) => {
     if (!order.includes(id)) order.push(id);
   });
-  FX_ORDER = order;
-  reconnectFxChain();
+  fxOrders[activeBus] = order;
+  reconnectFxChain(activeBus);
 }
 
-function setFxOrder(order) {
+function setFxOrder(order, busId = activeBus) {
   if (!Array.isArray(order)) return;
   const next = order.filter((id) => DEFAULT_FX_ORDER.includes(id));
   DEFAULT_FX_ORDER.forEach((id) => {
     if (!next.includes(id)) next.push(id);
   });
-  FX_ORDER = next;
-  const container = document.getElementById('fx-chain');
-  if (container) {
-    FX_ORDER.forEach((id) => {
-      const el = fxSectionEls.get(id);
-      if (el) container.insertBefore(el, fxLimiterSection);
-    });
-  }
-  reconnectFxChain();
+  fxOrders[busId] = next;
+  reconnectFxChain(busId);
+  if (busId === activeBus) renderActiveBusFx();
 }
 
 async function start() {
@@ -6044,10 +6208,12 @@ async function ensureGranularEngine() {
   if (!node) {
     node = new AudioWorkletNode(audioCtx, 'granular-processor', {
       numberOfInputs: 1,
-      numberOfOutputs: 1,
-      outputChannelCount: [2],
+      numberOfOutputs: 2,
+      outputChannelCount: [2, 2],
     });
-    node.connect(fx.input);
+    // Granular 1 (output 0) and Granular 2 (output 1) feed their own FX buses.
+    node.connect(fxBuses.gen0.input, 0);
+    node.connect(fxBuses.gen1.input, 1);
     node.port.onmessage = (e) => {
       if (e.data && e.data.type === 'viz') drawViz(e.data);
     };
@@ -6230,7 +6396,8 @@ function stop() {
   GEN4.nodes = null;
   disconnectGranularInput({ stopTracks: true });
   if (audioCtx) audioCtx.close();
-  audioCtx = node = fx = null;
+  audioCtx = node = master = null;
+  FX_BUS_IDS.forEach((id) => (fxBuses[id] = null));
   granularModulePromise = null;
   bitReducerModulePromise = null;
   beatRepeatModulePromise = null;

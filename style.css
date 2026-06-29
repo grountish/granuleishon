@@ -1223,6 +1223,24 @@ button.primary:hover {
   border-top: 1px solid var(--border);
 }
 
+/* The active instrument — its FX chain is shown in the FX column. */
+.generator.active-instrument {
+  box-shadow: inset 3px 0 0 var(--gen-accent, var(--accent-0));
+}
+
+.generator.active-instrument::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: var(--gen-accent, var(--accent-0));
+  opacity: 0.05;
+}
+
+#fxActiveLabel {
+  color: var(--accent-fx);
+}
+
 .gen-header-actions {
   display: flex;
   align-items: center;
