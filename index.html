@@ -34,6 +34,10 @@
         <button type="button" class="view-btn" data-view="visual">Visual</button>
       </div>
       <div class="transport">
+        <div class="mode-toggle" id="modeToggle">
+          <button type="button" class="mode-btn active" data-mode="loop" title="Loop mode — play the loop you are editing">Loop</button>
+          <button type="button" class="mode-btn" data-mode="song" title="Song mode — play the arrangement">Song</button>
+        </div>
         <label class="tempo-box" for="bpmInput">
           <span class="tempo-label">BPM</span>
           <input id="bpmInput" class="tempo-input" type="number" min="40" max="240" step="1" value="120" />
@@ -53,6 +57,11 @@
         <button id="recordBtn" class="record-btn">Rec</button>
         <span id="status" class="status">idle</span>
       </div>
+    </div>
+
+    <div id="loopStrip" class="loop-strip">
+      <div id="loopsBar" class="loops-bar"></div>
+      <div id="songLane" class="song-lane" hidden></div>
     </div>
 
     <div id="frontWorkspace" class="workspace">

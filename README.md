@@ -12,9 +12,13 @@ you must serve over `http://localhost` — opening `index.html` from disk won't
 work.
 
 ```bash
-python3 -m http.server 8000
+python3 serve.py
 # then open http://localhost:8000
 ```
+
+(`serve.py` is a plain `http.server` with caching disabled — a stock
+`python3 -m http.server` lets the browser cache `main.js` and the worklet
+modules, so edits can silently not load.)
 
 Click **Start mic**, grant permission, and **wear headphones** to avoid
 feedback. Make a sound and play with the controls.
@@ -42,9 +46,33 @@ feedback. Make a sound and play with the controls.
 | Output gain   | Master level                               |
 | Freeze        | Stop recording — granulate a frozen moment |
 
+## Loops & Song mode
+
+The instrument rack (generator, kit, FX, LFO settings and routings) is global
+and always live. What is _sequenced_ — the drum grid, the chord the OSC row
+fires, and the mod-sequencer pattern — lives in a **Loop**.
+
+- The **Loops** bar (under the header) holds your loops: click to edit, `+` to
+  add an empty one, `⧉` to duplicate the current one, double-click to rename.
+- The **Loop/Song** toggle in the transport picks the play mode. Loop mode
+  plays whatever loop you are editing (the previous behavior).
+- **Song mode** shows the song lane: append loops as blocks, drag to reorder,
+  click a block's `×N` badge (or scroll on it) to set repeats, right-click to
+  remove. `⟳` cycles the song at the end; `follow` makes the editor track the
+  loop that is sounding. Playback switches patterns sample-accurately at
+  pattern boundaries — sound settings stay live throughout.
+
+Projects save all loops plus the arrangement; old single-loop projects load as
+loop "A". The workspace also autosaves (localStorage) and restores on reload.
+
+Source audio is persisted too: loaded .wav buffers and **frozen** mic takes are
+stored in IndexedDB per project (and for the autosave session), and reload back
+into the granulators — a frozen take stays frozen across reloads. The live
+unfrozen mic buffer is transient by nature and is not saved.
+
 ## Ideas to extend later
 
 - File / drag-and-drop sample source sharing the same engine
 - Grain envelope shape selection (Hann / Tukey / triangular)
-- Waveform + grain-position visualization on a canvas
-- Preset save/load
+- Per-loop scene recall of sound parameters (kit / FX snapshots)
+- Song-position export markers in recordings

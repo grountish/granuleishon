@@ -62,6 +62,12 @@ class GranularProcessor extends AudioWorkletProcessor {
           gen.frozenAt = gen.sourceMode === 'live' ? this.writePos : sourceLength;
           this.ensureFreezeBufferLength(gen, sourceLength);
           gen.freezeBuffer.set(sourceBuffer);
+          // Hand the main thread a copy of the frozen take so it can persist it.
+          const dump = gen.freezeBuffer.slice();
+          this.port.postMessage(
+            { type: 'frozen-dump', gen: e.data.gen, buffer: dump, frozenAt: gen.frozenAt },
+            [dump.buffer],
+          );
         } else if (!gen.params.freeze) {
           gen.frozenAt = null;
         }
@@ -69,6 +75,21 @@ class GranularProcessor extends AudioWorkletProcessor {
         this.setGenSourceBuffer(e.data.gen, e.data.buffer);
       } else if (e.data.type === 'set-gen-source-mode') {
         this.setGenSourceMode(e.data.gen, e.data.mode);
+      } else if (e.data.type === 'restore-frozen' && e.data.buffer) {
+        // Reinstate a persisted frozen take (live-source snapshot) after a reload.
+        const gen = this.gens[e.data.gen];
+        if (gen && gen.sourceMode === 'live') {
+          let buf = e.data.buffer;
+          if (buf.length !== this.liveBufferLength) {
+            const fixed = new Float32Array(this.liveBufferLength);
+            fixed.set(buf.subarray(0, Math.min(buf.length, fixed.length)));
+            buf = fixed;
+          }
+          gen.freezeBuffer = buf;
+          gen.frozenAt = Math.min(Math.max(0, e.data.frozenAt || 0), this.liveBufferLength - 1);
+          gen.params.freeze = true;
+          gen.grains.length = 0;
+        }
       }
     };
   }
