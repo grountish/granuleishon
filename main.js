@@ -863,6 +863,11 @@ function drawGenVizEmpty(gi) {
   c.fillStyle = '#9aa3a3';
   c.font = '500 10px ui-monospace, monospace';
   c.fillText('or drop a .wav file here', W / 2, H / 2 + 9);
+  if (!started) {
+    c.fillStyle = '#5a5a5a';
+    c.font = '500 9px ui-monospace, monospace';
+    c.fillText('click to start', W / 2, H / 2 + 27);
+  }
   c.restore();
 }
 
@@ -936,6 +941,34 @@ function drawGenVizStatic(gi) {
   c.globalAlpha = 0.9;
   c.fillText(label, 8, 6);
   c.restore();
+
+  if (!started) {
+    // Engine idle — clicking the waveform starts it. Draw a play badge.
+    const r = Math.min(16, H * 0.2);
+    c.save();
+    c.fillStyle = 'rgba(15,15,15,0.6)';
+    c.beginPath();
+    c.arc(W / 2, mid, r + 7, 0, Math.PI * 2);
+    c.fill();
+    c.strokeStyle = line;
+    c.lineWidth = 1.5;
+    c.beginPath();
+    c.arc(W / 2, mid, r + 7, 0, Math.PI * 2);
+    c.stroke();
+    c.fillStyle = line;
+    c.beginPath();
+    c.moveTo(W / 2 - r * 0.35, mid - r * 0.55);
+    c.lineTo(W / 2 - r * 0.35, mid + r * 0.55);
+    c.lineTo(W / 2 + r * 0.65, mid);
+    c.closePath();
+    c.fill();
+    c.textAlign = 'center';
+    c.textBaseline = 'top';
+    c.font = '600 9px ui-monospace, monospace';
+    c.fillStyle = '#9aa3a3';
+    c.fillText('click to play', W / 2, mid + r + 13);
+    c.restore();
+  }
   return true;
 }
 
@@ -1383,6 +1416,20 @@ function refreshSourceModeUI(genIdx) {
   });
   if (!started) getStartBtn().textContent = getIdleStartButtonLabel();
   refreshBackPanelState();
+}
+
+// Boot everything transport playback needs: audio graph, drum nodes AND the
+// granular worklet — so restored file buffers / frozen takes sound on ▶ play
+// without pressing START first. Mic capture itself stays behind START.
+async function ensureTransportEngine() {
+  if (!node) await ensureGranularEngine();
+  else await ensureAudioEngine();
+  if (!GEN4.nodes) buildGen4Nodes();
+  startGenVizLoop();
+  startLFOLoop();
+  if (!started) {
+    setStatus(anyMicSourceSelected() ? 'playing — press start for mic' : 'playing');
+  }
 }
 
 function setGranularRunning() {
@@ -2121,6 +2168,12 @@ function buildGeneratorPanel(genIdx) {
   };
   vizCanvas.addEventListener('pointerdown', (e) => {
     e.preventDefault();
+    // Idle engine: first click on the waveform starts everything (same as
+    // the START button) instead of silently scrubbing position.
+    if (!started) {
+      start();
+      return;
+    }
     vizCanvas.setPointerCapture(e.pointerId);
     vizCanvas.classList.add('dragging');
     updatePositionFromPointer(e.clientX);
@@ -3570,8 +3623,7 @@ function buildDrumPanel() {
   playBtn.textContent = '▶ Play';
   gen4PlayBtnEl = playBtn;
   playBtn.addEventListener('click', async () => {
-    await ensureAudioEngine();
-    if (!GEN4.nodes) buildGen4Nodes();
+    await ensureTransportEngine();
     GEN4.playing ? stopGen4Sequencer() : startGen4Sequencer();
   });
   actions.appendChild(playBtn);
@@ -4692,8 +4744,7 @@ function renderSongLane() {
   playBtn.className = 'song-play-btn';
   songPlayBtnEl = playBtn;
   playBtn.addEventListener('click', async () => {
-    await ensureAudioEngine();
-    if (!GEN4.nodes) buildGen4Nodes();
+    await ensureTransportEngine();
     GEN4.playing ? stopGen4Sequencer() : startGen4Sequencer();
   });
   lane.appendChild(playBtn);
