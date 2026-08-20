@@ -32,6 +32,13 @@ class BeatRepeatProcessor extends AudioWorkletProcessor {
     this.readPos = 0; // float read head into the captured slice
     this.sliceLen = 0;
     this.gain = 1; // current per-repeat gain
+    // Transport start realigns the interval clock so repeats land on the bar.
+    this.port.onmessage = (e) => {
+      if (e.data === 'reset') {
+        this.intervalTimer = 0;
+        this.repeating = false;
+      }
+    };
   }
 
   // Copy the most recent `len` samples (ending at writePos) into the slice buffer

@@ -194,7 +194,8 @@ function refreshRecordButton() {
   const btn = getRecordBtn();
   if (!btn) return;
   btn.classList.toggle('active', REC.isRecording);
-  btn.textContent = REC.isRecording ? 'Stop Rec' : 'Rec';
+  btn.textContent = '●';
+  btn.title = REC.isRecording ? 'Stop recording' : 'Record';
 }
 
 function mergeFloat32(chunks, sampleCount) {
@@ -488,10 +489,6 @@ function setGenFrozenData(genIdx, frozenData) {
   queueAutosaveAudio();
 }
 
-function getStartBtn() {
-  return document.getElementById('startBtn');
-}
-
 function getInputSelect() {
   return document.getElementById('inputDeviceSelect');
 }
@@ -506,10 +503,6 @@ function getBackPanel() {
 
 function getViewToggle() {
   return document.getElementById('viewToggle');
-}
-
-function getIdleStartButtonLabel() {
-  return anyMicSourceSelected() ? '▶ Start input' : '▶ Start';
 }
 
 function getAudioWorkletErrorMessage() {
@@ -942,33 +935,6 @@ function drawGenVizStatic(gi) {
   c.fillText(label, 8, 6);
   c.restore();
 
-  if (!started) {
-    // Engine idle — clicking the waveform starts it. Draw a play badge.
-    const r = Math.min(16, H * 0.2);
-    c.save();
-    c.fillStyle = 'rgba(15,15,15,0.6)';
-    c.beginPath();
-    c.arc(W / 2, mid, r + 7, 0, Math.PI * 2);
-    c.fill();
-    c.strokeStyle = line;
-    c.lineWidth = 1.5;
-    c.beginPath();
-    c.arc(W / 2, mid, r + 7, 0, Math.PI * 2);
-    c.stroke();
-    c.fillStyle = line;
-    c.beginPath();
-    c.moveTo(W / 2 - r * 0.35, mid - r * 0.55);
-    c.lineTo(W / 2 - r * 0.35, mid + r * 0.55);
-    c.lineTo(W / 2 + r * 0.65, mid);
-    c.closePath();
-    c.fill();
-    c.textAlign = 'center';
-    c.textBaseline = 'top';
-    c.font = '600 9px ui-monospace, monospace';
-    c.fillStyle = '#9aa3a3';
-    c.fillText('click to play', W / 2, mid + r + 13);
-    c.restore();
-  }
   return true;
 }
 
@@ -1317,6 +1283,8 @@ const GRAIN_ENV_TYPES = [
 const GEN3_LFO_PARAMS = [
   { key: 'gain', min: 0, max: 1, step: 0.01, unit: '' },
   { key: 'pitch', min: -24, max: 24, step: 1, unit: 'st' },
+  { key: 'decay', min: 0, max: 2, step: 0.01, unit: 's' },
+  { key: 'sustain', min: 0, max: 1, step: 0.01, unit: '' },
 ];
 const FX_LFO_PARAMS = [
   { id: 'delay', key: 'time', min: 0, max: MAX_DELAY_SECONDS },
@@ -1414,27 +1382,23 @@ function refreshSourceModeUI(genIdx) {
     btn.classList.toggle('active', mode === key);
     btn.classList.toggle('loaded', key === 'file' && !!getSourceState(genIdx).bufferData);
   });
-  if (!started) getStartBtn().textContent = getIdleStartButtonLabel();
   refreshBackPanelState();
 }
 
 // Boot everything transport playback needs: audio graph, drum nodes AND the
-// granular worklet — so restored file buffers / frozen takes sound on ▶ play
-// without pressing START first. Mic capture itself stays behind START.
+// granular worklet — so restored file buffers / frozen takes sound on ▶ play.
 async function ensureTransportEngine() {
   if (!node) await ensureGranularEngine();
   else await ensureAudioEngine();
   if (!GEN4.nodes) buildGen4Nodes();
   startGenVizLoop();
   startLFOLoop();
-  if (!started) {
-    setStatus(anyMicSourceSelected() ? 'playing — press start for mic' : 'playing');
-  }
+  if (!started) setStatus('playing');
 }
 
 function setGranularRunning() {
   started = true;
-  getStartBtn().textContent = '■ Stop';
+  refreshSongTransportUI();
   refreshGeneratorUI(0);
   refreshGeneratorUI(1);
   startLFOLoop();
@@ -1473,10 +1437,12 @@ function getDensitySyncValue(genIdx) {
   return 1 / beatsToSeconds(getGrainSyncStep(state[genIdx].densitySyncIndex).beats);
 }
 
-function getEffectiveGeneratorParams(genIdx) {
-  const effective = { ...state[genIdx] };
-  if (effective.grainSizeSync) effective.grainSizeMs = getGrainSizeSyncMs(genIdx);
-  if (effective.densitySync) effective.density = getDensitySyncValue(genIdx);
+function getEffectiveGeneratorParams(genIdx, base = state[genIdx]) {
+  const effective = { ...base };
+  if (effective.grainSizeSync)
+    effective.grainSizeMs = beatsToSeconds(getGrainSyncStep(effective.grainSizeSyncIndex).beats) * 1000;
+  if (effective.densitySync)
+    effective.density = 1 / beatsToSeconds(getGrainSyncStep(effective.densitySyncIndex).beats);
   if (lfoMappings.size > 0) {
     lfoMappings.forEach(({ genIdx: gi, key, sourceIdx }) => {
       if (gi !== genIdx) return;
@@ -1506,6 +1472,8 @@ function getEffectiveGen3Params() {
     gain: GEN3.gain,
     pitch: GEN3.pitch,
     detune: GEN3.detune,
+    decay: GEN3.decay,
+    sustain: GEN3.sustain,
   };
   if (lfoMappings.size > 0) {
     lfoMappings.forEach(({ genIdx, key, sourceIdx }) => {
@@ -1580,7 +1548,14 @@ function applyMappedModulationTargets() {
 
 function sendParams(genIdx) {
   if (!node) return;
-  const effective = getEffectiveGeneratorParams(genIdx);
+  // The worklet hears the audible loop's sound: in song mode with follow off,
+  // the loop being edited (state) differs from the one sounding.
+  const audibleGens = getAudibleLoop()?.gens?.[genIdx];
+  const base =
+    audibleGens && audibleGens !== state[genIdx]
+      ? { ...audibleGens, freeze: state[genIdx].freeze }
+      : state[genIdx];
+  const effective = getEffectiveGeneratorParams(genIdx, base);
   node.port.postMessage({ type: 'params', gen: genIdx, value: effective });
 }
 
@@ -1731,7 +1706,7 @@ function refreshLFOMappingUI() {
 }
 
 function setLFOLedState(led, sourceIdx) {
-  led.classList.remove('active', 'lfo-1', 'lfo-2', 'lfo-seq');
+  led.classList.remove('active', 'lfo-1', 'lfo-2', 'lfo-seq', 'lfo-sc');
   led.dataset.lfo = '';
   led.textContent = '';
   led.title = 'Map: unset';
@@ -1777,6 +1752,17 @@ function makeControlRow(p, initialValue, onInput, lfoTarget = null) {
     renderValue(v);
     onInput(v);
   });
+  if (lfoTarget && lfoTarget.genIdx >= 0 && lfoTarget.genIdx < 2) {
+    knob.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openKnobContextMenu(
+        { genIdx: lfoTarget.genIdx, key: lfoTarget.key, label: p.label },
+        event.clientX,
+        event.clientY,
+      );
+    });
+  }
 
   const label = document.createElement('label');
   label.textContent = p.label;
@@ -2033,6 +2019,7 @@ function makeKnob(p, initialValue, onInput) {
   let y0 = 0,
     n0 = 0;
   svg.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
     e.preventDefault();
     y0 = e.clientY;
     n0 = norm;
@@ -2168,12 +2155,6 @@ function buildGeneratorPanel(genIdx) {
   };
   vizCanvas.addEventListener('pointerdown', (e) => {
     e.preventDefault();
-    // Idle engine: first click on the waveform starts everything (same as
-    // the START button) instead of silently scrubbing position.
-    if (!started) {
-      start();
-      return;
-    }
     vizCanvas.setPointerCapture(e.pointerId);
     vizCanvas.classList.add('dragging');
     updatePositionFromPointer(e.clientX);
@@ -2581,6 +2562,10 @@ function buildUI() {
   ];
   panels.forEach(([panel, busId]) => {
     panel.dataset.bus = busId;
+    const mixControls = buildInstrumentMixControls(busId);
+    const headerActions = panel.querySelector('.col-header > .gen-header-actions');
+    if (headerActions) headerActions.appendChild(mixControls);
+    else panel.querySelector('.col-header')?.appendChild(mixControls);
     panel.classList.toggle('active-instrument', busId === activeBus);
     panel.addEventListener('click', () => setActiveBus(busId));
     container.appendChild(panel);
@@ -2718,8 +2703,9 @@ function applyGen3VoicePitch(voice, effective = getEffectiveGen3Params()) {
 
 function applyGen3Envelope(envelope) {
   const now = audioCtx.currentTime;
+  const effective = getEffectiveGen3Params();
   const attackEnd = now + GEN3.attack;
-  const decayEnd = attackEnd + GEN3.decay;
+  const decayEnd = attackEnd + effective.decay;
 
   envelope.gain.cancelScheduledValues(now);
   envelope.gain.setValueAtTime(0, now);
@@ -2727,8 +2713,8 @@ function applyGen3Envelope(envelope) {
   if (GEN3.attack > 0) envelope.gain.linearRampToValueAtTime(1, attackEnd);
   else envelope.gain.setValueAtTime(1, now);
 
-  if (GEN3.decay > 0) envelope.gain.linearRampToValueAtTime(GEN3.sustain, decayEnd);
-  else envelope.gain.setValueAtTime(GEN3.sustain, attackEnd);
+  if (effective.decay > 0) envelope.gain.linearRampToValueAtTime(effective.sustain, decayEnd);
+  else envelope.gain.setValueAtTime(effective.sustain, attackEnd);
 }
 
 function createGen3Voice(freq) {
@@ -2776,10 +2762,9 @@ function addGen3Note(midi, freq) {
   GEN3.activeNotes.set(midi, entry);
   setGen3NoteActive(midi, true);
   if (!GEN3.sustainMode) {
-    const ms = Math.max(0, GEN3.attack + GEN3.decay) * 1000;
+    const ms = Math.max(0, GEN3.attack + getEffectiveGen3Params().decay) * 1000;
     entry.autoReleaseTimer = setTimeout(() => removeGen3Note(midi), ms);
   }
-  refreshTransportStopBtn();
   refreshBackPanelState();
 }
 
@@ -2794,7 +2779,6 @@ function removeGen3Note(midi) {
     }
     releaseGen3Voice(entry);
   }
-  refreshTransportStopBtn();
   refreshBackPanelState();
 }
 
@@ -2975,7 +2959,11 @@ function buildOscPanel() {
     }
   });
 
-  header.append(title, shapes, susBtn);
+  const actions = document.createElement('div');
+  actions.className = 'gen-header-actions';
+  actions.appendChild(susBtn);
+
+  header.append(title, shapes, actions);
   panel.appendChild(header);
 
   // Body: scope (4/5) + piano roll (1/5)
@@ -3012,7 +3000,7 @@ function buildOscPanel() {
     { key: 'sustain', label: 'Sustain', min: 0, max: 1, step: 0.01, unit: '' },
     { key: 'release', label: 'Release', min: 0, max: 10, step: 0.01, unit: 's' },
   ].forEach((p) => {
-    const isMappable = p.key === 'gain' || p.key === 'pitch';
+    const isMappable = GEN3_LFO_PARAMS.some(({ key }) => key === p.key);
     const control = makeControlRow(
       p,
       GEN3[p.key],
@@ -3088,6 +3076,30 @@ const GEN4_DEFS = [
     color: '#40b8d0',
     paramDefs: [],
   },
+  {
+    id: 'fm',
+    label: 'FM',
+    color: '#e06ab5',
+    paramDefs: [
+      { key: 'tune', label: 'Tune', min: 30, max: 1200, step: 1, value: 220, unit: 'Hz' },
+      { key: 'ratio', label: 'Ratio', min: 0.25, max: 8, step: 0.05, value: 2, unit: '' },
+      { key: 'index', label: 'Index', min: 0, max: 20, step: 0.1, value: 3, unit: '' },
+      { key: 'feedback', label: 'Feedback', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
+      { key: 'attack', label: 'Attack', min: 0.001, max: 1, step: 0.001, value: 0.005, unit: 's' },
+      { key: 'decay', label: 'Decay', min: 0.03, max: 2, step: 0.01, value: 0.35, unit: 's' },
+      {
+        key: 'modDecay',
+        label: 'Mod Decay',
+        min: 0.01,
+        max: 2,
+        step: 0.01,
+        value: 0.3,
+        unit: 's',
+      },
+      { key: 'tone', label: 'Tone', min: 200, max: 16000, step: 100, value: 12000, unit: 'Hz' },
+      { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 0.65, unit: '' },
+    ],
+  },
 ];
 
 let gen4StepCountBtns = [];
@@ -3108,6 +3120,7 @@ const GEN4 = {
       muted: false,
       fxSend: def.id !== 'kick',
       steps: new Array(32).fill(false),
+      notes: new Array(32).fill(null),
       velocity: new Array(32).fill(1.0),
       stutter: new Array(32).fill(1),
       probability: new Array(32).fill(1.0),
@@ -3125,7 +3138,21 @@ const KICK_SC = {
 const gen4Schedule = [];
 const gen4StepEls = GEN4_DEFS.map(() => new Array(32).fill(null));
 const gen4ControlBindings = GEN4_DEFS.map(() => new Map());
-let gen4PlayBtnEl = null;
+const GEN4_NOTE_MIN = 24;
+const GEN4_NOTE_MAX = 127;
+const gen4EditorModeButtons = new Map();
+const gen4NoteLaneButtons = new Map();
+let gen4EditorMode = 'grid';
+let gen4SelectedNoteChannel = Math.max(
+  0,
+  GEN4_DEFS.findIndex((def) => def.id === 'fm'),
+);
+let gen4GridEl = null;
+let gen4HintsEl = null;
+let gen4NoteEditorEl = null;
+let gen4NoteRollEl = null;
+let gen4NoteCellEls = Array.from({ length: 32 }, () => new Map());
+let gen4NotePlayheadStep = -1;
 let gen4DisplayFrame = null;
 const gen4DragState = { active: false, ci: 0, si: 0, startY: 0, startVel: 1 };
 
@@ -3152,8 +3179,9 @@ function buildGen4Nodes() {
   const channelOuts = GEN4.channels.map((ch) => {
     const g = ac.createGain();
     g.gain.value = 1.0;
-    // Drum channels share the drums bus; bypass routes straight to the mix sum.
-    g.connect(ch.fxSend ? fxBuses.gen4.input : master.sum);
+    // FX-bypassed channels still pass through the drums bus output so the
+    // instrument-level solo/mute state always applies.
+    g.connect(ch.fxSend ? fxBuses.gen4.input : fxBuses.gen4.output);
     return g;
   });
 
@@ -3165,12 +3193,12 @@ const gen4FxSendBtns = [];
 function gen4SetChannelFxSend(ci, send) {
   const ch = GEN4.channels[ci];
   ch.fxSend = send;
-  if (GEN4.nodes?.channelOuts?.[ci] && fxBuses.gen4 && master) {
+  if (GEN4.nodes?.channelOuts?.[ci] && fxBuses.gen4) {
     const out = GEN4.nodes.channelOuts[ci];
     try {
       out.disconnect();
     } catch (e) {}
-    out.connect(send ? fxBuses.gen4.input : master.sum);
+    out.connect(send ? fxBuses.gen4.input : fxBuses.gen4.output);
   }
   const btn = gen4FxSendBtns[ci];
   if (btn) btn.classList.toggle('active', send);
@@ -3307,8 +3335,6 @@ function gen4TriggerPerc(time, velocity, p, dest) {
   car.stop(time + p.decay + 0.05);
 }
 
-const GEN4_OSC_MIDI = 200; // reserved virtual MIDI slot for sequencer-triggered Gen3 notes
-
 function gen4TriggerOsc(time, midis = GEN3.lockedMidis) {
   if (!audioCtx || GEN3.sustainMode || midis.size === 0) return;
   // Snapshot the chord now — in song mode the bound loop may change before the
@@ -3319,9 +3345,55 @@ function gen4TriggerOsc(time, midis = GEN3.lockedMidis) {
     if (!audioCtx) return;
     notes.forEach((midi) => {
       if (GEN3.activeNotes.has(midi)) removeGen3Note(midi);
-      addGen3Note(midi, 440 * Math.pow(2, (midi - 69) / 12));
+      addGen3Note(midi, midiNoteToFrequency(midi));
     });
   }, delayMs);
+}
+
+function gen4TriggerFmSynth(time, velocity, p, dest) {
+  const ac = audioCtx;
+  const mod = ac.createOscillator();
+  const modGain = ac.createGain();
+  const carrier = ac.createOscillator();
+  const feedback = ac.createGain();
+  const feedbackDelay = ac.createDelay(0.01);
+  const envelope = ac.createGain();
+  const tone = ac.createBiquadFilter();
+  const modFrequency = p.tune * p.ratio;
+  const modDepth = Math.max(0.001, modFrequency * p.index);
+  const ampEnd = time + p.attack + p.decay;
+  const modEnd = time + p.modDecay;
+  const stopTime = Math.max(ampEnd, modEnd) + 0.05;
+
+  mod.type = 'sine';
+  mod.frequency.setValueAtTime(modFrequency, time);
+  modGain.gain.setValueAtTime(modDepth, time);
+  modGain.gain.exponentialRampToValueAtTime(0.001, modEnd);
+  mod.connect(modGain);
+
+  carrier.type = 'sine';
+  carrier.frequency.setValueAtTime(p.tune, time);
+  modGain.connect(carrier.frequency);
+  feedback.gain.setValueAtTime(p.tune * p.feedback * 4, time);
+  feedbackDelay.delayTime.setValueAtTime(1 / ac.sampleRate, time);
+  carrier.connect(feedback);
+  feedback.connect(feedbackDelay);
+  feedbackDelay.connect(carrier.frequency);
+
+  envelope.gain.setValueAtTime(0.001, time);
+  envelope.gain.linearRampToValueAtTime(velocity * p.gain, time + p.attack);
+  envelope.gain.exponentialRampToValueAtTime(0.001, ampEnd);
+  tone.type = 'lowpass';
+  tone.frequency.setValueAtTime(p.tone, time);
+  tone.Q.setValueAtTime(0.7, time);
+  carrier.connect(envelope);
+  envelope.connect(tone);
+  tone.connect(dest);
+
+  mod.start(time);
+  carrier.start(time);
+  mod.stop(stopTime);
+  carrier.stop(stopTime);
 }
 
 function getEffectiveGen4Params(ci) {
@@ -3339,10 +3411,26 @@ function getEffectiveGen4Params(ci) {
   return effective;
 }
 
-function gen4FireChannel(ci, time, velocity, loop = null) {
+function midiNoteToFrequency(midi) {
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+function applyGen4StepNote(ch, p, midi) {
+  if (!Number.isFinite(midi) || ch.id === 'osc') return;
+  const key = ch.id === 'hat' ? 'tone' : 'tune';
+  const paramDef = GEN4_DEFS.find((def) => def.id === ch.id)?.paramDefs.find(
+    (param) => param.key === key,
+  );
+  if (!paramDef) return;
+  const modulationOffset = p[key] - ch.params[key];
+  p[key] = clamp(midiNoteToFrequency(midi) + modulationOffset, paramDef.min, paramDef.max);
+}
+
+function gen4FireChannel(ci, time, velocity, midi = null, loop = null) {
   const ch = GEN4.channels[ci];
   if (ch.muted) return;
   const p = getEffectiveGen4Params(ci);
+  applyGen4StepNote(ch, p, midi);
   const dest = GEN4.nodes.channelOuts[ci];
   switch (ch.id) {
     case 'kick':
@@ -3358,7 +3446,13 @@ function gen4FireChannel(ci, time, velocity, loop = null) {
       gen4TriggerPerc(time, velocity, p, dest);
       break;
     case 'osc':
-      gen4TriggerOsc(time, loop ? loop.gen3.lockedMidis : GEN3.lockedMidis);
+      gen4TriggerOsc(
+        time,
+        loop ? loop.gen3.lockedMidis : GEN3.lockedMidis,
+      );
+      break;
+    case 'fm':
+      gen4TriggerFmSynth(time, velocity, p, dest);
       break;
   }
 }
@@ -3404,7 +3498,13 @@ function gen4ScheduleTick() {
       if (Math.random() > pat.probability[step]) return;
       const count = pat.stutter[step];
       for (let r = 0; r < count; r++) {
-        gen4FireChannel(ci, GEN4.nextStepTime + r * (secPerStep / count), pat.velocity[step], loop);
+        gen4FireChannel(
+          ci,
+          GEN4.nextStepTime + r * (secPerStep / count),
+          pat.velocity[step],
+          pat.notes[step],
+          loop,
+        );
       }
     });
     GEN4.nextStepTime += secPerStep;
@@ -3421,11 +3521,13 @@ function gen4RefreshStepDisplay() {
       el.classList.toggle('step-inactive', inactive);
     }
   });
+  if (gen4EditorMode === 'notes') refreshGen4NotePlayhead();
 }
 
 function gen4IsStepDefault(ch, stepIdx) {
   return (
     !ch.steps[stepIdx] &&
+    ch.notes[stepIdx] === null &&
     ch.velocity[stepIdx] === 1.0 &&
     ch.stutter[stepIdx] === 1 &&
     ch.probability[stepIdx] === 1.0
@@ -3449,6 +3551,7 @@ function gen4DuplicateStepRange(fromStepCount, toStepCount) {
       const src = offset;
       const dest = fromStepCount + offset;
       ch.steps[dest] = ch.steps[src];
+      ch.notes[dest] = ch.notes[src];
       ch.velocity[dest] = ch.velocity[src];
       ch.stutter[dest] = ch.stutter[src];
       ch.probability[dest] = ch.probability[src];
@@ -3476,6 +3579,12 @@ function gen4SetStepCount(n, { duplicateOnExpand = true } = {}) {
   gen4StepCountBtns.forEach((btn) =>
     btn.classList.toggle('active', Number(btn.dataset.steps) === n),
   );
+  if (gen4EditorMode === 'notes') {
+    for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
+    gen4NoteRollEl?.querySelectorAll('.drum-note-step-number').forEach((el, si) => {
+      el.classList.toggle('step-inactive', si >= n);
+    });
+  }
 }
 
 function gen4DisplayTick() {
@@ -3500,14 +3609,6 @@ function gen4DisplayTick() {
   }
 }
 
-function refreshTransportStopBtn() {
-  const btn = document.getElementById('transportStopBtn');
-  if (!btn) return;
-  const anyPlaying = GEN4.playing || (GEN3.activeNotes && GEN3.activeNotes.size > 0);
-  btn.disabled = !anyPlaying;
-  btn.classList.toggle('active', anyPlaying);
-}
-
 function startGen4Sequencer() {
   if (GEN4.playing) return;
   if (PLAY.mode === 'song' && SONG.entries.length === 0) {
@@ -3519,15 +3620,26 @@ function startGen4Sequencer() {
   GEN4.displayStep = -1;
   gen4Schedule.length = 0;
   if (PLAY.mode === 'song') resetSongPlayback();
+  else {
+    STEP_SEQ.currentStep = 0;
+    STEP_SEQ.elapsed = 0;
+    const seq = getSchedulerLoop()?.seq;
+    STEP_SEQ.currentValue = seq ? seq.steps[0] || 0 : 0;
+    refreshSequencerUI();
+  }
+  // Phase-lock modulation to the transport: LFOs restart at phase 0 and the
+  // beat-repeat interval clocks realign, so play always begins on the bar
+  // instead of wherever the free-running phases drifted while stopped.
+  LFOS.forEach((lfo) => {
+    lfo.phase = 0;
+    lfo.currentValue = getLFOValue(lfo);
+  });
+  lfoLastTs = 0;
+  FX_BUS_IDS.forEach((busId) => fxBuses[busId]?.beatrepeat.node.port.postMessage('reset'));
   GEN4.nextStepTime = audioCtx.currentTime;
   GEN4.schedulerTimer = setInterval(gen4ScheduleTick, GEN4.scheduleInterval);
   if (!gen4DisplayFrame) gen4DisplayFrame = requestAnimationFrame(gen4DisplayTick);
-  if (gen4PlayBtnEl) {
-    gen4PlayBtnEl.textContent = '◼ Stop';
-    gen4PlayBtnEl.classList.add('active');
-  }
   refreshSongTransportUI();
-  refreshTransportStopBtn();
 }
 
 function stopGen4Sequencer() {
@@ -3540,14 +3652,12 @@ function stopGen4Sequencer() {
   }
   GEN4.displayStep = -1;
   SONG.audibleEntryIdx = -1;
+  // Back to the edit loop's sound now that nothing is audible.
+  sendParams(0);
+  sendParams(1);
   renderSongPlayhead();
   gen4RefreshStepDisplay();
-  if (gen4PlayBtnEl) {
-    gen4PlayBtnEl.textContent = '▶ Play';
-    gen4PlayBtnEl.classList.remove('active');
-  }
   refreshSongTransportUI();
-  refreshTransportStopBtn();
 }
 
 const GEN4_PROB_CYCLE = [1.0, 0.75, 0.5, 0.25];
@@ -3588,6 +3698,195 @@ function gen4CycleProbability(ci, si) {
   gen4ApplyStepBtn(ci, si);
 }
 
+function formatMidiNote(midi) {
+  return `${NOTE_NAMES[midi % 12]}${Math.floor(midi / 12) - 1}`;
+}
+
+function frequencyToMidi(frequency) {
+  return Math.round(69 + 12 * Math.log2(Math.max(1, frequency) / 440));
+}
+
+function getGen4BaseMidi(ci) {
+  const ch = GEN4.channels[ci];
+  if (ch.id === 'osc') return [...GEN3.lockedMidis][0] ?? 60;
+  const key = ch.id === 'hat' ? 'tone' : 'tune';
+  return frequencyToMidi(ch.params[key] || 261.63);
+}
+
+function getGen4NoteFocusMidi(ci) {
+  const ch = GEN4.channels[ci];
+  const assigned = ch.notes.find((midi, si) => ch.steps[si] && Number.isFinite(midi));
+  return Number.isFinite(assigned) ? assigned : getGen4BaseMidi(ci);
+}
+
+function refreshGen4NoteStep(stepIdx) {
+  const ch = GEN4.channels[gen4SelectedNoteChannel];
+  const selectedMidi = ch.steps[stepIdx] ? ch.notes[stepIdx] : null;
+  const inheritedMidi =
+    ch.steps[stepIdx] && !Number.isFinite(selectedMidi)
+      ? clamp(getGen4BaseMidi(gen4SelectedNoteChannel), GEN4_NOTE_MIN, GEN4_NOTE_MAX)
+      : null;
+  gen4NoteCellEls[stepIdx].forEach((cell, midi) => {
+    cell.classList.toggle('on', midi === selectedMidi);
+    cell.classList.toggle('inherited', midi === inheritedMidi);
+    cell.classList.toggle('step-inactive', stepIdx >= GEN4.stepCount);
+  });
+}
+
+function refreshGen4NotePlayhead() {
+  gen4NoteCellEls[gen4NotePlayheadStep]?.forEach((cell) => cell.classList.remove('current'));
+  gen4NotePlayheadStep =
+    GEN4.displayStep >= 0 && GEN4.displayStep < GEN4.stepCount ? GEN4.displayStep : -1;
+  gen4NoteCellEls[gen4NotePlayheadStep]?.forEach((cell) => cell.classList.add('current'));
+}
+
+function refreshGen4NoteEditor() {
+  gen4EditorModeButtons.forEach((btn, mode) => {
+    btn.classList.toggle('active', mode === gen4EditorMode);
+  });
+  gen4NoteLaneButtons.forEach((btn, ci) => {
+    btn.classList.toggle('active', ci === gen4SelectedNoteChannel);
+  });
+  if (gen4GridEl) gen4GridEl.hidden = gen4EditorMode !== 'grid';
+  if (gen4HintsEl) gen4HintsEl.hidden = gen4EditorMode !== 'grid';
+  if (gen4NoteEditorEl) gen4NoteEditorEl.hidden = gen4EditorMode !== 'notes';
+  if (gen4EditorMode === 'notes') {
+    for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
+    refreshGen4NotePlayhead();
+  }
+}
+
+function renderGen4NoteRoll() {
+  if (!gen4NoteRollEl) return;
+  gen4NoteRollEl.textContent = '';
+  gen4NoteCellEls = Array.from({ length: 32 }, () => new Map());
+  gen4NotePlayheadStep = -1;
+  const def = GEN4_DEFS[gen4SelectedNoteChannel];
+  const ch = GEN4.channels[gen4SelectedNoteChannel];
+  const pitchKey = ch.id === 'hat' ? 'tone' : 'tune';
+  const pitchDef = def.paramDefs.find((param) => param.key === pitchKey);
+  gen4NoteEditorEl?.style.setProperty('--ch-color', def.color);
+  const visibleMidis = [];
+  for (let midi = GEN4_NOTE_MAX; midi >= GEN4_NOTE_MIN; midi--) {
+    const frequency = midiNoteToFrequency(midi);
+    if (!pitchDef || (frequency >= pitchDef.min && frequency <= pitchDef.max)) {
+      visibleMidis.push(midi);
+    }
+  }
+
+  const stepHeader = document.createElement('div');
+  stepHeader.className = 'drum-note-row drum-note-step-header';
+  const corner = document.createElement('span');
+  corner.className = 'drum-note-label';
+  corner.textContent = 'Note';
+  stepHeader.appendChild(corner);
+  for (let si = 0; si < 32; si++) {
+    const number = document.createElement('span');
+    number.className = 'drum-note-step-number';
+    number.textContent = `${si + 1}`;
+    number.classList.toggle('step-inactive', si >= GEN4.stepCount);
+    stepHeader.appendChild(number);
+  }
+  gen4NoteRollEl.appendChild(stepHeader);
+
+  visibleMidis.forEach((midi) => {
+    const row = document.createElement('div');
+    row.className = 'drum-note-row';
+    if ([1, 3, 6, 8, 10].includes(midi % 12)) row.classList.add('black-key');
+
+    const noteLabel = document.createElement('span');
+    noteLabel.className = 'drum-note-label';
+    noteLabel.textContent = formatMidiNote(midi);
+    row.appendChild(noteLabel);
+
+    for (let si = 0; si < 32; si++) {
+      const cell = document.createElement('button');
+      cell.type = 'button';
+      cell.className = 'drum-note-cell';
+      cell.dataset.step = `${si}`;
+      cell.dataset.midi = `${midi}`;
+      cell.title = `${def.label} · step ${si + 1} · ${formatMidiNote(midi)}`;
+      cell.classList.toggle('on', ch.steps[si] && ch.notes[si] === midi);
+      cell.classList.toggle('step-inactive', si >= GEN4.stepCount);
+      cell.addEventListener('click', () => {
+        if (si >= GEN4.stepCount) return;
+        const currentMidi = Number.isFinite(ch.notes[si])
+          ? ch.notes[si]
+          : clamp(getGen4BaseMidi(gen4SelectedNoteChannel), GEN4_NOTE_MIN, GEN4_NOTE_MAX);
+        const isSelected = ch.steps[si] && currentMidi === midi;
+        ch.steps[si] = !isSelected;
+        ch.notes[si] = isSelected ? null : midi;
+        if (isSelected) {
+          ch.stutter[si] = 1;
+          ch.probability[si] = 1;
+        }
+        gen4ApplyStepBtn(gen4SelectedNoteChannel, si);
+        refreshGen4NoteStep(si);
+      });
+      gen4NoteCellEls[si].set(midi, cell);
+      row.appendChild(cell);
+    }
+    gen4NoteRollEl.appendChild(row);
+  });
+
+  const requestedFocusMidi = getGen4NoteFocusMidi(gen4SelectedNoteChannel);
+  const focusMidi = visibleMidis.reduce(
+    (closest, midi) =>
+      Math.abs(midi - requestedFocusMidi) < Math.abs(closest - requestedFocusMidi) ? midi : closest,
+    visibleMidis[0],
+  );
+  requestAnimationFrame(() => {
+    const rowHeight = gen4NoteRollEl.firstElementChild?.getBoundingClientRect().height || 18;
+    const targetY = (visibleMidis.indexOf(focusMidi) + 1) * rowHeight;
+    gen4NoteRollEl.scrollTop = Math.max(0, targetY - gen4NoteRollEl.clientHeight * 0.45);
+  });
+  for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
+  refreshGen4NotePlayhead();
+}
+
+function setGen4NoteChannel(ci) {
+  if (!GEN4_DEFS[ci] || GEN4_DEFS[ci].id === 'osc') return;
+  gen4SelectedNoteChannel = ci;
+  gen4NoteLaneButtons.forEach((btn, idx) => btn.classList.toggle('active', idx === ci));
+  renderGen4NoteRoll();
+}
+
+function setGen4EditorMode(mode) {
+  if (mode !== 'grid' && mode !== 'notes') return;
+  gen4EditorMode = mode;
+  if (mode === 'notes' && gen4NoteCellEls.every((cells) => cells.size === 0)) {
+    renderGen4NoteRoll();
+  }
+  refreshGen4NoteEditor();
+}
+
+function buildGen4NoteEditor() {
+  const editor = document.createElement('div');
+  editor.className = 'drum-note-editor';
+  editor.hidden = true;
+
+  const lanes = document.createElement('div');
+  lanes.className = 'drum-note-lanes';
+  GEN4_DEFS.forEach((def, ci) => {
+    if (def.id === 'osc') return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'drum-note-lane-btn';
+    btn.textContent = def.label;
+    btn.style.setProperty('--ch-color', def.color);
+    btn.addEventListener('click', () => setGen4NoteChannel(ci));
+    gen4NoteLaneButtons.set(ci, btn);
+    lanes.appendChild(btn);
+  });
+
+  const roll = document.createElement('div');
+  roll.className = 'drum-note-roll';
+  editor.append(lanes, roll);
+  gen4NoteEditorEl = editor;
+  gen4NoteRollEl = roll;
+  return editor;
+}
+
 function buildDrumPanel() {
   const panel = document.createElement('div');
   panel.className = 'generator gen-4';
@@ -3600,6 +3899,23 @@ function buildDrumPanel() {
   title.innerHTML = '<span class="col-dot"></span>Gen 4 · Drums';
   const actions = document.createElement('div');
   actions.className = 'gen-header-actions';
+
+  const editorModeGroup = document.createElement('div');
+  editorModeGroup.className = 'drum-editor-mode-group';
+  [
+    ['grid', 'Grid'],
+    ['notes', 'Notes'],
+  ].forEach(([mode, label]) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'drum-editor-mode-btn';
+    btn.textContent = label;
+    btn.classList.toggle('active', gen4EditorMode === mode);
+    btn.addEventListener('click', () => setGen4EditorMode(mode));
+    gen4EditorModeButtons.set(mode, btn);
+    editorModeGroup.appendChild(btn);
+  });
+  actions.appendChild(editorModeGroup);
 
   const stepCounts = [12, 15, 16, 32];
   const stepsGroup = document.createElement('div');
@@ -3618,15 +3934,6 @@ function buildDrumPanel() {
   });
   actions.appendChild(stepsGroup);
 
-  const playBtn = document.createElement('button');
-  playBtn.className = 'drum-play-btn';
-  playBtn.textContent = '▶ Play';
-  gen4PlayBtnEl = playBtn;
-  playBtn.addEventListener('click', async () => {
-    await ensureTransportEngine();
-    GEN4.playing ? stopGen4Sequencer() : startGen4Sequencer();
-  });
-  actions.appendChild(playBtn);
   header.append(title, actions);
   panel.appendChild(header);
 
@@ -3639,10 +3946,12 @@ function buildDrumPanel() {
     '<span class="drum-hints-sep">·</span>' +
     '<span class="drum-hint"><span class="drum-hint-key">right-click</span> active step → cycle stutter</span>';
   panel.appendChild(hints);
+  gen4HintsEl = hints;
 
   // Step grid
   const grid = document.createElement('div');
   grid.className = 'drum-grid';
+  gen4GridEl = grid;
 
   GEN4_DEFS.forEach((def, ci) => {
     const ch = GEN4.channels[ci];
@@ -3650,9 +3959,20 @@ function buildDrumPanel() {
     row.className = 'drum-row';
     row.style.setProperty('--ch-color', def.color);
 
-    const lbl = document.createElement('div');
+    const lbl = document.createElement(def.id === 'osc' ? 'div' : 'button');
+    if (def.id !== 'osc') lbl.type = 'button';
     lbl.className = 'drum-row-label';
     lbl.textContent = def.label;
+    if (def.id === 'osc') {
+      lbl.title = 'Triggers the notes selected in Gen 3';
+      lbl.classList.add('fixed-note-source');
+    } else {
+      lbl.title = `Edit ${def.label} notes`;
+      lbl.addEventListener('click', () => {
+        setGen4NoteChannel(ci);
+        setGen4EditorMode('notes');
+      });
+    }
 
     const stepsEl = document.createElement('div');
     stepsEl.className = 'drum-steps';
@@ -3685,6 +4005,7 @@ function buildDrumPanel() {
         ch.steps[si] = !ch.steps[si];
         // reset glitch state when turning off
         if (!ch.steps[si]) {
+          ch.notes[si] = null;
           ch.stutter[si] = 1;
           ch.probability[si] = 1.0;
         }
@@ -3727,7 +4048,7 @@ function buildDrumPanel() {
       fxBtn.className = 'drum-fx-btn';
       fxBtn.classList.toggle('active', ch.fxSend);
       fxBtn.textContent = 'FX';
-      fxBtn.title = 'Send to FX chain — click to bypass to limiter only';
+      fxBtn.title = 'Send to FX chain — click to bypass the drum effects';
       gen4FxSendBtns[ci] = fxBtn;
       fxBtn.addEventListener('click', () => gen4SetChannelFxSend(ci, !ch.fxSend));
       actions.appendChild(fxBtn);
@@ -3739,12 +4060,14 @@ function buildDrumPanel() {
   });
 
   panel.appendChild(grid);
+  panel.appendChild(buildGen4NoteEditor());
 
   // Param sections (one per channel, collapsed by default)
   const paramsWrap = document.createElement('div');
   paramsWrap.className = 'drum-params';
 
   GEN4_DEFS.forEach((def, ci) => {
+    if (def.paramDefs.length === 0) return;
     const ch = GEN4.channels[ci];
     const { section, content, setCollapsed } = createFxSection(def.label, 'drum-param-section');
     section.querySelector('.fx-section-label').style.color = def.color;
@@ -3773,6 +4096,7 @@ function buildDrumPanel() {
 
   panel.appendChild(paramsWrap);
   gen4RefreshStepDisplay();
+  refreshGen4NoteEditor();
   return panel;
 }
 
@@ -3861,11 +4185,213 @@ const FX_DEFS = [
   },
 ];
 
+const FX_PRESETS = {
+  beatrepeat: [
+    {
+      name: 'Off',
+      values: {
+        interval: 0.5,
+        sync: true,
+        syncIndex: 4,
+        grid: 125,
+        gridSync: true,
+        gridSyncIndex: 2,
+        gate: 8,
+        pitch: 0,
+        decay: 1,
+        chance: 1,
+        mix: 0,
+      },
+    },
+    {
+      name: 'Tight Stutter',
+      values: {
+        interval: 0.25,
+        sync: true,
+        syncIndex: 2,
+        grid: 63,
+        gridSync: true,
+        gridSyncIndex: 1,
+        gate: 4,
+        pitch: 0,
+        decay: 0.82,
+        chance: 1,
+        mix: 0.62,
+      },
+    },
+    {
+      name: 'Pitch Scatter',
+      values: {
+        interval: 0.5,
+        sync: true,
+        syncIndex: 4,
+        grid: 125,
+        gridSync: true,
+        gridSyncIndex: 2,
+        gate: 6,
+        pitch: 12,
+        decay: 0.7,
+        chance: 0.62,
+        mix: 0.7,
+      },
+    },
+    {
+      name: 'Tape Stop',
+      values: {
+        interval: 1,
+        sync: true,
+        syncIndex: 6,
+        grid: 250,
+        gridSync: true,
+        gridSyncIndex: 3,
+        gate: 8,
+        pitch: -12,
+        decay: 0.58,
+        chance: 1,
+        mix: 0.78,
+      },
+    },
+  ],
+  delay: [
+    {
+      name: 'Off',
+      values: { time: 0.3, feedback: 0.35, hp: 20, mix: 0, sync: false, syncIndex: 4, mode: 'stereo' },
+    },
+    {
+      name: 'Slapback',
+      values: { time: 0.12, feedback: 0.18, hp: 120, mix: 0.28, sync: false, syncIndex: 4, mode: 'stereo' },
+    },
+    {
+      name: 'Dub Echo',
+      values: { time: 0.375, feedback: 0.72, hp: 350, mix: 0.45, sync: false, syncIndex: 4, mode: 'stereo' },
+    },
+    {
+      name: 'Ping Pong',
+      values: { time: 0.5, feedback: 0.65, hp: 180, mix: 0.42, sync: true, syncIndex: 4, mode: 'pingpong' },
+    },
+  ],
+  filter: [
+    { name: 'Off', values: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 0 } },
+    { name: 'Warm Low-pass', values: { mode: 'lowpass', cutoff: 1600, q: 0.9, mix: 1 } },
+    { name: 'Telephone', values: { mode: 'bandpass', cutoff: 1400, q: 1.4, mix: 0.9 } },
+    { name: 'Resonant High-pass', values: { mode: 'highpass', cutoff: 480, q: 7, mix: 0.8 } },
+  ],
+  bitreduce: [
+    { name: 'Off', values: { bits: 8, rate: 1, mix: 0 } },
+    { name: '12-bit', values: { bits: 12, rate: 0.72, mix: 0.35 } },
+    { name: 'Crunchy', values: { bits: 8, rate: 0.35, mix: 0.6 } },
+    { name: 'Destroyed', values: { bits: 4, rate: 0.08, mix: 0.85 } },
+  ],
+  sat: [
+    { name: 'Off', values: { drive: 0.3, mix: 0 } },
+    { name: 'Warm', values: { drive: 0.18, mix: 0.35 } },
+    { name: 'Driven', values: { drive: 0.5, mix: 0.65 } },
+    { name: 'Hard Clip', values: { drive: 0.88, mix: 0.9 } },
+  ],
+  reverb: [
+    { name: 'Off', values: { size: 2, decay: 3, predelay: 0.018, damping: 0.42, mix: 0 } },
+    { name: 'Room', values: { size: 0.7, decay: 1.3, predelay: 0.008, damping: 0.65, mix: 0.25 } },
+    { name: 'Hall', values: { size: 2.8, decay: 4.8, predelay: 0.025, damping: 0.45, mix: 0.38 } },
+    { name: 'Cavern', values: { size: 5, decay: 7, predelay: 0.06, damping: 0.3, mix: 0.5 } },
+  ],
+  limiter: [
+    {
+      name: 'Balanced',
+      values: { threshold: -8, attack: 0.003, release: 0.12, ratio: 20, knee: 0, output: 0.96 },
+    },
+    {
+      name: 'Gentle',
+      values: { threshold: -4, attack: 0.01, release: 0.2, ratio: 6, knee: 8, output: 0.96 },
+    },
+    {
+      name: 'Loud',
+      values: { threshold: -12, attack: 0.002, release: 0.12, ratio: 20, knee: 2, output: 0.98 },
+    },
+    {
+      name: 'Maximizer',
+      values: { threshold: -10, attack: 0.001, release: 0.08, ratio: 40, knee: 1, output: 1.2 },
+    },
+    {
+      name: 'Brickwall',
+      values: { threshold: -18, attack: 0.001, release: 0.06, ratio: 40, knee: 0, output: 0.95 },
+    },
+  ],
+};
+
 // Per-instrument FX buses. Each instrument (granular 1/2, synth, drums) owns an
 // independent effect chain; one instrument is "active" and its chain is shown and
 // edited in the FX column. All bus outputs sum into a single global master limiter.
 const FX_BUS_IDS = ['gen0', 'gen1', 'gen3', 'gen4'];
 const FX_BUS_LABELS = { gen0: 'Granular 1', gen1: 'Granular 2', gen3: 'Synth', gen4: 'Drums' };
+const INSTRUMENT_MIX = Object.fromEntries(
+  FX_BUS_IDS.map((busId) => [busId, { muted: false, solo: false }]),
+);
+const instrumentMixButtons = new Map();
+
+function refreshInstrumentMixUI() {
+  const hasSolo = FX_BUS_IDS.some((busId) => INSTRUMENT_MIX[busId].solo);
+  FX_BUS_IDS.forEach((busId) => {
+    const mix = INSTRUMENT_MIX[busId];
+    const buttons = instrumentMixButtons.get(busId);
+    buttons?.mute.classList.toggle('active', mix.muted);
+    buttons?.solo.classList.toggle('active', mix.solo);
+    buttons?.mute.setAttribute('aria-pressed', mix.muted ? 'true' : 'false');
+    buttons?.solo.setAttribute('aria-pressed', mix.solo ? 'true' : 'false');
+
+    const panel = document.querySelector(`#generators [data-bus="${busId}"]`);
+    panel?.classList.toggle('instrument-muted', mix.muted);
+    panel?.classList.toggle('instrument-soloed', mix.solo);
+    panel?.classList.toggle('instrument-silent', mix.muted || (hasSolo && !mix.solo));
+  });
+}
+
+function applyInstrumentMixState() {
+  const hasSolo = FX_BUS_IDS.some((busId) => INSTRUMENT_MIX[busId].solo);
+  FX_BUS_IDS.forEach((busId) => {
+    const mix = INSTRUMENT_MIX[busId];
+    const audible = !mix.muted && (!hasSolo || mix.solo);
+    const output = fxBuses[busId]?.output;
+    if (output && audioCtx) {
+      output.gain.setTargetAtTime(audible ? 1 : 0, audioCtx.currentTime, 0.01);
+    }
+  });
+  refreshInstrumentMixUI();
+}
+
+function buildInstrumentMixControls(busId) {
+  const controls = document.createElement('div');
+  controls.className = 'instrument-mix-controls';
+
+  const solo = document.createElement('button');
+  solo.type = 'button';
+  solo.className = 'instrument-mix-btn instrument-solo-btn';
+  solo.textContent = 'S';
+  solo.title = `Solo ${FX_BUS_LABELS[busId]}`;
+  solo.setAttribute('aria-label', `Solo ${FX_BUS_LABELS[busId]}`);
+  solo.setAttribute('aria-pressed', 'false');
+  solo.addEventListener('click', (event) => {
+    event.stopPropagation();
+    INSTRUMENT_MIX[busId].solo = !INSTRUMENT_MIX[busId].solo;
+    applyInstrumentMixState();
+  });
+
+  const mute = document.createElement('button');
+  mute.type = 'button';
+  mute.className = 'instrument-mix-btn instrument-mute-btn';
+  mute.textContent = 'M';
+  mute.title = `Mute ${FX_BUS_LABELS[busId]}`;
+  mute.setAttribute('aria-label', `Mute ${FX_BUS_LABELS[busId]}`);
+  mute.setAttribute('aria-pressed', 'false');
+  mute.addEventListener('click', (event) => {
+    event.stopPropagation();
+    INSTRUMENT_MIX[busId].muted = !INSTRUMENT_MIX[busId].muted;
+    applyInstrumentMixState();
+  });
+
+  controls.append(solo, mute);
+  instrumentMixButtons.set(busId, { solo, mute });
+  return controls;
+}
 
 // Default per-bus effect state (the limiter is global, not per-bus).
 function makeDefaultFxState() {
@@ -4120,7 +4646,6 @@ const SONG = {
 };
 
 const SONG_REPEAT_CYCLE = [1, 2, 4, 8, 16];
-const loopChipEls = new Map(); // loop id → chip element
 const songBlockEls = new Map(); // entry id → block element
 let songPlayBtnEl = null;
 let songAddBtnEl = null;
@@ -4133,10 +4658,14 @@ function createLoopData(name) {
   return {
     id: `loop-${LOOPS.counter}`,
     name,
+    // New loops inherit the sound currently on the granulators, so switching
+    // to a fresh loop never jumps the audio; freeze stays engine state.
+    gens: [{ ...state[0], freeze: false }, { ...state[1], freeze: false }],
     gen4: {
       stepCount: 16,
       channels: GEN4_DEFS.map(() => ({
         steps: new Array(32).fill(false),
+        notes: new Array(32).fill(null),
         velocity: new Array(32).fill(1.0),
         stutter: new Array(32).fill(1),
         probability: new Array(32).fill(1.0),
@@ -4167,10 +4696,12 @@ function adoptInitialLoop() {
     {
       id: `loop-${LOOPS.counter}`,
       name: 'A',
+      gens: [state[0], state[1]],
       gen4: {
         stepCount: GEN4.stepCount,
         channels: GEN4.channels.map((ch) => ({
           steps: ch.steps,
+          notes: ch.notes,
           velocity: ch.velocity,
           stutter: ch.stutter,
           probability: ch.probability,
@@ -4214,10 +4745,12 @@ function serializeLoop(loop) {
   return {
     id: loop.id,
     name: loop.name,
+    gens: loop.gens.map((g) => ({ ...g })),
     gen4: {
       stepCount: loop.gen4.stepCount,
       channels: loop.gen4.channels.map((c) => ({
         steps: [...c.steps],
+        notes: [...c.notes],
         velocity: [...c.velocity],
         stutter: [...c.stutter],
         probability: [...c.probability],
@@ -4237,6 +4770,15 @@ function deserializeLoop(data) {
     typeof data?.name === 'string' && data.name.trim() ? data.name.trim() : nextLoopName(),
   );
   if (typeof data?.id === 'string' && data.id && !getLoopById(data.id)) loop.id = data.id;
+  // Legacy loops (saved before per-loop gen params) keep the seed from
+  // createLoopData — the sound that was global when the preset was made.
+  if (Array.isArray(data?.gens)) {
+    data.gens.slice(0, 2).forEach((saved, gi) => {
+      if (saved && typeof saved === 'object') {
+        Object.assign(loop.gens[gi], saved, { freeze: false });
+      }
+    });
+  }
   const g4 = data?.gen4;
   if ([12, 15, 16, 32].includes(g4?.stepCount)) loop.gen4.stepCount = g4.stepCount;
   (g4?.channels || []).forEach((saved, ci) => {
@@ -4244,6 +4786,10 @@ function deserializeLoop(data) {
     if (!pat || !saved) return;
     if (Array.isArray(saved.steps))
       saved.steps.slice(0, 32).forEach((v, si) => (pat.steps[si] = !!v));
+    if (Array.isArray(saved.notes))
+      saved.notes.slice(0, 32).forEach((v, si) => {
+        pat.notes[si] = Number.isFinite(v) ? clamp(Math.round(v), 0, 127) : null;
+      });
     if (Array.isArray(saved.velocity))
       saved.velocity.slice(0, 32).forEach((v, si) => (pat.velocity[si] = clamp(v, 0.05, 1.0)));
     if (Array.isArray(saved.stutter))
@@ -4280,6 +4826,7 @@ function legacyLoopData(preset) {
       stepCount: preset?.gen4?.stepCount,
       channels: (preset?.gen4?.channels || []).map((ch) => ({
         steps: ch?.steps,
+        notes: ch?.notes,
         velocity: ch?.velocity,
         stutter: ch?.stutter,
         probability: ch?.probability,
@@ -4293,9 +4840,19 @@ function legacyLoopData(preset) {
 function bindEditLoop() {
   const loop = getEditLoop();
   if (!loop) return;
+  for (let gi = 0; gi < 2; gi++) {
+    const gens = loop.gens[gi];
+    gens.freeze = state[gi].freeze; // freeze follows the engine, not the loop
+    state[gi] = gens;
+    refreshGeneratorUI(gi);
+    // Re-run the position setter so the waveform playhead tracks the bound value.
+    setGeneratorParam(gi, 'positionSec', gens.positionSec, { send: false });
+    sendParams(gi);
+  }
   GEN4.channels.forEach((ch, ci) => {
     const pat = loop.gen4.channels[ci];
     ch.steps = pat.steps;
+    ch.notes = pat.notes;
     ch.velocity = pat.velocity;
     ch.stutter = pat.stutter;
     ch.probability = pat.probability;
@@ -4313,6 +4870,7 @@ function bindEditLoop() {
     for (let si = 0; si < 32; si++) gen4ApplyStepBtn(ci, si);
   });
   gen4RefreshStepDisplay();
+  if (gen4EditorMode === 'notes') refreshGen4NoteEditor();
 
   if (chordChanged && GEN3.sustainMode && GEN3.nodes && GEN3.activeNotes.size > 0) {
     // A sustained drone follows the newly bound loop's chord.
@@ -4430,6 +4988,11 @@ function updateSongPlayhead(audible) {
       const entry = SONG.entries[audible.entryIdx];
       const idx = entry ? LOOPS.list.findIndex((l) => l.id === entry.loopId) : -1;
       if (idx >= 0 && idx !== LOOPS.editIndex) selectEditLoop(idx);
+    } else {
+      // Follow off: the edit binding stays put, so push the new audible
+      // loop's gen sound to the worklet directly.
+      sendParams(0);
+      sendParams(1);
     }
   }
   renderSongPlayhead(audible.repeat);
@@ -4439,7 +5002,6 @@ function renderSongPlayhead(repeat = -1) {
   const entryIdx = SONG.audibleEntryIdx;
   if (songPlayheadRendered.entryIdx === entryIdx && songPlayheadRendered.repeat === repeat) return;
   songPlayheadRendered = { entryIdx, repeat };
-  const audibleLoopId = SONG.entries[entryIdx]?.loopId ?? null;
   SONG.entries.forEach((entry, idx) => {
     const el = songBlockEls.get(entry.id);
     if (!el) return;
@@ -4455,16 +5017,69 @@ function renderSongPlayhead(repeat = -1) {
             : '';
     }
   });
-  loopChipEls.forEach((chip, loopId) => {
-    chip.classList.toggle('playing', loopId === audibleLoopId);
-  });
+}
+
+function isTransportOn() {
+  return GEN4.playing || (started && audioCtx?.state === 'running');
 }
 
 function refreshSongTransportUI() {
   if (!songPlayBtnEl) return;
-  songPlayBtnEl.textContent = GEN4.playing ? '◼' : '▶';
-  songPlayBtnEl.title = GEN4.playing ? 'Stop the song' : 'Play the song';
-  songPlayBtnEl.classList.toggle('active', GEN4.playing);
+  const on = isTransportOn();
+  songPlayBtnEl.textContent = on ? '◼' : '▶';
+  songPlayBtnEl.title =
+    (on ? 'Stop' : PLAY.mode === 'song' ? 'Play the song' : 'Play the loop') + ' (space)';
+  songPlayBtnEl.classList.toggle('active', on);
+}
+
+// The single transport control: ▶ boots the whole engine (granular worklet,
+// mic capture when a mic source is selected, drum nodes) and starts the
+// sequencer; ◼ stops the sequencer and suspends the audio context so
+// everything falls silent while keeping all state for the next ▶.
+async function stripPlayToggle() {
+  if (isTransportOn()) {
+    stopGen4Sequencer();
+    stopAllGen3Notes();
+    if (audioCtx && audioCtx.state === 'running') await audioCtx.suspend();
+    setStatus('stopped');
+  } else {
+    await ensureTransportEngine();
+    if (!started) await start();
+    startGen4Sequencer();
+    setStatus('playing');
+  }
+  refreshSongTransportUI();
+}
+
+function initStripPlayBtn() {
+  songPlayBtnEl = document.getElementById('stripPlayBtn');
+  songPlayBtnEl?.addEventListener('click', stripPlayToggle);
+  refreshSongTransportUI();
+}
+
+// ── Settings modal (input device, mic gate, shortcuts) ──
+
+function getSettingsModal() {
+  return document.getElementById('settingsMenu');
+}
+
+function closeSettingsMenu() {
+  const modal = getSettingsModal();
+  if (modal?.open) modal.close();
+}
+
+function initSettingsMenu() {
+  const modal = getSettingsModal();
+  const btn = document.getElementById('settingsMenuBtn');
+  btn?.addEventListener('click', () => {
+    modal?.open ? modal.close() : modal?.showModal();
+    btn.classList.toggle('open', !!modal?.open);
+  });
+  // A click on the ::backdrop reports the dialog itself as target.
+  modal?.addEventListener('click', (event) => {
+    if (event.target === modal) modal.close();
+  });
+  modal?.addEventListener('close', () => btn?.classList.remove('open'));
 }
 
 // ── Song entry ops ──
@@ -4611,13 +5226,26 @@ function setPlayMode(mode) {
     refreshModeToggleUI();
     return;
   }
-  const wasPlaying = GEN4.playing;
-  if (wasPlaying) stopGen4Sequencer();
+  // Switch seamlessly while playing: the step grid (nextStepTime) is left
+  // untouched so the tempo never hiccups — only what gets scheduled changes.
+  if (GEN4.playing && mode === 'song' && SONG.entries.length === 0) stopGen4Sequencer();
   PLAY.mode = mode;
+  if (GEN4.playing) {
+    if (mode === 'song') {
+      SONG.cursor.entryIdx = 0;
+      SONG.cursor.repeat = 0;
+      SONG.audibleEntryIdx = -1;
+    } else {
+      SONG.audibleEntryIdx = -1;
+      renderSongPlayhead();
+      sendParams(0);
+      sendParams(1);
+    }
+  }
   const lane = document.getElementById('songLane');
   if (lane) lane.hidden = mode !== 'song';
   refreshModeToggleUI();
-  if (wasPlaying && (mode === 'loop' || SONG.entries.length > 0)) startGen4Sequencer();
+  refreshSongTransportUI();
 }
 
 function refreshModeToggleUI() {
@@ -4666,7 +5294,6 @@ function startLoopRename(chip, loop) {
 function renderLoopsBar() {
   const bar = document.getElementById('loopsBar');
   if (!bar) return;
-  loopChipEls.clear();
   bar.innerHTML = '';
 
   const label = document.createElement('span');
@@ -4697,7 +5324,6 @@ function renderLoopsBar() {
     });
 
     chip.append(nameBtn, delBtn);
-    loopChipEls.set(loop.id, chip);
     bar.appendChild(chip);
   });
 
@@ -4738,17 +5364,6 @@ function renderSongLane() {
   songBlockEls.clear();
   songPlayheadRendered = { entryIdx: -2, repeat: -2 };
   lane.innerHTML = '';
-
-  const playBtn = document.createElement('button');
-  playBtn.type = 'button';
-  playBtn.className = 'song-play-btn';
-  songPlayBtnEl = playBtn;
-  playBtn.addEventListener('click', async () => {
-    await ensureTransportEngine();
-    GEN4.playing ? stopGen4Sequencer() : startGen4Sequencer();
-  });
-  lane.appendChild(playBtn);
-  refreshSongTransportUI();
 
   const addBtn = document.createElement('button');
   addBtn.type = 'button';
@@ -5009,6 +5624,67 @@ function setLFOMapSource(genIdx, key, sourceIdx) {
   return sourceIdx;
 }
 
+// ── Knob context menu ──
+
+let knobContextMenuEl = null;
+
+function closeKnobContextMenu() {
+  if (!knobContextMenuEl) return;
+  knobContextMenuEl.remove();
+  knobContextMenuEl = null;
+}
+
+function copyGeneratorParamToOtherLoops(genIdx, key) {
+  const source = state[genIdx];
+  const editLoop = getEditLoop();
+  const keys =
+    key === 'grainSizeMs'
+      ? [key, 'grainSizeSync', 'grainSizeSyncIndex']
+      : key === 'density'
+        ? [key, 'densitySync', 'densitySyncIndex']
+        : [key];
+  let copied = 0;
+
+  LOOPS.list.forEach((loop) => {
+    if (loop === editLoop || !loop.gens?.[genIdx]) return;
+    keys.forEach((paramKey) => {
+      loop.gens[genIdx][paramKey] = source[paramKey];
+    });
+    copied += 1;
+  });
+
+  setStatus(copied > 0 ? `copied to ${copied} other loop${copied === 1 ? '' : 's'}` : 'no other loops');
+}
+
+function openKnobContextMenu(target, x, y) {
+  closeKnobContextMenu();
+  closeModSourceMenu();
+
+  const menu = document.createElement('div');
+  menu.className = 'mod-source-menu knob-context-menu';
+  knobContextMenuEl = menu;
+
+  const title = document.createElement('div');
+  title.className = 'mod-source-menu-title';
+  title.textContent = target.label;
+
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'mod-source-option knob-context-option';
+  copyBtn.textContent = 'Copy to other loops';
+  copyBtn.disabled = LOOPS.list.length < 2;
+  copyBtn.addEventListener('click', () => {
+    copyGeneratorParamToOtherLoops(target.genIdx, target.key);
+    closeKnobContextMenu();
+  });
+
+  menu.append(title, copyBtn);
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+}
+
 // ── Mod source context menu (right-click a knob's map LED) ──
 
 let modSourceMenuEl = null;
@@ -5030,6 +5706,7 @@ function getModSourceOptions() {
 }
 
 function openModSourceMenu(target, led, x, y) {
+  closeKnobContextMenu();
   closeModSourceMenu();
   const current = lfoMappings.get(`${target.genIdx}:${target.key}`)?.sourceIdx ?? null;
 
@@ -5072,6 +5749,7 @@ function openModSourceMenu(target, led, x, y) {
 
 window.addEventListener('pointerdown', (e) => {
   if (modSourceMenuEl && !modSourceMenuEl.contains(e.target)) closeModSourceMenu();
+  if (knobContextMenuEl && !knobContextMenuEl.contains(e.target)) closeKnobContextMenu();
 });
 
 function refreshDelayTimeUI() {
@@ -5151,12 +5829,14 @@ function refreshLFOControlUI(lfoIdx) {
   lfoSyncModeControls[lfoIdx]?.setMode(isSync ? 'sync' : 'free');
 }
 
-function setTransportBpm(value, { refresh = true } = {}) {
+function setTransportBpm(value, { refresh = true, updateField = true } = {}) {
   if (!Number.isFinite(value)) return;
   const decimals = (BPM_BOUNDS.step.toString().split('.')[1] || '').length;
   TRANSPORT.bpm = clamp(quantize(value, BPM_BOUNDS.step, decimals), BPM_BOUNDS.min, BPM_BOUNDS.max);
   const bpmInput = getBpmInput();
-  if (bpmInput) bpmInput.value = `${TRANSPORT.bpm}`;
+  // updateField false while the user is typing — rewriting mid-keystroke
+  // would clamp "1" to "40" before they can finish "175".
+  if (bpmInput && updateField) bpmInput.value = TRANSPORT.bpm.toFixed(decimals);
   if (!refresh) return;
   // Every bus has its own sync-locked delay/beat-repeat times — retune them all.
   FX_BUS_IDS.forEach((busId) => {
@@ -5185,33 +5865,69 @@ function initTempoDrag() {
   const bpmInput = getBpmInput();
   if (!tempoBox) return;
 
-  let startY = 0;
-  let startBpm = TRANSPORT.bpm;
+  // Ableton-style value drag: press anywhere on the box (the number included)
+  // and drag vertically. The pointer is locked so the cursor disappears and
+  // the drag never hits a screen edge; a plain click on the number still
+  // focuses it for typing. Shift = fine (0.01/px), normal = 0.1/px.
+  let armed = false; // pressed, not yet decided click-vs-drag
   let dragging = false;
+  let dragBpm = 0; // unquantized accumulator — keeps sub-step motion smooth
+  let downY = 0;
+
+  // The number is readonly until double-clicked, so the box is one drag
+  // surface (no text cursor, no accidental selection); Enter/blur commits
+  // typing and re-arms the drag.
+  if (bpmInput) {
+    bpmInput.addEventListener('dblclick', () => {
+      bpmInput.readOnly = false;
+      bpmInput.focus();
+      bpmInput.select();
+    });
+    bpmInput.addEventListener('blur', () => {
+      bpmInput.readOnly = true;
+      setTransportBpm(TRANSPORT.bpm);
+    });
+    bpmInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') bpmInput.blur();
+    });
+  }
 
   tempoBox.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
-    if (bpmInput && e.target === bpmInput) return;
+    if (bpmInput && !bpmInput.readOnly) return; // typing mode — leave it alone
     e.preventDefault();
-    startY = e.clientY;
-    startBpm = TRANSPORT.bpm;
-    dragging = true;
-    tempoBox.classList.add('dragging');
+    armed = true;
+    downY = e.clientY;
+    dragBpm = TRANSPORT.bpm;
     tempoBox.setPointerCapture(e.pointerId);
   });
 
   tempoBox.addEventListener('pointermove', (e) => {
-    if (!dragging || !tempoBox.hasPointerCapture(e.pointerId)) return;
-    const sensitivity = e.shiftKey ? 0.1 : 0.35;
-    const nextBpm = startBpm + (startY - e.clientY) * sensitivity;
-    setTransportBpm(nextBpm);
+    if (!armed && !dragging) return;
+    if (!dragging) {
+      if (Math.abs(e.clientY - downY) < 3) return; // still a click
+      dragging = true;
+      armed = false;
+      tempoBox.classList.add('dragging');
+      bpmInput?.blur();
+      tempoBox.requestPointerLock?.();
+    }
+    // movementY works locked and unlocked alike.
+    dragBpm = clamp(
+      dragBpm - e.movementY * (e.shiftKey ? 0.01 : 0.1),
+      BPM_BOUNDS.min,
+      BPM_BOUNDS.max,
+    );
+    setTransportBpm(dragBpm);
   });
 
   const endDrag = (e) => {
+    armed = false;
+    if (tempoBox.hasPointerCapture(e.pointerId)) tempoBox.releasePointerCapture(e.pointerId);
     if (!dragging) return;
     dragging = false;
     tempoBox.classList.remove('dragging');
-    if (tempoBox.hasPointerCapture(e.pointerId)) tempoBox.releasePointerCapture(e.pointerId);
+    if (document.pointerLockElement === tempoBox) document.exitPointerLock();
   };
 
   tempoBox.addEventListener('pointerup', endDrag);
@@ -5225,6 +5941,8 @@ function getFxParamDef(id, key) {
 function getGen3ParamLabel(key) {
   if (key === 'gain') return 'Gain';
   if (key === 'pitch') return 'Pitch';
+  if (key === 'decay') return 'Decay';
+  if (key === 'sustain') return 'Sustain';
   if (key === 'detune') return 'Detune';
   return key;
 }
@@ -6024,9 +6742,10 @@ function createFxSection(label, className = '') {
   const section = document.createElement('div');
   section.className = `fx-section${className ? ' ' + className : ''}`;
 
-  const header = document.createElement('button');
+  const header = document.createElement('div');
   header.className = 'fx-section-label';
-  header.type = 'button';
+  header.tabIndex = 0;
+  header.setAttribute('role', 'button');
 
   const title = document.createElement('span');
   title.className = 'fx-section-label-text';
@@ -6048,12 +6767,17 @@ function createFxSection(label, className = '') {
   header.addEventListener('click', () => {
     setCollapsed(!section.classList.contains('collapsed'));
   });
+  header.addEventListener('keydown', (event) => {
+    if (event.target !== header || (event.key !== 'Enter' && event.key !== ' ')) return;
+    event.preventDefault();
+    setCollapsed(!section.classList.contains('collapsed'));
+  });
 
   header.append(title, toggle);
   section.append(header, content);
   setCollapsed(false);
 
-  return { section, content, setCollapsed };
+  return { section, header, content, toggle, setCollapsed };
 }
 
 function buildSequencerSection() {
@@ -6569,6 +7293,7 @@ function buildBusFx(busId) {
 function buildFxNodes() {
   buildMaster();
   FX_BUS_IDS.forEach((busId) => buildBusFx(busId));
+  applyInstrumentMixState();
   applyFxModulation();
 }
 
@@ -6742,6 +7467,9 @@ function capturePreset() {
     },
     fxByBus: JSON.parse(JSON.stringify(fxStates)),
     fxOrderByBus: JSON.parse(JSON.stringify(fxOrders)),
+    instrumentMix: Object.fromEntries(
+      FX_BUS_IDS.map((busId) => [busId, { ...INSTRUMENT_MIX[busId] }]),
+    ),
     limiter: { ...LIMITER },
     activeBus,
     lfos: LFOS.map(({ label, rate, sync, syncIndex, shape, depth }) => ({
@@ -6819,10 +7547,18 @@ function applyPreset(preset) {
     applyFxModulation();
   }
 
+  FX_BUS_IDS.forEach((busId) => {
+    const saved = preset.instrumentMix?.[busId];
+    INSTRUMENT_MIX[busId].muted = saved?.muted === true;
+    INSTRUMENT_MIX[busId].solo = saved?.solo === true;
+  });
+  applyInstrumentMixState();
+
   if (preset.limiter) {
     Object.assign(LIMITER, preset.limiter);
     applyLimiterAll();
     limiterControls.forEach((control, key) => control.setValue(LIMITER[key]));
+    refreshFxPresetSelection('limiter');
   }
 
   if (preset.activeBus && FX_BUS_IDS.includes(preset.activeBus)) activeBus = preset.activeBus;
@@ -6876,19 +7612,26 @@ function applyPreset(preset) {
   setPlayMode(preset.song?.mode === 'song' ? 'song' : 'loop');
 
   if (preset.gen4?.channels) {
+    GEN4.channels.forEach((ch, ci) => {
+      const def = GEN4_DEFS[ci];
+      if (!def) return;
+      gen4SetChannelFxSend(ci, def.id !== 'kick');
+      def.paramDefs.forEach((pd) => {
+        ch.params[pd.key] = pd.value;
+        gen4ControlBindings[ci].get(pd.key)?.setValue(pd.value);
+      });
+    });
     preset.gen4.channels.forEach((saved, ci) => {
       const ch = GEN4.channels[ci];
       const def = GEN4_DEFS[ci];
       if (!ch || !saved || !def) return;
       if (typeof saved.fxSend === 'boolean') gen4SetChannelFxSend(ci, saved.fxSend);
-      if (saved.params) {
-        def.paramDefs.forEach((pd) => {
-          if (typeof saved.params[pd.key] === 'number') {
-            ch.params[pd.key] = clamp(saved.params[pd.key], pd.min, pd.max);
-            gen4ControlBindings[ci].get(pd.key)?.setValue(ch.params[pd.key]);
-          }
-        });
-      }
+      def.paramDefs.forEach((pd) => {
+        const savedValue = saved.params?.[pd.key];
+        ch.params[pd.key] =
+          typeof savedValue === 'number' ? clamp(savedValue, pd.min, pd.max) : pd.value;
+        gen4ControlBindings[ci].get(pd.key)?.setValue(ch.params[pd.key]);
+      });
     });
   }
 
@@ -6955,15 +7698,7 @@ function findProjectIndex(name) {
   return projectStore.findIndex((p) => p.name.trim().toLowerCase() === norm);
 }
 
-function saveProjectFromInput() {
-  const input = getProjectNameInput();
-  if (!input) return;
-  const name = input.value.trim();
-  if (!name) {
-    setStatus('name required');
-    input.focus();
-    return;
-  }
+function saveProject(name) {
   const entry = { name, data: capturePreset(), savedAt: Date.now() };
   const existing = findProjectIndex(name);
   if (existing >= 0) projectStore[existing] = entry;
@@ -6973,6 +7708,18 @@ function saveProjectFromInput() {
   persistAudioForScope(`project:${name}`);
   refreshProjectUI();
   setStatus(`saved "${name}"`);
+}
+
+function saveProjectFromInput() {
+  const input = getProjectNameInput();
+  if (!input) return;
+  const name = input.value.trim();
+  if (!name) {
+    setStatus('name required');
+    input.focus();
+    return;
+  }
+  saveProject(name);
 }
 
 function openProject(name) {
@@ -7110,6 +7857,81 @@ function buildProjectUI() {
 }
 
 const limiterControls = new Map(); // master-limiter controls (global section)
+const fxPresetSelects = new Map();
+
+function getFxPresetState(effectId) {
+  return effectId === 'limiter' ? LIMITER : FX[effectId];
+}
+
+function getMatchingFxPresetIndex(effectId) {
+  const current = getFxPresetState(effectId);
+  if (!current) return -1;
+  return (FX_PRESETS[effectId] || []).findIndex(({ values }) =>
+    Object.entries(values).every(([key, value]) => current[key] === value),
+  );
+}
+
+function refreshFxPresetSelection(effectId) {
+  const select = fxPresetSelects.get(effectId);
+  if (!select) return;
+  const presetIndex = getMatchingFxPresetIndex(effectId);
+  select.value = presetIndex < 0 ? '' : `${presetIndex}`;
+}
+
+function markFxPresetCustom(effectId) {
+  const select = fxPresetSelects.get(effectId);
+  if (select) select.value = '';
+}
+
+function applyFxPreset(effectId, presetIndex) {
+  const preset = FX_PRESETS[effectId]?.[presetIndex];
+  const target = getFxPresetState(effectId);
+  if (!preset || !target) return;
+  Object.assign(target, preset.values);
+
+  if (effectId === 'limiter') {
+    applyLimiterAll();
+    limiterControls.forEach((control, key) => control.setValue(LIMITER[key]));
+    refreshFxPresetSelection(effectId);
+  } else {
+    applyAllFx(activeBus);
+    applyFxModulation();
+    renderActiveBusFx();
+  }
+  refreshBackPanelState();
+}
+
+function buildFxPresetSelect(effectId) {
+  const presets = FX_PRESETS[effectId];
+  if (!presets?.length) return null;
+
+  const select = document.createElement('select');
+  select.className = 'fx-preset-select';
+  select.title = `Choose a ${effectId} preset`;
+
+  const customOption = document.createElement('option');
+  customOption.value = '';
+  customOption.textContent = 'Custom';
+  select.appendChild(customOption);
+
+  presets.forEach(({ name }, presetIndex) => {
+    const option = document.createElement('option');
+    option.value = `${presetIndex}`;
+    option.textContent = name;
+    select.appendChild(option);
+  });
+
+  select.addEventListener('change', () => {
+    if (select.value === '') return;
+    applyFxPreset(effectId, Number(select.value));
+  });
+  select.addEventListener('click', (event) => event.stopPropagation());
+  select.addEventListener('keydown', (event) => event.stopPropagation());
+
+  fxPresetSelects.set(effectId, select);
+  refreshFxPresetSelection(effectId);
+  return select;
+}
 
 function buildFxUI() {
   const container = document.getElementById('fx-chain');
@@ -7142,13 +7964,16 @@ function buildFxUI() {
 function buildLimiterSection(container) {
   const def = FX_DEFS.find((d) => d.id === 'limiter');
   if (!def) return;
-  const { section, content } = createFxSection(def.label);
+  const { section, header, content, toggle } = createFxSection(def.label);
   limiterControls.clear();
+  const presetSelect = buildFxPresetSelect(def.id);
+  if (presetSelect) header.insertBefore(presetSelect, toggle);
   def.params.forEach((p) => {
     const control = makeControlRow(
       p,
       LIMITER[p.key],
       (v) => {
+        markFxPresetCustom(def.id);
         LIMITER[p.key] = v;
         applyLimiter(p.key, v);
         refreshBackPanelState();
@@ -7171,12 +7996,15 @@ function renderActiveBusFx() {
   fxSectionEls.clear();
   filterModeButtons.clear();
   delayModeButtons.clear();
+  DEFAULT_FX_ORDER.forEach((effectId) => fxPresetSelects.delete(effectId));
 
   const fxDefById = new Map(FX_DEFS.map((def) => [def.id, def]));
   fxOrders[activeBus].forEach((fxId) => {
     const def = fxDefById.get(fxId);
     if (!def) return;
-    const { section, content } = createFxSection(def.label);
+    const { section, header, content, toggle } = createFxSection(def.label);
+    const presetSelect = buildFxPresetSelect(def.id);
+    if (presetSelect) header.insertBefore(presetSelect, toggle);
 
     if (def.id === 'filter') {
       const modeRow = document.createElement('div');
@@ -7190,6 +8018,7 @@ function renderActiveBusFx() {
         btn.className = 'fx-mode-btn' + (FX.filter.mode === mode ? ' active' : '');
         btn.textContent = label;
         btn.addEventListener('click', () => {
+          markFxPresetCustom(def.id);
           FX.filter.mode = mode;
           applyFilterMode();
           refreshFilterUI();
@@ -7213,6 +8042,7 @@ function renderActiveBusFx() {
         btn.type = 'button';
         btn.textContent = label;
         btn.addEventListener('click', () => {
+          markFxPresetCustom(def.id);
           FX.delay.mode = mode;
           applyDelayMode();
           refreshDelayModeUI();
@@ -7230,6 +8060,7 @@ function renderActiveBusFx() {
         p,
         FX[def.id][p.key],
         (v) => {
+          markFxPresetCustom(def.id);
           if (def.id === 'delay' && p.key === 'time') {
             if (FX.delay.sync) {
               FX.delay.syncIndex = Math.round(v);
@@ -7277,6 +8108,7 @@ function renderActiveBusFx() {
 
       if (def.id === 'delay' && p.key === 'time') {
         delaySyncModeControl = buildSyncModeRow(FX.delay.sync, (mode) => {
+          markFxPresetCustom(def.id);
           FX.delay.sync = mode === 'sync';
           refreshDelayTimeUI();
           if (isMappable) applyFxModulation();
@@ -7289,6 +8121,7 @@ function renderActiveBusFx() {
 
       if (def.id === 'beatrepeat' && p.key === 'interval') {
         beatRepeatSyncModeControl = buildSyncModeRow(FX.beatrepeat.sync, (mode) => {
+          markFxPresetCustom(def.id);
           FX.beatrepeat.sync = mode === 'sync';
           refreshBeatRepeatIntervalUI();
           applyFx('beatrepeat', 'interval', getBaseFxValue('beatrepeat', 'interval'));
@@ -7300,6 +8133,7 @@ function renderActiveBusFx() {
 
       if (def.id === 'beatrepeat' && p.key === 'grid') {
         beatRepeatGridSyncModeControl = buildSyncModeRow(FX.beatrepeat.gridSync, (mode) => {
+          markFxPresetCustom(def.id);
           FX.beatrepeat.gridSync = mode === 'sync';
           refreshBeatRepeatGridUI();
           applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
@@ -7687,7 +8521,6 @@ function stop() {
     refreshSourceModeUI(genIdx);
   }
 
-  document.getElementById('startBtn').textContent = getIdleStartButtonLabel();
   setStatus('idle');
   resetGenVizState(0);
   resetGenVizState(1);
@@ -7696,16 +8529,6 @@ function stop() {
   drawGenVizEmpty(2);
   refreshBackPanelState();
 }
-
-document.getElementById('startBtn').addEventListener('click', () => {
-  started ? stop() : start();
-});
-
-document.getElementById('transportStopBtn').addEventListener('click', () => {
-  stopGen4Sequencer();
-  stopAllGen3Notes();
-  refreshTransportStopBtn();
-});
 
 getInputSelect()?.addEventListener('change', async (e) => {
   INPUT_SOURCE.selectedId = e.target.value;
@@ -7723,7 +8546,7 @@ getInputSelect()?.addEventListener('change', async (e) => {
 
 getBpmInput()?.addEventListener('input', (e) => {
   const next = Number.parseFloat(e.target.value);
-  if (Number.isFinite(next)) setTransportBpm(next);
+  if (Number.isFinite(next)) setTransportBpm(next, { updateField: false });
 });
 
 getBpmInput()?.addEventListener('change', () => {
@@ -7773,6 +8596,8 @@ buildProjectUI();
 renderLoopsBar();
 renderSongLane();
 initModeToggle();
+initStripPlayBtn();
+initSettingsMenu();
 buildBackPanel();
 buildVisualPanel();
 refreshInputDevices();
@@ -7790,7 +8615,6 @@ window.addEventListener('beforeunload', () => {
   flushAutosaveAudio();
 });
 setPanelView('front');
-getStartBtn().textContent = getIdleStartButtonLabel();
 
 window.addEventListener('resize', () => {
   if (UI_VIEW.mode === 'back') rebuildBackWireSVG();
@@ -7802,9 +8626,30 @@ window.addEventListener('keydown', (event) => {
     closeProjectMenu();
     closeSongBlockMenu();
     closeModSourceMenu();
+    closeSettingsMenu();
   }
   if (event.key === 'Tab' && !event.target.closest('input, textarea, select')) {
     event.preventDefault();
     setPanelView(UI_VIEW.mode === 'front' ? 'back' : 'front');
   }
+  if (event.code === 'Space' && !event.target.closest('input, textarea, select')) {
+    // preventDefault also swallows the "space clicks the focused button"
+    // default, so a focused ▶ doesn't toggle twice.
+    event.preventDefault();
+    stripPlayToggle();
+  }
 });
+
+// Capture phase: inputs that stopPropagation (rename fields, fx headers)
+// must never let ⌘S fall through to the browser's save-page dialog.
+window.addEventListener(
+  'keydown',
+  (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+      event.preventDefault();
+      if (currentProjectName) saveProject(currentProjectName);
+      else openProjectMenu(); // unnamed project — pick a name first
+    }
+  },
+  { capture: true },
+);
