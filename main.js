@@ -452,6 +452,8 @@ function initHistory() {
 // ── Audio clip persistence ── granular source audio (loaded .wav buffers and
 // frozen mic takes) is too big for localStorage, so it lives in IndexedDB,
 // keyed `<scope>:gen<i>` where scope is `project:<name>` or `autosave`.
+// The mastering source wav (bounced song or loaded file) rides along under
+// `<scope>:master`.
 
 const AUDIO_DB_NAME = 'grnsh-audio-v1';
 const AUDIO_DB_STORE = 'clips';
@@ -520,12 +522,26 @@ async function persistAudioForScope(scope) {
       await audioClipDelete(key);
     }
   }
+  const ms = MASTERING.source;
+  const masterKey = `${scope}:master`;
+  if (ms?.left?.length) {
+    await audioClipPut(masterKey, {
+      mode: 'master',
+      left: ms.left,
+      right: ms.right,
+      sampleRate: ms.sampleRate,
+      name: ms.name,
+    });
+  } else {
+    await audioClipDelete(masterKey);
+  }
 }
 
 async function deleteAudioForScope(scope) {
   for (let genIdx = 0; genIdx < 2; genIdx++) {
     await audioClipDelete(`${scope}:gen${genIdx}`);
   }
+  await audioClipDelete(`${scope}:master`);
 }
 
 async function applyRestoredClip(genIdx, clip) {
@@ -567,6 +583,18 @@ async function restoreAudioForScope(scope) {
   for (let genIdx = 0; genIdx < 2; genIdx++) {
     const clip = await audioClipGet(`${scope}:gen${genIdx}`);
     if (clip) await applyRestoredClip(genIdx, clip);
+  }
+  const masterClip = await audioClipGet(`${scope}:master`);
+  if (masterClip?.left?.length && masterClip.right?.length) {
+    setMasteringSource(
+      masterClip.left,
+      masterClip.right,
+      masterClip.sampleRate || 48000,
+      masterClip.name,
+    );
+  } else {
+    // A scope without master audio must not inherit the previous project's wav.
+    clearMasteringSource();
   }
   // Mirror what is now loaded into the autosave scope (also clears stale clips).
   queueAutosaveAudio();
@@ -8071,6 +8099,19 @@ function setMasteringSource(left, right, sampleRate, name) {
   if (MASTERING.built) {
     refreshMasteringSourceUI();
   }
+  queueAutosaveAudio();
+}
+
+function clearMasteringSource() {
+  if (!MASTERING.source) return;
+  if (MASTERING.built) stopMasteringPreview({ preservePosition: false });
+  MASTERING.source = null;
+  MASTERING.previewBuffer = null;
+  MASTERING.renderedPeaks = null;
+  MASTERING.playheadSec = 0;
+  MASTERING.loopMode = 'off';
+  MASTERING.loopSelection = null;
+  if (MASTERING.built) refreshMasteringSourceUI();
 }
 
 const MASTERING_MODULE_IDS = ['eq', 'opto', 'comp', 'ott', 'tape', 'exciter', 'width', 'limit'];
@@ -9453,17 +9494,26 @@ function biquadMagnitudeDb([b0, b1, b2, a1, a2], freq, sr) {
   return 10 * Math.log10((num || 1e-20) / (den || 1e-20));
 }
 
-function masteringEqResponseDb(freq) {
+// Per-band display coefficients — optional gain overrides let the live
+// (dynamics-driven) curve reuse the same math as the static one.
+function masteringEqCurveCoefs(gains = null) {
   const p = MASTERING.params;
-  return MASTERING_EQ_BANDS.reduce((sum, band) => {
-    const coeffs = rbjPeaking(
+  return MASTERING_EQ_BANDS.map((band, bi) =>
+    rbjPeaking(
       EQ_DISPLAY_SR,
       p[band.freqKey],
-      p[band.gainKey],
+      gains && typeof gains[bi] === 'number' ? gains[bi] : p[band.gainKey],
       p[band.qKey],
-    );
-    return sum + biquadMagnitudeDb(coeffs, freq, EQ_DISPLAY_SR);
-  }, 0);
+    ),
+  );
+}
+
+function masteringEqCurveDb(coefsList, freq) {
+  let sum = 0;
+  for (let i = 0; i < coefsList.length; i++) {
+    sum += biquadMagnitudeDb(coefsList[i], freq, EQ_DISPLAY_SR);
+  }
+  return sum;
 }
 
 const eqFreqToX = (f, w) => (Math.log(f / EQ_FMIN) / Math.log(EQ_FMAX / EQ_FMIN)) * w;
@@ -9572,18 +9622,39 @@ function drawMasteringEq() {
     g.globalAlpha = 1;
   }
 
-  // Combined response curve.
-  g.strokeStyle = bandCols[0];
-  g.lineWidth = 1.5;
-  g.beginPath();
+  // Combined response. While previewing with dynamics active, the configured
+  // curve stays as a ghost and the whole live curve (per-band effective
+  // gains from the worklet) moves with the music — Pro-Q style.
   const steps = 160;
-  for (let i = 0; i <= steps; i++) {
-    const f = EQ_FMIN * Math.pow(EQ_FMAX / EQ_FMIN, i / steps);
-    const y = eqDbToY(clamp(masteringEqResponseDb(f), -EQ_DB_RANGE, EQ_DB_RANGE), h);
-    if (i === 0) g.moveTo(eqFreqToX(f, w), y);
-    else g.lineTo(eqFreqToX(f, w), y);
+  const drawResponseCurve = (coefsList, width, alpha) => {
+    g.strokeStyle = bandCols[0];
+    g.lineWidth = width;
+    g.globalAlpha = alpha;
+    g.beginPath();
+    for (let i = 0; i <= steps; i++) {
+      const f = EQ_FMIN * Math.pow(EQ_FMAX / EQ_FMIN, i / steps);
+      const y = eqDbToY(clamp(masteringEqCurveDb(coefsList, f), -EQ_DB_RANGE, EQ_DB_RANGE), h);
+      if (i === 0) g.moveTo(eqFreqToX(f, w), y);
+      else g.lineTo(eqFreqToX(f, w), y);
+    }
+    g.stroke();
+    g.globalAlpha = 1;
+  };
+  const liveGains = MASTERING.preview ? MASTERING.liveEqGains : null;
+  const anyDynamic = MASTERING_EQ_BANDS.some(
+    (band) => (MASTERING.params[band.rangeKey] || 0) > 0,
+  );
+  if (liveGains && anyDynamic) {
+    drawResponseCurve(masteringEqCurveCoefs(), 1, 0.3); // ghost: configured curve
+    const gains = MASTERING_EQ_BANDS.map((band, bi) =>
+      (MASTERING.params[band.rangeKey] || 0) > 0 && typeof liveGains[bi] === 'number'
+        ? liveGains[bi]
+        : MASTERING.params[band.gainKey],
+    );
+    drawResponseCurve(masteringEqCurveCoefs(gains), 1.5, 1); // live curve
+  } else {
+    drawResponseCurve(masteringEqCurveCoefs(), 1.5, 1);
   }
-  g.stroke();
 
   // Band handles.
   MASTERING_EQ_BANDS.forEach((band, bi) => {
@@ -9605,15 +9676,6 @@ function drawMasteringEq() {
       g.stroke();
       g.globalAlpha = 1;
       g.lineWidth = 1;
-      // Live effective gain while previewing — the moving part.
-      const live = MASTERING.liveEqGains?.[bi];
-      if (MASTERING.preview && typeof live === 'number') {
-        const ly = eqDbToY(clamp(live, -EQ_DB_RANGE, EQ_DB_RANGE), h);
-        g.fillStyle = bandCols[bi];
-        g.beginPath();
-        g.arc(x, ly, 2.5, 0, Math.PI * 2);
-        g.fill();
-      }
     }
     if (bi === MASTERING.eqBandIndex) {
       g.strokeStyle = bandCols[bi];
@@ -11565,6 +11627,16 @@ function captureExportAudio() {
       };
     }
   }
+  const ms = MASTERING.source;
+  if (ms?.left?.length) {
+    audio.master = {
+      mode: 'master',
+      left: floatsToBase64(ms.left),
+      right: floatsToBase64(ms.right),
+      sampleRate: ms.sampleRate,
+      name: ms.name,
+    };
+  }
   return audio;
 }
 
@@ -11608,6 +11680,19 @@ async function importProjectFile(file) {
     try {
       await applyRestoredClip(genIdx, { ...clip, samples: base64ToFloats(clip.samples) });
     } catch (e) {}
+  }
+  const masterClip = payload.audio?.master;
+  if (masterClip?.left && masterClip.right) {
+    try {
+      setMasteringSource(
+        base64ToFloats(masterClip.left),
+        base64ToFloats(masterClip.right),
+        masterClip.sampleRate || 48000,
+        masterClip.name,
+      );
+    } catch (e) {}
+  } else {
+    clearMasteringSource();
   }
   queueAutosaveAudio();
   currentProjectName = typeof payload.name === 'string' && payload.name ? payload.name : null;
