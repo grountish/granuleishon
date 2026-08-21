@@ -13,6 +13,94 @@
   --accent-fx-dim: #ae6e1c;
 }
 
+:root[data-theme='sober'] {
+  --bg: #1a1b1b;
+  --surface: #222323;
+  --surface-2: #292a2a;
+  --border: #3b3d3d;
+  --text: #c5c8c7;
+  --muted: #626665;
+  --accent-0: #a9b2ae;
+  --accent-0-dim: #7f8985;
+  --accent-1: #aaa8ae;
+  --accent-1-dim: #817f86;
+  --accent-fx: #b2ada4;
+  --accent-fx-dim: #89847b;
+}
+
+:root[data-theme='sober'] body {
+  filter: saturate(0.16);
+}
+
+:root[data-theme='slate-arrangement'] {
+  --bg: #303836;
+  --surface: #353e3b;
+  --surface-2: #3b4542;
+  --border: #56605b;
+  --text: #d0cfb6;
+  --muted: #7d8478;
+  --accent-0: #d7c99d;
+  --accent-0-dim: #a89d79;
+  --accent-1: #6bc9dc;
+  --accent-1-dim: #4b9bab;
+  --accent-fx: #e0ad62;
+  --accent-fx-dim: #b48142;
+}
+
+:root[data-theme='slate-session'] {
+  --bg: #303a3e;
+  --surface: #3b484c;
+  --surface-2: #46565b;
+  --border: #172226;
+  --text: #d2d7d4;
+  --muted: #879397;
+  --accent-0: #68d4e5;
+  --accent-0-dim: #49a6b6;
+  --accent-1: #e49abc;
+  --accent-1-dim: #b87291;
+  --accent-fx: #79c9d6;
+  --accent-fx-dim: #5398a3;
+}
+
+:root[data-theme='neon-flux'] {
+  --bg: #0b0b12;
+  --surface: #13131f;
+  --surface-2: #1a1a2b;
+  --border: #2d2d49;
+  --text: #d8d6ee;
+  --muted: #5d5b80;
+  --accent-0: #2de2a6;
+  --accent-0-dim: #1fa87c;
+  --accent-1: #7c5cff;
+  --accent-1-dim: #5d43c4;
+  --accent-fx: #ff4f9a;
+  --accent-fx-dim: #c43a77;
+}
+
+:root[data-theme='neon-flux'] body {
+  background: radial-gradient(ellipse at 50% -30%, #181030 0%, var(--bg) 65%);
+}
+
+:root[data-theme='aurora'] {
+  --bg: #0a1214;
+  --surface: #0f1c1f;
+  --surface-2: #152629;
+  --border: #26424b;
+  --text: #cfe6e3;
+  --muted: #557b7d;
+  --accent-0: #35e0b4;
+  --accent-0-dim: #27a988;
+  --accent-1: #6fb6ff;
+  --accent-1-dim: #4f8ccc;
+  --accent-fx: #c987ff;
+  --accent-fx-dim: #9963c9;
+}
+
+:root[data-theme='aurora'] body {
+  background: radial-gradient(ellipse at 20% -20%, #0e2a26 0%, var(--bg) 55%),
+    radial-gradient(ellipse at 85% -25%, #14203a 0%, var(--bg) 60%);
+}
+
 *,
 *::before,
 *::after {
@@ -57,6 +145,125 @@ main {
   position: relative;
   display: flex;
   align-items: center;
+}
+
+.undo-bar {
+  display: flex;
+  gap: 4px;
+}
+
+.bounce-btn.active {
+  color: var(--accent-fx);
+  border-color: var(--accent-fx);
+}
+
+.bounce-progress {
+  position: relative;
+  width: 92px;
+  height: 14px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--bg);
+  flex-shrink: 0;
+}
+
+.bounce-progress[hidden] {
+  display: none;
+}
+
+.bounce-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0%;
+  background: color-mix(in srgb, var(--accent-fx) 72%, var(--surface));
+  transition: width 0.12s linear;
+}
+
+.bounce-progress-label {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--text);
+  font-size: 7px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-file-row {
+  display: flex;
+  gap: 6px;
+}
+
+.project-file-btn {
+  flex: 1;
+}
+
+.drum-swing-box {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  background: #202020;
+  border-radius: 2px;
+  cursor: ns-resize;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.drum-swing-box.dragging {
+  cursor: ns-resize;
+  background: #262626;
+  border-color: #505050;
+}
+
+.drum-swing-label {
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.drum-swing-input {
+  width: 3ch;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 10px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  appearance: textfield;
+  -moz-appearance: textfield;
+  cursor: text;
+}
+
+.drum-swing-input:read-only {
+  cursor: ns-resize;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.drum-swing-input::-webkit-outer-spin-button,
+.drum-swing-input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.drum-swing-suffix {
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.undo-btn {
+  padding: 3px 7px;
+  font-size: 11px;
+  line-height: 1;
 }
 
 .project-menu-btn {
@@ -433,6 +640,46 @@ main {
   background: rgba(0, 0, 0, 0.55);
   backdrop-filter: blur(3px);
   -webkit-backdrop-filter: blur(3px);
+}
+
+.confirm-modal {
+  margin: auto;
+  min-width: 260px;
+  max-width: 360px;
+  padding: 14px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.6);
+}
+
+.confirm-modal::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+
+.confirm-msg {
+  font-size: 11px;
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.confirm-ok.danger {
+  color: #d66;
+  border-color: #7a3a3a;
+}
+
+.confirm-ok.danger:hover:not(:disabled) {
+  background: #3a2626;
+  border-color: #a04a4a;
 }
 
 .settings-section-label {
@@ -1921,6 +2168,11 @@ button:disabled {
   background: #292929;
 }
 
+.drum-preset-select {
+  width: 86px;
+  color: inherit;
+}
+
 .fx-drag-handle {
   cursor: grab;
   color: var(--muted);
@@ -2240,7 +2492,7 @@ button:disabled {
 .drum-step.on {
   background: var(--ch-color);
   border-color: var(--ch-color);
-  opacity: var(--step-velocity, 1);
+  opacity: max(0.42, var(--step-velocity, 1));
 }
 
 .drum-step:hover:not(.on) {
@@ -2263,6 +2515,7 @@ button:disabled {
   display: grid;
   place-items: center;
   color: var(--muted);
+  transition: color 0.08s, border-color 0.08s, background 0.08s, box-shadow 0.08s;
 }
 
 .drum-mute-btn:hover:not(:disabled) {
@@ -2272,9 +2525,20 @@ button:disabled {
 }
 
 .drum-mute-btn.muted {
-  background: #3a3a3a;
-  border-color: #5a5a5a;
-  color: #d0d0d0;
+  background: #a94e54;
+  border-color: #df7379;
+  color: #fff;
+  box-shadow: 0 0 0 1px rgba(223, 115, 121, 0.25);
+}
+
+.drum-row.channel-muted .drum-row-label,
+.drum-row.channel-muted .drum-steps,
+.drum-row.channel-muted .drum-fx-btn {
+  opacity: 0.32;
+}
+
+.drum-note-lane-btn.muted:not(.active) {
+  opacity: 0.42;
 }
 
 .drum-params {
@@ -2319,6 +2583,33 @@ button:disabled {
   border-color: var(--ch-color);
   background: color-mix(in srgb, var(--ch-color) 22%, #202020);
   color: var(--ch-color);
+}
+
+.drum-note-pencil-btn {
+  width: 24px;
+  height: 19px;
+  margin-left: auto;
+  padding: 0;
+  border-color: #3b3b3b;
+  background: #202020;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.drum-note-pencil-btn:hover,
+.drum-note-pencil-btn.active {
+  border-color: var(--ch-color);
+  color: var(--ch-color);
+}
+
+.drum-note-pencil-btn.active {
+  background: color-mix(in srgb, var(--ch-color) 18%, #202020);
+}
+
+.drum-note-editor:has(.drum-note-pencil-btn.active) .drum-note-cell:not(.step-inactive) {
+  cursor: crosshair;
+  touch-action: none;
 }
 
 .drum-note-roll {
@@ -2422,15 +2713,79 @@ button:disabled {
 
 .drum-step-stutter {
   position: absolute;
-  top: 2px;
-  right: 2px;
-  font-size: 9px;
+  top: 1px;
+  right: 1px;
+  z-index: 2;
+  padding: 1px 2px;
+  border-radius: 2px;
+  background: rgba(12, 16, 16, 0.72);
+  font-size: 5px;
   line-height: 1;
-  color: rgba(255, 255, 255, 0.92);
+  color: rgba(255, 255, 255, 0.95);
   font-weight: 700;
   letter-spacing: 0;
   text-transform: none;
   pointer-events: none;
+}
+
+.drum-step-timing {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  z-index: 2;
+  min-width: 9px;
+  padding: 1px 2px;
+  border-radius: 2px;
+  background: rgba(12, 16, 16, 0.72);
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 5px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.drum-step-lock {
+  position: absolute;
+  right: 2px;
+  bottom: 4px;
+  z-index: 2;
+  color: rgba(10, 14, 14, 0.88);
+  font-size: 6px;
+  font-weight: 900;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.drum-step.lock-selected {
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.94);
+}
+
+.drum-param-section .control.parameter-locked {
+  background: color-mix(in srgb, var(--gen-accent) 14%, var(--surface));
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--gen-accent) 72%, transparent);
+}
+
+.drum-param-section .control.parameter-locked label,
+.drum-param-section .control.parameter-locked .value {
+  color: var(--gen-accent);
+}
+
+.drum-step-note {
+  position: absolute;
+  left: 2px;
+  bottom: 4px;
+  z-index: 1;
+  color: rgba(10, 14, 14, 0.82);
+  font-size: 6px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.drum-step-note[hidden] {
+  display: none;
 }
 
 .drum-step-prob {
@@ -2477,10 +2832,53 @@ button:disabled {
   border-color: #4a7a54;
 }
 
+.drum-fx-btn.locked {
+  box-shadow: inset 0 -2px 0 #d6a35f;
+}
+
 .drum-step-count-group {
   display: flex;
   gap: 2px;
   align-items: center;
+}
+
+.drum-variation-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 6px;
+  border-right: 1px solid #3d3d3d;
+}
+
+.drum-variation-btn,
+.drum-fill-btn {
+  min-width: 20px;
+  height: 18px;
+  padding: 0 5px;
+  border-color: #333;
+  background: #1e1e1e;
+  color: var(--muted);
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.drum-variation-btn.active {
+  border-color: #777;
+  background: #ddd;
+  color: #202020;
+}
+
+.drum-fill-btn {
+  min-width: 30px;
+  color: #b98755;
+}
+
+.drum-fill-btn.active {
+  border-color: #d49a5f;
+  background: #6b4827;
+  color: #ffd29b;
 }
 
 .drum-editor-mode-group {
@@ -2507,6 +2905,25 @@ button:disabled {
   border-color: #666;
   background: #353535;
   color: var(--text);
+}
+
+.drum-lock-clear-btn {
+  padding: 2px 6px;
+  border-color: #433438;
+  background: #261e20;
+  color: #a96a72;
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.drum-lock-clear-btn:hover:not(:disabled) {
+  border-color: #b45b66;
+  color: #e08a94;
+}
+
+.drum-lock-clear-btn:disabled {
+  opacity: 0.25;
 }
 
 .drum-step-count-btn {
@@ -2961,4 +3378,210 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ── Slate Arrangement theme ─────────────────────────────────── */
+
+:root[data-theme='slate-arrangement'] button,
+:root[data-theme='slate-arrangement'] input,
+:root[data-theme='slate-arrangement'] select {
+  border-color: #4d5853;
+  background-color: #2a3230;
+  color: #c5c5ad;
+}
+
+:root[data-theme='slate-arrangement'] button:hover:not(:disabled),
+:root[data-theme='slate-arrangement'] select:hover,
+:root[data-theme='slate-arrangement'] input:hover:not(:disabled) {
+  border-color: #778078;
+  background-color: #3d4643;
+}
+
+:root[data-theme='slate-arrangement'] button.active:not(.record-btn):not(.instrument-mute-btn):not(.lfo-led),
+:root[data-theme='slate-arrangement'] .fx-mode-btn.active,
+:root[data-theme='slate-arrangement'] .source-mode-btn.active {
+  border-color: #e0ad62;
+  background: #e0ad62;
+  color: #252b29;
+}
+
+:root[data-theme='slate-arrangement'] .header-bar,
+:root[data-theme='slate-arrangement'] .col-header,
+:root[data-theme='slate-arrangement'] .fx-section-label {
+  background: #343d3a;
+}
+
+:root[data-theme='slate-arrangement'] .project-menu,
+:root[data-theme='slate-arrangement'] .settings-modal,
+:root[data-theme='slate-arrangement'] .mod-source-menu,
+:root[data-theme='slate-arrangement'] .song-block-menu {
+  background: #3b4542;
+  border-color: #68716b;
+}
+
+:root[data-theme='slate-arrangement'] .generator,
+:root[data-theme='slate-arrangement'] #fx-chain,
+:root[data-theme='slate-arrangement'] .drum-grid,
+:root[data-theme='slate-arrangement'] .drum-note-editor {
+  background: #303836;
+}
+
+:root[data-theme='slate-arrangement'] .control:hover,
+:root[data-theme='slate-arrangement'] .fx-section-label:hover {
+  background: #414a47;
+}
+
+:root[data-theme='slate-arrangement'] .drum-step,
+:root[data-theme='slate-arrangement'] .drum-note-cell,
+:root[data-theme='slate-arrangement'] .seq-step {
+  background: #29312f;
+  border-color: #46504c;
+}
+
+:root[data-theme='slate-arrangement'] .drum-note-lanes,
+:root[data-theme='slate-arrangement'] .drum-note-label,
+:root[data-theme='slate-arrangement'] .drum-note-step-header,
+:root[data-theme='slate-arrangement'] .drum-note-step-number {
+  background: #343d3a;
+}
+
+:root[data-theme='slate-arrangement'] .drum-note-row.black-key,
+:root[data-theme='slate-arrangement'] .drum-note-row.black-key .drum-note-cell {
+  background: #2a3230;
+}
+
+:root[data-theme='slate-arrangement'] .drum-note-row.black-key .drum-note-label {
+  background: #29312f;
+  color: #b8b9a4;
+}
+
+:root[data-theme='slate-arrangement'] .instrument-solo-btn.active {
+  border-color: #e0ad62;
+  background: #e0ad62;
+  color: #252b29;
+}
+
+:root[data-theme='slate-arrangement'] .instrument-mute-btn.active,
+:root[data-theme='slate-arrangement'] .record-btn.active {
+  border-color: #d26960;
+  background: #d26960;
+  color: #2b1c1b;
+}
+
+/* ── Slate Session theme ─────────────────────────── */
+
+:root[data-theme='slate-session'] button,
+:root[data-theme='slate-session'] input,
+:root[data-theme='slate-session'] select {
+  border-color: #172226;
+  background-color: #354246;
+  color: #d2d7d4;
+}
+
+:root[data-theme='slate-session'] button:hover:not(:disabled),
+:root[data-theme='slate-session'] select:hover,
+:root[data-theme='slate-session'] input:hover:not(:disabled) {
+  border-color: #718187;
+  background-color: #4b5a5f;
+}
+
+:root[data-theme='slate-session'] button.active:not(.record-btn):not(.instrument-mute-btn):not(.lfo-led),
+:root[data-theme='slate-session'] .fx-mode-btn.active,
+:root[data-theme='slate-session'] .source-mode-btn.active {
+  border-color: #68d4e5;
+  background: #68d4e5;
+  color: #172226;
+}
+
+:root[data-theme='slate-session'] .header-bar,
+:root[data-theme='slate-session'] .col-header,
+:root[data-theme='slate-session'] .fx-section-label {
+  background: #3d4b4f;
+  border-color: #172226;
+}
+
+:root[data-theme='slate-session'] .project-menu,
+:root[data-theme='slate-session'] .settings-modal,
+:root[data-theme='slate-session'] .mod-source-menu,
+:root[data-theme='slate-session'] .song-block-menu {
+  background: #46565b;
+  border-color: #172226;
+}
+
+:root[data-theme='slate-session'] .generator,
+:root[data-theme='slate-session'] #fx-chain,
+:root[data-theme='slate-session'] .drum-grid,
+:root[data-theme='slate-session'] .drum-note-editor {
+  background: #303a3e;
+}
+
+:root[data-theme='slate-session'] .control:hover,
+:root[data-theme='slate-session'] .fx-section-label:hover {
+  background: #4a595e;
+}
+
+:root[data-theme='slate-session'] .drum-step,
+:root[data-theme='slate-session'] .drum-note-cell,
+:root[data-theme='slate-session'] .seq-step {
+  background: #273236;
+  border-color: #172226;
+}
+
+:root[data-theme='slate-session'] .drum-note-lanes,
+:root[data-theme='slate-session'] .drum-note-label,
+:root[data-theme='slate-session'] .drum-note-step-header,
+:root[data-theme='slate-session'] .drum-note-step-number {
+  background: #3b484c;
+}
+
+:root[data-theme='slate-session'] .drum-note-row.black-key,
+:root[data-theme='slate-session'] .drum-note-row.black-key .drum-note-cell {
+  background: #293438;
+}
+
+:root[data-theme='slate-session'] .drum-note-row.black-key .drum-note-label {
+  background: #293438;
+  color: #b8c0be;
+}
+
+:root[data-theme='slate-session'] .instrument-solo-btn.active {
+  border-color: #68d4e5;
+  background: #68d4e5;
+  color: #172226;
+}
+
+:root[data-theme='slate-session'] .instrument-mute-btn.active,
+:root[data-theme='slate-session'] .record-btn.active {
+  border-color: #e49abc;
+  background: #e49abc;
+  color: #281921;
+}
+
+/* Keep sequenced notes legible regardless of theme surface overrides. */
+:root .drum-step.on,
+:root[data-theme] .drum-step.on {
+  border-color: var(--ch-color);
+  background: var(--ch-color);
+}
+
+:root .drum-note-cell.on,
+:root[data-theme] .drum-note-cell.on {
+  border-color: var(--ch-color);
+  background: var(--ch-color);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+}
+
+:root .drum-note-cell.inherited,
+:root[data-theme] .drum-note-cell.inherited {
+  border-color: var(--ch-color);
+  background: color-mix(in srgb, var(--ch-color) 38%, var(--bg));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ch-color) 70%, white);
+}
+
+:root .piano-cell.locked {
+  box-shadow: inset 0 0 0 1px rgba(130, 225, 240, 0.75);
+}
+
+:root .piano-cell.active {
+  box-shadow: inset 0 0 0 2px rgba(235, 255, 255, 0.9);
 }

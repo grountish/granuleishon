@@ -1,5 +1,35 @@
 // grnsh — main thread: mic capture, worklet setup, UI wiring.
 
+const THEME_STORAGE_KEY = 'grnsh-theme-v1';
+const APP_THEMES = new Set(['original', 'sober', 'slate-arrangement', 'slate-session', 'neon-flux', 'aurora']);
+const LEGACY_THEME_NAMES = {
+  ableton: 'slate-arrangement',
+  'ableton-session': 'slate-session',
+};
+
+function setAppTheme(theme, { persist = true } = {}) {
+  const migrated = LEGACY_THEME_NAMES[theme] || theme;
+  const next = APP_THEMES.has(migrated) ? migrated : 'original';
+  document.documentElement.dataset.theme = next;
+  const select = document.getElementById('themeSelect');
+  if (select) select.value = next;
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch (_) {}
+  }
+}
+
+try {
+  const savedTheme = localStorage.getItem(THEME_STORAGE_KEY) || 'original';
+  setAppTheme(savedTheme, { persist: false });
+  if (LEGACY_THEME_NAMES[savedTheme]) {
+    localStorage.setItem(THEME_STORAGE_KEY, document.documentElement.dataset.theme);
+  }
+} catch (_) {
+  setAppTheme('original', { persist: false });
+}
+
 let audioCtx = null;
 let node = null;
 let micStream = null;
@@ -43,6 +73,7 @@ const REC = {
   sampleCount: 0,
   processor: null,
   sink: null,
+  downloadName: null, // one-shot override used by the song bounce
 };
 
 // Noise gate on the mic feeding the granulators: signal below threshold is
@@ -251,7 +282,8 @@ function downloadRecording(blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `grnsh-${stamp}.wav`;
+  a.download = REC.downloadName || `grnsh-${stamp}.wav`;
+  REC.downloadName = null;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -321,6 +353,100 @@ function restoreAutosave() {
   } catch (e) {
     return false;
   }
+}
+
+// ── Undo / redo ── whole-workspace snapshots (same shape as the autosave
+// data), captured a beat after each user gesture. Source audio clips are not
+// part of the snapshot, so undo never blanks a loaded file or frozen take.
+
+const HISTORY_LIMIT = 100;
+const HISTORY_DEBOUNCE_MS = 400;
+const HISTORY = { stack: [], index: -1, timer: null, applying: false };
+
+function historyCaptureNow() {
+  if (HISTORY.applying) return;
+  clearTimeout(HISTORY.timer);
+  HISTORY.timer = null;
+  const snap = JSON.stringify(capturePreset());
+  if (snap === HISTORY.stack[HISTORY.index]) return;
+  HISTORY.stack.length = HISTORY.index + 1; // a new edit clears the redo tail
+  HISTORY.stack.push(snap);
+  if (HISTORY.stack.length > HISTORY_LIMIT) HISTORY.stack.shift();
+  HISTORY.index = HISTORY.stack.length - 1;
+  refreshHistoryButtons();
+}
+
+function scheduleHistoryCapture() {
+  if (HISTORY.applying) return;
+  clearTimeout(HISTORY.timer);
+  HISTORY.timer = setTimeout(historyCaptureNow, HISTORY_DEBOUNCE_MS);
+}
+
+function historyInputListener(event) {
+  // Text entry commits on 'change' (blur/Enter); capturing live keystrokes
+  // would snapshot half-typed clamped values — "1" of "175" landing as 40 bpm.
+  const target = event.target;
+  if (
+    target instanceof Element &&
+    target.matches('input[type="text"], input[type="number"]:not([readonly]), textarea')
+  )
+    return;
+  scheduleHistoryCapture();
+}
+
+function historyApply(index) {
+  const snap = HISTORY.stack[index];
+  if (!snap) return;
+  HISTORY.index = index;
+  HISTORY.applying = true;
+  try {
+    applyPreset(JSON.parse(snap), { resetSources: false });
+  } finally {
+    HISTORY.applying = false;
+  }
+  refreshHistoryButtons();
+}
+
+function undo() {
+  // A pending (debounced) edit lands first, so it becomes the redo state.
+  historyCaptureNow();
+  if (HISTORY.index <= 0) {
+    setStatus('nothing to undo');
+    return;
+  }
+  historyApply(HISTORY.index - 1);
+  setStatus('undo');
+}
+
+function redo() {
+  if (HISTORY.timer) historyCaptureNow();
+  if (HISTORY.index >= HISTORY.stack.length - 1) {
+    setStatus('nothing to redo');
+    return;
+  }
+  historyApply(HISTORY.index + 1);
+  setStatus('redo');
+}
+
+function refreshHistoryButtons() {
+  const undoBtn = document.getElementById('undoBtn');
+  const redoBtn = document.getElementById('redoBtn');
+  if (undoBtn) undoBtn.disabled = HISTORY.index <= 0;
+  if (redoBtn) redoBtn.disabled = HISTORY.index >= HISTORY.stack.length - 1;
+}
+
+function initHistory() {
+  HISTORY.stack = [JSON.stringify(capturePreset())];
+  HISTORY.index = 0;
+  // Every workspace mutation ends in one of these gestures; capture is
+  // debounced, so a knob drag lands as a single history entry.
+  document.addEventListener('change', scheduleHistoryCapture, true);
+  document.addEventListener('input', historyInputListener, true);
+  window.addEventListener('pointerup', scheduleHistoryCapture, true);
+  window.addEventListener('keyup', scheduleHistoryCapture, true);
+  document.getElementById('undoBtn')?.addEventListener('click', undo);
+  document.getElementById('redoBtn')?.addEventListener('click', redo);
+  refreshHistoryButtons();
 }
 
 // ── Audio clip persistence ── granular source audio (loaded .wav buffers and
@@ -701,6 +827,171 @@ function stopRecording() {
   REC.isRecording = false;
   refreshRecordButton();
   setStatus(started ? getGranularStatusText() : audioCtx ? 'gen3 ready' : 'idle');
+}
+
+// ── Song bounce ── renders the arrangement to a WAV: master is unhooked from
+// the speakers, the song plays once from the top through the real graph while
+// the record tap captures it, and capture stops after the song ends plus an
+// FX-tail grace period. Realtime (the graph is live), but hands-off and
+// exact-length.
+
+const BOUNCE_TAIL_MS = 2000;
+const BOUNCE = {
+  active: false,
+  muted: false,
+  pollTimer: null,
+  progressTimer: null,
+  tailTimer: null,
+  phase: 'idle',
+  songSeconds: 0,
+  tailStartedAt: 0,
+  prevMode: 'loop',
+  prevSongLoop: true,
+};
+
+function getBounceSongSeconds() {
+  const secPerStep = 60 / TRANSPORT.bpm / 4;
+  return SONG.entries.reduce((seconds, entry) => {
+    const loop = getLoopById(entry.loopId);
+    if (!loop) return seconds;
+    return seconds + loop.gen4.stepCount * Math.max(1, entry.repeats) * secPerStep;
+  }, 0);
+}
+
+function setBounceProgress(progress) {
+  const wrap = document.getElementById('bounceProgress');
+  const fill = document.getElementById('bounceProgressFill');
+  const label = document.getElementById('bounceProgressLabel');
+  const normalized = clamp(progress, 0, 1);
+  const percent = Math.round(normalized * 100);
+  if (wrap) {
+    wrap.hidden = !BOUNCE.active;
+    wrap.setAttribute('aria-valuenow', String(percent));
+  }
+  if (fill) fill.style.width = `${percent}%`;
+  if (label) label.textContent = `${percent}%`;
+}
+
+function refreshBounceProgress() {
+  if (!BOUNCE.active) {
+    setBounceProgress(0);
+    return;
+  }
+  const tailSeconds = BOUNCE_TAIL_MS / 1000;
+  const totalSeconds = Math.max(0.001, BOUNCE.songSeconds + tailSeconds);
+  const songShare = BOUNCE.songSeconds / totalSeconds;
+  if (BOUNCE.phase === 'preparing') {
+    setBounceProgress(0);
+    return;
+  }
+  if (BOUNCE.phase === 'tail') {
+    const tailElapsed = Math.max(0, performance.now() - BOUNCE.tailStartedAt) / 1000;
+    setBounceProgress(songShare + clamp(tailElapsed / tailSeconds, 0, 1) * (1 - songShare));
+    return;
+  }
+  const renderedSeconds = audioCtx ? REC.sampleCount / audioCtx.sampleRate : 0;
+  setBounceProgress(clamp(renderedSeconds / Math.max(0.001, BOUNCE.songSeconds), 0, 1) * songShare);
+}
+
+async function bounceSong() {
+  if (BOUNCE.active) {
+    finishBounce('bounce cancelled', { save: false });
+    return;
+  }
+  if (REC.isRecording) {
+    setStatus('stop recording first');
+    return;
+  }
+  if (SONG.entries.length === 0) {
+    setStatus('song is empty — add loops to the song lane');
+    return;
+  }
+  if (isTransportOn()) await stripPlayToggle();
+  BOUNCE.prevMode = PLAY.mode;
+  BOUNCE.prevSongLoop = SONG.loop;
+  BOUNCE.active = true;
+  BOUNCE.phase = 'preparing';
+  BOUNCE.songSeconds = getBounceSongSeconds();
+  BOUNCE.tailStartedAt = 0;
+  refreshBounceUI();
+  try {
+    setPlayMode('song');
+    SONG.loop = false; // play the arrangement once, then the scheduler stops
+    await ensureTransportEngine();
+    if (!started) await start();
+    await startRecording();
+    // Silent render: the record tap keeps feeding, the speakers get nothing.
+    try {
+      master.output.disconnect(audioCtx.destination);
+      BOUNCE.muted = true;
+    } catch (e) {}
+    startGen4Sequencer();
+    if (!GEN4.playing) {
+      finishBounce('bounce failed to start', { save: false });
+      return;
+    }
+    BOUNCE.phase = 'rendering';
+    BOUNCE.progressTimer = setInterval(refreshBounceProgress, 100);
+    refreshBounceProgress();
+    setStatus('bouncing song…');
+    BOUNCE.pollTimer = setInterval(() => {
+      if (!GEN4.playing && !BOUNCE.tailTimer) {
+        clearInterval(BOUNCE.pollTimer);
+        BOUNCE.pollTimer = null;
+        BOUNCE.phase = 'tail';
+        BOUNCE.tailStartedAt = performance.now();
+        refreshBounceProgress();
+        BOUNCE.tailTimer = setTimeout(() => finishBounce(), BOUNCE_TAIL_MS);
+      }
+    }, 200);
+  } catch (err) {
+    finishBounce(`bounce failed: ${err.message}`, { save: false });
+  }
+}
+
+function finishBounce(statusText, { save = true } = {}) {
+  clearInterval(BOUNCE.pollTimer);
+  BOUNCE.pollTimer = null;
+  clearInterval(BOUNCE.progressTimer);
+  BOUNCE.progressTimer = null;
+  clearTimeout(BOUNCE.tailTimer);
+  BOUNCE.tailTimer = null;
+  if (!BOUNCE.active) return;
+  setBounceProgress(save ? 1 : 0);
+  BOUNCE.active = false;
+  BOUNCE.phase = 'idle';
+  if (GEN4.playing) stopGen4Sequencer();
+  if (REC.isRecording) {
+    if (save) {
+      REC.downloadName = `${(currentProjectName || 'grnsh').replace(/[^\w.-]+/g, '_')}-song.wav`;
+    } else {
+      // Discard: stopRecording only downloads when samples exist.
+      REC.left = [];
+      REC.right = [];
+      REC.sampleCount = 0;
+    }
+    stopRecording();
+  }
+  if (BOUNCE.muted) {
+    BOUNCE.muted = false;
+    try {
+      master.output.connect(audioCtx.destination);
+    } catch (e) {}
+  }
+  SONG.loop = BOUNCE.prevSongLoop;
+  setPlayMode(BOUNCE.prevMode);
+  refreshBounceUI();
+  setStatus(statusText || 'song bounced');
+}
+
+function refreshBounceUI() {
+  const btn = document.getElementById('bounceBtn');
+  if (!btn) return;
+  btn.classList.toggle('active', BOUNCE.active);
+  btn.title = BOUNCE.active
+    ? 'Cancel bounce'
+    : 'Bounce song to WAV — silent one-pass render of the arrangement';
+  refreshBounceProgress();
 }
 
 // ─── Visualizer (per-generator) ────────────────────────────────────────────
@@ -2782,6 +3073,26 @@ function removeGen3Note(midi) {
   refreshBackPanelState();
 }
 
+function syncGen3SustainChord(targetMidis) {
+  if (!GEN3.sustainMode || !GEN3.nodes) return;
+  [...GEN3.activeNotes.keys()].forEach((midi) => {
+    if (!targetMidis.has(midi)) removeGen3Note(midi);
+  });
+  targetMidis.forEach((midi) => {
+    if (!GEN3.activeNotes.has(midi)) addGen3Note(midi, midiNoteToFrequency(midi));
+  });
+}
+
+function startGen3SustainChord() {
+  const loop = PLAY.mode === 'song' ? getSchedulerLoop() : getEditLoop();
+  syncGen3SustainChord(loop?.gen3?.lockedMidis || GEN3.lockedMidis);
+}
+
+function releaseGen3SustainChord() {
+  if (!GEN3.sustainMode) return;
+  [...GEN3.activeNotes.keys()].forEach((midi) => removeGen3Note(midi));
+}
+
 function stopAllGen3Notes() {
   GEN3.activeNotes.forEach((entry) => {
     stopGen3Voice(entry);
@@ -2872,15 +3183,18 @@ function buildPianoRoll() {
 
       cell.addEventListener('click', async () => {
         if (GEN3.sustainMode) {
-          // Sustain mode: toggle note on/off and track in lockedMidis
-          if (GEN3.activeNotes.has(midi)) {
+          // During Song playback this edits the focused loop without
+          // retargeting the chord that belongs to the audible arrangement entry.
+          if (GEN3.lockedMidis.has(midi)) {
             GEN3.lockedMidis.delete(midi);
-            removeGen3Note(midi);
           } else {
             GEN3.lockedMidis.add(midi);
-            await ensureAudioEngine();
-            if (GEN3.nodes) addGen3Note(midi, freq);
           }
+          if (!(PLAY.mode === 'song' && GEN4.playing)) {
+            await ensureAudioEngine();
+            syncGen3SustainChord(GEN3.lockedMidis);
+          }
+          refreshGen3KeyStates();
         } else {
           // Sequencer mode: toggle locked state only — sequencer drives playback
           if (GEN3.lockedMidis.has(midi)) {
@@ -2945,13 +3259,9 @@ function buildOscPanel() {
     GEN3.sustainMode = !GEN3.sustainMode;
     susBtn.classList.toggle('active', GEN3.sustainMode);
     if (GEN3.sustainMode) {
-      // Switched to sustain: play all locked notes
       await ensureAudioEngine();
-      GEN3.lockedMidis.forEach((m) => {
-        if (!GEN3.activeNotes.has(m) && GEN3.nodes) {
-          addGen3Note(m, 440 * Math.pow(2, (m - 69) / 12));
-        }
-      });
+      const targetLoop = PLAY.mode === 'song' && GEN4.playing ? getAudibleLoop() : getEditLoop();
+      syncGen3SustainChord(targetLoop?.gen3?.lockedMidis || GEN3.lockedMidis);
     } else {
       // Switched to sequencer: stop all playing, keep locked visual
       stopAllGen3Notes();
@@ -3102,7 +3412,122 @@ const GEN4_DEFS = [
   },
 ];
 
+const GEN4_PRESETS = {
+  kick: [
+    { name: 'Default', values: { tune: 70, decay: 0.85, punch: 0.36, drive: 0, gain: 1 } },
+    { name: 'Deep', values: { tune: 48, decay: 0.72, punch: 0.62, drive: 0.08, gain: 0.95 } },
+    { name: 'Tight', values: { tune: 82, decay: 0.18, punch: 0.78, drive: 0.05, gain: 0.9 } },
+    { name: 'Driven', values: { tune: 58, decay: 0.5, punch: 0.72, drive: 0.8, gain: 0.82 } },
+  ],
+  snare: [
+    { name: 'Default', values: { tune: 360, decay: 0.09, snap: 1, gain: 0.96 } },
+    { name: 'Tight', values: { tune: 310, decay: 0.11, snap: 0.9, gain: 0.9 } },
+    { name: 'Fat', values: { tune: 210, decay: 0.32, snap: 0.62, gain: 0.92 } },
+    { name: 'Bright', values: { tune: 440, decay: 0.18, snap: 1, gain: 0.78 } },
+  ],
+  hat: [
+    { name: 'Default', values: { decay: 0.06, tone: 11200, gain: 0.6 } },
+    { name: 'Closed', values: { decay: 0.025, tone: 13500, gain: 0.52 } },
+    { name: 'Open', values: { decay: 0.32, tone: 9800, gain: 0.55 } },
+    { name: 'Dark', values: { decay: 0.12, tone: 5200, gain: 0.7 } },
+  ],
+  perc: [
+    { name: 'Default', values: { tune: 165, ratio: 1.6, index: 1.6, decay: 0.06, gain: 0.7 } },
+    { name: 'Wood', values: { tune: 145, ratio: 1.4, index: 0.9, decay: 0.12, gain: 0.75 } },
+    { name: 'Bell', values: { tune: 330, ratio: 3.5, index: 4.8, decay: 0.45, gain: 0.6 } },
+    { name: 'Metal', values: { tune: 520, ratio: 6.2, index: 8.2, decay: 0.2, gain: 0.55 } },
+  ],
+  fm: [
+    {
+      name: 'Default',
+      values: { tune: 220, ratio: 2, index: 3, feedback: 0, attack: 0.005, decay: 0.35, modDecay: 0.3, tone: 12000, gain: 0.65 },
+    },
+    {
+      name: 'Sub Bass',
+      values: { tune: 55, ratio: 0.5, index: 1.2, feedback: 0.08, attack: 0.005, decay: 0.55, modDecay: 0.3, tone: 1800, gain: 0.8 },
+    },
+    {
+      name: 'Bell',
+      values: { tune: 440, ratio: 3.5, index: 8, feedback: 0.18, attack: 0.002, decay: 1.4, modDecay: 1.7, tone: 11000, gain: 0.55 },
+    },
+    {
+      name: 'Pluck',
+      values: { tune: 220, ratio: 2, index: 4, feedback: 0.05, attack: 0.001, decay: 0.16, modDecay: 0.08, tone: 6500, gain: 0.7 },
+    },
+    {
+      name: 'Zap',
+      values: { tune: 110, ratio: 5.25, index: 12, feedback: 0.55, attack: 0.001, decay: 0.22, modDecay: 0.06, tone: 14000, gain: 0.55 },
+    },
+  ],
+};
+
 let gen4StepCountBtns = [];
+let gen4SwingInput = null;
+const gen4PresetSelects = new Map();
+
+function getMatchingGen4PresetIndex(ci) {
+  const ch = GEN4.channels[ci];
+  const presets = GEN4_PRESETS[ch?.id] || [];
+  return presets.findIndex(({ values }) =>
+    Object.entries(values).every(([key, value]) => ch.params[key] === value),
+  );
+}
+
+function refreshGen4PresetSelection(ci) {
+  const select = gen4PresetSelects.get(ci);
+  if (!select) return;
+  const presetIndex = getMatchingGen4PresetIndex(ci);
+  select.value = presetIndex < 0 ? '' : `${presetIndex}`;
+}
+
+function markGen4PresetCustom(ci) {
+  const select = gen4PresetSelects.get(ci);
+  if (select) select.value = '';
+}
+
+function applyGen4Preset(ci, presetIndex) {
+  const ch = GEN4.channels[ci];
+  const preset = GEN4_PRESETS[ch?.id]?.[presetIndex];
+  if (!ch || !preset) return;
+  Object.entries(preset.values).forEach(([key, value]) => {
+    ch.params[key] = value;
+    gen4ControlBindings[ci].get(key)?.setValue(value);
+  });
+  for (let si = 0; si < 32; si++) gen4ApplyStepBtn(ci, si);
+  if (ci === gen4SelectedNoteChannel && gen4EditorMode === 'notes') {
+    for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
+  }
+  refreshGen4PresetSelection(ci);
+  refreshBackPanelState();
+}
+
+function buildGen4PresetSelect(ci) {
+  const ch = GEN4.channels[ci];
+  const presets = GEN4_PRESETS[ch?.id];
+  if (!presets?.length) return null;
+  const select = document.createElement('select');
+  select.className = 'fx-preset-select drum-preset-select';
+  select.title = `Choose a ${ch.id} preset`;
+
+  const customOption = document.createElement('option');
+  customOption.value = '';
+  customOption.textContent = 'Custom';
+  select.appendChild(customOption);
+  presets.forEach(({ name }, presetIndex) => {
+    const option = document.createElement('option');
+    option.value = `${presetIndex}`;
+    option.textContent = name;
+    select.appendChild(option);
+  });
+  select.addEventListener('change', () => {
+    if (select.value !== '') applyGen4Preset(ci, Number(select.value));
+  });
+  select.addEventListener('click', (event) => event.stopPropagation());
+  select.addEventListener('keydown', (event) => event.stopPropagation());
+  gen4PresetSelects.set(ci, select);
+  refreshGen4PresetSelection(ci);
+  return select;
+}
 
 const GEN4 = {
   playing: false,
@@ -3122,6 +3547,8 @@ const GEN4 = {
       steps: new Array(32).fill(false),
       notes: new Array(32).fill(null),
       velocity: new Array(32).fill(1.0),
+      timing: new Array(32).fill(0),
+      locks: Array.from({ length: 32 }, () => ({})),
       stutter: new Array(32).fill(1),
       probability: new Array(32).fill(1.0),
       params: Object.fromEntries(def.paramDefs.map((p) => [p.key, p.value])),
@@ -3138,6 +3565,9 @@ const KICK_SC = {
 const gen4Schedule = [];
 const gen4StepEls = GEN4_DEFS.map(() => new Array(32).fill(null));
 const gen4ControlBindings = GEN4_DEFS.map(() => new Map());
+const gen4ParamSections = new Map();
+let gen4VariationBtns = [];
+let gen4FillBtn = null;
 const GEN4_NOTE_MIN = 24;
 const GEN4_NOTE_MAX = 127;
 const gen4EditorModeButtons = new Map();
@@ -3151,14 +3581,49 @@ let gen4GridEl = null;
 let gen4HintsEl = null;
 let gen4NoteEditorEl = null;
 let gen4NoteRollEl = null;
+let gen4NotePencilBtn = null;
+let gen4NotePencilEnabled = true;
 let gen4NoteCellEls = Array.from({ length: 32 }, () => new Map());
 let gen4NotePlayheadStep = -1;
+let gen4LockSelection = null;
+let gen4LockClearBtn = null;
+const gen4NoteDrawState = {
+  active: false,
+  action: 'draw',
+  pointerId: null,
+  visited: new Set(),
+};
 let gen4DisplayFrame = null;
-const gen4DragState = { active: false, ci: 0, si: 0, startY: 0, startVel: 1 };
+const gen4FillState = { active: false, loopId: null, pattern: null };
+const gen4DragState = {
+  active: false,
+  ci: 0,
+  si: 0,
+  startX: 0,
+  startY: 0,
+  startVel: 1,
+  startTiming: 0,
+  axis: null,
+  moved: false,
+  suppressClick: false,
+};
 
 addEventListener('mousemove', (e) => {
   if (!gen4DragState.active) return;
-  const { ci, si, startY, startVel } = gen4DragState;
+  const { ci, si, startX, startY, startVel, startTiming } = gen4DragState;
+  const dx = e.clientX - startX;
+  const dy = e.clientY - startY;
+  if (!gen4DragState.axis) {
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 4) return;
+    gen4DragState.axis = Math.abs(dx) >= Math.abs(dy) ? 'timing' : 'velocity';
+    gen4DragState.moved = true;
+    gen4DragState.suppressClick = true;
+  }
+  if (gen4DragState.axis === 'timing') {
+    GEN4.channels[ci].timing[si] = clamp(startTiming + Math.round(dx / 12), -4, 4);
+    gen4ApplyStepBtn(ci, si);
+    return;
+  }
   const next = clamp(startVel + (startY - e.clientY) / 80, 0.05, 1.0);
   GEN4.channels[ci].velocity[si] = next;
   gen4StepEls[ci][si]?.style.setProperty('--step-velocity', next);
@@ -3166,6 +3631,11 @@ addEventListener('mousemove', (e) => {
 
 window.addEventListener('mouseup', () => {
   gen4DragState.active = false;
+  if (gen4DragState.suppressClick) {
+    setTimeout(() => {
+      gen4DragState.suppressClick = false;
+    }, 0);
+  }
 });
 
 function buildGen4Nodes() {
@@ -3176,30 +3646,54 @@ function buildGen4Nodes() {
   const noiseData = noiseBuf.getChannelData(0);
   for (let i = 0; i < ac.sampleRate; i++) noiseData[i] = Math.random() * 2 - 1;
 
-  const channelOuts = GEN4.channels.map((ch) => {
-    const g = ac.createGain();
-    g.gain.value = 1.0;
-    // FX-bypassed channels still pass through the drums bus output so the
-    // instrument-level solo/mute state always applies.
-    g.connect(ch.fxSend ? fxBuses.gen4.input : fxBuses.gen4.output);
-    return g;
+  const channelFxOuts = GEN4.channels.map((ch) => {
+    const gain = ac.createGain();
+    gain.gain.value = ch.muted ? 0 : 1;
+    gain.connect(fxBuses.gen4.input);
+    return gain;
+  });
+  const channelDryOuts = GEN4.channels.map((ch) => {
+    const gain = ac.createGain();
+    gain.gain.value = ch.muted ? 0 : 1;
+    // Dry hits still pass through the drums bus output so instrument-level
+    // solo/mute remains authoritative.
+    gain.connect(fxBuses.gen4.output);
+    return gain;
   });
 
-  GEN4.nodes = { channelOuts, noiseBuf };
+  GEN4.nodes = { channelFxOuts, channelDryOuts, noiseBuf };
 }
 
 const gen4FxSendBtns = [];
+const gen4MuteBtns = [];
+
+function gen4SetChannelMuted(ci, muted) {
+  const ch = GEN4.channels[ci];
+  if (!ch) return;
+  ch.muted = muted;
+
+  const outputs = [GEN4.nodes?.channelFxOuts?.[ci], GEN4.nodes?.channelDryOuts?.[ci]].filter(Boolean);
+  if (outputs.length && audioCtx) {
+    const now = audioCtx.currentTime;
+    outputs.forEach((out) => {
+      out.gain.cancelScheduledValues(now);
+      out.gain.setTargetAtTime(muted ? 0 : 1, now, 0.005);
+    });
+  }
+
+  const btn = gen4MuteBtns[ci];
+  if (btn) {
+    btn.classList.toggle('muted', muted);
+    btn.setAttribute('aria-pressed', String(muted));
+    btn.title = muted ? 'Unmute channel' : 'Mute channel';
+    btn.closest('.drum-row')?.classList.toggle('channel-muted', muted);
+  }
+  gen4NoteLaneButtons.get(ci)?.classList.toggle('muted', muted);
+}
 
 function gen4SetChannelFxSend(ci, send) {
   const ch = GEN4.channels[ci];
   ch.fxSend = send;
-  if (GEN4.nodes?.channelOuts?.[ci] && fxBuses.gen4) {
-    const out = GEN4.nodes.channelOuts[ci];
-    try {
-      out.disconnect();
-    } catch (e) {}
-    out.connect(send ? fxBuses.gen4.input : fxBuses.gen4.output);
-  }
   const btn = gen4FxSendBtns[ci];
   if (btn) btn.classList.toggle('active', send);
 }
@@ -3342,7 +3836,8 @@ function gen4TriggerOsc(time, midis = GEN3.lockedMidis) {
   const notes = [...midis];
   const delayMs = Math.max(0, time - audioCtx.currentTime) * 1000;
   setTimeout(() => {
-    if (!audioCtx) return;
+    const oscChannel = GEN4.channels.find((channel) => channel.id === 'osc');
+    if (!audioCtx || oscChannel?.muted) return;
     notes.forEach((midi) => {
       if (GEN3.activeNotes.has(midi)) removeGen3Note(midi);
       addGen3Note(midi, midiNoteToFrequency(midi));
@@ -3396,10 +3891,10 @@ function gen4TriggerFmSynth(time, velocity, p, dest) {
   carrier.stop(stopTime);
 }
 
-function getEffectiveGen4Params(ci) {
+function getEffectiveGen4Params(ci, locks = null) {
   const ch = GEN4.channels[ci];
   const def = GEN4_DEFS[ci];
-  const effective = { ...ch.params };
+  const effective = { ...ch.params, ...(locks || {}) };
   def.paramDefs.forEach((pd) => {
     const mapping = lfoMappings.get(`4:${def.id}:${pd.key}`);
     if (!mapping) return;
@@ -3415,9 +3910,10 @@ function midiNoteToFrequency(midi) {
   return 440 * Math.pow(2, (midi - 69) / 12);
 }
 
-function applyGen4StepNote(ch, p, midi) {
+function applyGen4StepNote(ch, p, midi, locks = null) {
   if (!Number.isFinite(midi) || ch.id === 'osc') return;
   const key = ch.id === 'hat' ? 'tone' : 'tune';
+  if (locks && Object.hasOwn(locks, key)) return;
   const paramDef = GEN4_DEFS.find((def) => def.id === ch.id)?.paramDefs.find(
     (param) => param.key === key,
   );
@@ -3426,12 +3922,13 @@ function applyGen4StepNote(ch, p, midi) {
   p[key] = clamp(midiNoteToFrequency(midi) + modulationOffset, paramDef.min, paramDef.max);
 }
 
-function gen4FireChannel(ci, time, velocity, midi = null, loop = null) {
+function gen4FireChannel(ci, time, velocity, midi = null, loop = null, locks = null) {
   const ch = GEN4.channels[ci];
   if (ch.muted) return;
-  const p = getEffectiveGen4Params(ci);
-  applyGen4StepNote(ch, p, midi);
-  const dest = GEN4.nodes.channelOuts[ci];
+  const p = getEffectiveGen4Params(ci, locks);
+  applyGen4StepNote(ch, p, midi, locks);
+  const sendToFx = locks && Object.hasOwn(locks, '_fxSend') ? locks._fxSend : ch.fxSend;
+  const dest = sendToFx ? GEN4.nodes.channelFxOuts[ci] : GEN4.nodes.channelDryOuts[ci];
   switch (ch.id) {
     case 'kick':
       gen4TriggerKick(time, velocity, p, dest);
@@ -3460,7 +3957,9 @@ function gen4FireChannel(ci, time, velocity, midi = null, loop = null) {
 function gen4ScheduleTick() {
   if (!audioCtx || !GEN4.nodes || !GEN4.playing) return;
   const secPerStep = 60.0 / TRANSPORT.bpm / 4;
-  while (GEN4.nextStepTime < audioCtx.currentTime + GEN4.scheduleAheadTime) {
+  const secPerSixtyFourth = 60.0 / TRANSPORT.bpm / 16;
+  const scheduleHorizon = GEN4.scheduleAheadTime + secPerSixtyFourth * 4;
+  while (GEN4.nextStepTime < audioCtx.currentTime + scheduleHorizon) {
     // The pattern to schedule from: the edited loop in loop mode, the loop at
     // the song cursor in song mode. Resolved per step so a pattern boundary
     // can hand off to the next arrangement entry mid-lookahead.
@@ -3469,8 +3968,10 @@ function gen4ScheduleTick() {
       stopGen4Sequencer();
       return;
     }
+    let pattern = getGen4PlaybackPattern(loop);
     let step = GEN4.schedulerStep + 1;
-    if (step >= loop.gen4.stepCount) {
+    if (step >= pattern.stepCount) {
+      if (gen4FillState.active && gen4FillState.loopId === loop.id) clearGen4Fill();
       if (PLAY.mode === 'song') {
         if (!advanceSongCursor()) {
           stopGen4Sequencer();
@@ -3482,32 +3983,53 @@ function gen4ScheduleTick() {
           return;
         }
       }
+      pattern = getGen4PlaybackPattern(loop);
       step = 0;
     }
     GEN4.schedulerStep = step;
+    // Swing delays every other 16th, topping out at a perfect-triplet feel
+    // (offbeat at 2/3 of the pair). The step grid itself stays straight so
+    // pattern boundaries and stutter spacing are unaffected; the schedule
+    // entry carries the swung time so the playhead tracks what is heard.
+    const swingOffset = step % 2 === 1 ? ((loop.gen4.swing || 0) * secPerStep) / 3 : 0;
     gen4Schedule.push({
       step,
-      time: GEN4.nextStepTime,
+      time: GEN4.nextStepTime + swingOffset,
       loopId: loop.id,
       entryIdx: PLAY.mode === 'song' ? SONG.cursor.entryIdx : -1,
       repeat: PLAY.mode === 'song' ? SONG.cursor.repeat : 0,
     });
     if (gen4Schedule.length > 48) gen4Schedule.shift();
-    loop.gen4.channels.forEach((pat, ci) => {
+    pattern.channels.forEach((pat, ci) => {
       if (!pat.steps[step]) return;
       if (Math.random() > pat.probability[step]) return;
       const count = pat.stutter[step];
+      const timing = clamp(Math.round(pat.timing?.[step] || 0), -4, 4);
+      const stepTime = Math.max(
+        audioCtx.currentTime,
+        GEN4.nextStepTime + swingOffset + timing * secPerSixtyFourth,
+      );
       for (let r = 0; r < count; r++) {
         gen4FireChannel(
           ci,
-          GEN4.nextStepTime + r * (secPerStep / count),
+          stepTime + r * (secPerStep / count),
           pat.velocity[step],
           pat.notes[step],
           loop,
+          pat.locks?.[step],
         );
       }
     });
     GEN4.nextStepTime += secPerStep;
+  }
+}
+
+function refreshGen4SwingUI() {
+  const loop = getEditLoop();
+  const swing = loop ? loop.gen4.swing || 0 : 0;
+  // Leave the field alone while the user is typing in it.
+  if (gen4SwingInput && gen4SwingInput.readOnly) {
+    gen4SwingInput.value = String(Math.round(swing * 100));
   }
 }
 
@@ -3529,6 +4051,8 @@ function gen4IsStepDefault(ch, stepIdx) {
     !ch.steps[stepIdx] &&
     ch.notes[stepIdx] === null &&
     ch.velocity[stepIdx] === 1.0 &&
+    ch.timing[stepIdx] === 0 &&
+    Object.keys(ch.locks[stepIdx]).length === 0 &&
     ch.stutter[stepIdx] === 1 &&
     ch.probability[stepIdx] === 1.0
   );
@@ -3553,6 +4077,8 @@ function gen4DuplicateStepRange(fromStepCount, toStepCount) {
       ch.steps[dest] = ch.steps[src];
       ch.notes[dest] = ch.notes[src];
       ch.velocity[dest] = ch.velocity[src];
+      ch.timing[dest] = ch.timing[src];
+      ch.locks[dest] = { ...ch.locks[src] };
       ch.stutter[dest] = ch.stutter[src];
       ch.probability[dest] = ch.probability[src];
       gen4ApplyStepBtn(ci, dest);
@@ -3627,6 +4153,7 @@ function startGen4Sequencer() {
     STEP_SEQ.currentValue = seq ? seq.steps[0] || 0 : 0;
     refreshSequencerUI();
   }
+  startGen3SustainChord();
   // Phase-lock modulation to the transport: LFOs restart at phase 0 and the
   // beat-repeat interval clocks realign, so play always begins on the bar
   // instead of wherever the free-running phases drifted while stopped.
@@ -3644,6 +4171,7 @@ function startGen4Sequencer() {
 
 function stopGen4Sequencer() {
   GEN4.playing = false;
+  releaseGen3SustainChord();
   clearInterval(GEN4.schedulerTimer);
   GEN4.schedulerTimer = null;
   if (gen4DisplayFrame) {
@@ -3652,6 +4180,7 @@ function stopGen4Sequencer() {
   }
   GEN4.displayStep = -1;
   SONG.audibleEntryIdx = -1;
+  clearGen4Fill();
   // Back to the edit loop's sound now that nothing is audible.
   sendParams(0);
   sendParams(1);
@@ -3669,13 +4198,35 @@ function gen4ApplyStepBtn(ci, si) {
   const on = ch.steps[si];
   btn.classList.toggle('on', on);
   btn.style.setProperty('--step-velocity', ch.velocity[si]);
+  const timing = clamp(Math.round(ch.timing?.[si] || 0), -4, 4);
+  btn.title = on
+    ? `Velocity ${Math.round(ch.velocity[si] * 100)}% · timing ${timing > 0 ? '+' : ''}${timing}/64`
+    : '';
+
+  const noteEl = btn.querySelector('.drum-step-note');
+  if (noteEl) {
+    const midi = Number.isFinite(ch.notes[si]) ? ch.notes[si] : getGen4BaseMidi(ci);
+    noteEl.textContent = ch.id === 'osc' ? 'CHD' : formatMidiNote(midi);
+    noteEl.hidden = !on;
+  }
 
   const stutterEl = btn.querySelector('.drum-step-stutter');
   if (stutterEl) {
     const s = ch.stutter[si];
-    stutterEl.textContent = s > 1 ? `${s}×` : '';
+    stutterEl.textContent = s > 1 ? `×${s}` : '';
     stutterEl.hidden = s <= 1;
   }
+
+  const timingEl = btn.querySelector('.drum-step-timing');
+  if (timingEl) {
+    timingEl.textContent = timing === 0 ? '' : `${timing > 0 ? '+' : '−'}${Math.abs(timing)}`;
+    timingEl.hidden = !on || timing === 0;
+  }
+
+  const lockEl = btn.querySelector('.drum-step-lock');
+  const hasLocks = hasGen4StepLocks(ci, si);
+  btn.classList.toggle('has-locks', on && hasLocks);
+  if (lockEl) lockEl.hidden = !on || !hasLocks;
 
   const probEl = btn.querySelector('.drum-step-prob');
   if (probEl) {
@@ -3733,6 +4284,41 @@ function refreshGen4NoteStep(stepIdx) {
   });
 }
 
+function editGen4NoteCell(stepIdx, midi, action) {
+  if (stepIdx >= GEN4.stepCount) return;
+  const ch = GEN4.channels[gen4SelectedNoteChannel];
+  const currentMidi = Number.isFinite(ch.notes[stepIdx])
+    ? ch.notes[stepIdx]
+    : clamp(getGen4BaseMidi(gen4SelectedNoteChannel), GEN4_NOTE_MIN, GEN4_NOTE_MAX);
+
+  if (action === 'erase') {
+    if (!ch.steps[stepIdx] || currentMidi !== midi) return;
+    ch.steps[stepIdx] = false;
+    ch.notes[stepIdx] = null;
+    ch.timing[stepIdx] = 0;
+    ch.locks[stepIdx] = {};
+    ch.stutter[stepIdx] = 1;
+    ch.probability[stepIdx] = 1;
+  } else {
+    ch.steps[stepIdx] = true;
+    ch.notes[stepIdx] = midi;
+  }
+
+  gen4ApplyStepBtn(gen4SelectedNoteChannel, stepIdx);
+  refreshGen4NoteStep(stepIdx);
+}
+
+function editGen4NoteCellFromElement(cell) {
+  if (!(cell instanceof HTMLElement) || !cell.classList.contains('drum-note-cell')) return;
+  if (cell.classList.contains('step-inactive')) return;
+  const stepIdx = Number(cell.dataset.step);
+  const midi = Number(cell.dataset.midi);
+  const visitKey = `${stepIdx}:${midi}`;
+  if (gen4NoteDrawState.visited.has(visitKey)) return;
+  gen4NoteDrawState.visited.add(visitKey);
+  editGen4NoteCell(stepIdx, midi, gen4NoteDrawState.action);
+}
+
 function refreshGen4NotePlayhead() {
   gen4NoteCellEls[gen4NotePlayheadStep]?.forEach((cell) => cell.classList.remove('current'));
   gen4NotePlayheadStep =
@@ -3747,13 +4333,68 @@ function refreshGen4NoteEditor() {
   gen4NoteLaneButtons.forEach((btn, ci) => {
     btn.classList.toggle('active', ci === gen4SelectedNoteChannel);
   });
-  if (gen4GridEl) gen4GridEl.hidden = gen4EditorMode !== 'grid';
-  if (gen4HintsEl) gen4HintsEl.hidden = gen4EditorMode !== 'grid';
+  if (gen4GridEl) gen4GridEl.hidden = gen4EditorMode === 'notes';
+  if (gen4HintsEl) gen4HintsEl.hidden = gen4EditorMode === 'notes';
   if (gen4NoteEditorEl) gen4NoteEditorEl.hidden = gen4EditorMode !== 'notes';
   if (gen4EditorMode === 'notes') {
     for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
     refreshGen4NotePlayhead();
   }
+}
+
+function hasGen4StepLocks(ci, si) {
+  return Object.keys(GEN4.channels[ci]?.locks?.[si] || {}).length > 0;
+}
+
+function refreshGen4LockEditor() {
+  GEN4_DEFS.forEach((def, ci) => {
+    for (let si = 0; si < 32; si++) {
+      gen4StepEls[ci][si]?.classList.toggle(
+        'lock-selected',
+        gen4EditorMode === 'locks' && gen4LockSelection?.ci === ci && gen4LockSelection?.si === si,
+      );
+    }
+    const selected = gen4EditorMode === 'locks' && gen4LockSelection?.ci === ci;
+    const locks = selected ? GEN4.channels[ci].locks[gen4LockSelection.si] : null;
+    def.paramDefs.forEach(({ key }) => {
+      const control = gen4ControlBindings[ci].get(key);
+      if (!control) return;
+      const locked = !!locks && Object.hasOwn(locks, key);
+      control.classList.toggle('parameter-locked', locked);
+      control.setValue(locked ? locks[key] : GEN4.channels[ci].params[key]);
+    });
+    const presetSelect = gen4PresetSelects.get(ci);
+    if (presetSelect) presetSelect.disabled = selected;
+    const fxButton = gen4FxSendBtns[ci];
+    if (fxButton) {
+      const fxLocked = !!locks && Object.hasOwn(locks, '_fxSend');
+      fxButton.classList.toggle('locked', fxLocked);
+      fxButton.classList.toggle('active', fxLocked ? locks._fxSend : GEN4.channels[ci].fxSend);
+      fxButton.title = fxLocked
+        ? `Step FX routing locked ${locks._fxSend ? 'on' : 'off'}`
+        : 'Send to FX chain — click to bypass the drum effects';
+    }
+  });
+  if (gen4LockClearBtn) {
+    const hasSelection = gen4EditorMode === 'locks' && !!gen4LockSelection;
+    gen4LockClearBtn.hidden = gen4EditorMode !== 'locks';
+    gen4LockClearBtn.disabled = !hasSelection || !hasGen4StepLocks(gen4LockSelection.ci, gen4LockSelection.si);
+  }
+}
+
+function selectGen4LockStep(ci, si) {
+  if (GEN4_DEFS[ci]?.paramDefs.length === 0 || !GEN4.channels[ci]?.steps[si]) return;
+  gen4LockSelection = { ci, si };
+  gen4ParamSections.get(ci)?.setCollapsed(false);
+  refreshGen4LockEditor();
+}
+
+function clearSelectedGen4Locks() {
+  if (!gen4LockSelection) return;
+  const { ci, si } = gen4LockSelection;
+  GEN4.channels[ci].locks[si] = {};
+  gen4ApplyStepBtn(ci, si);
+  refreshGen4LockEditor();
 }
 
 function renderGen4NoteRoll() {
@@ -3809,19 +4450,13 @@ function renderGen4NoteRoll() {
       cell.classList.toggle('on', ch.steps[si] && ch.notes[si] === midi);
       cell.classList.toggle('step-inactive', si >= GEN4.stepCount);
       cell.addEventListener('click', () => {
+        if (gen4NotePencilEnabled) return;
         if (si >= GEN4.stepCount) return;
         const currentMidi = Number.isFinite(ch.notes[si])
           ? ch.notes[si]
           : clamp(getGen4BaseMidi(gen4SelectedNoteChannel), GEN4_NOTE_MIN, GEN4_NOTE_MAX);
         const isSelected = ch.steps[si] && currentMidi === midi;
-        ch.steps[si] = !isSelected;
-        ch.notes[si] = isSelected ? null : midi;
-        if (isSelected) {
-          ch.stutter[si] = 1;
-          ch.probability[si] = 1;
-        }
-        gen4ApplyStepBtn(gen4SelectedNoteChannel, si);
-        refreshGen4NoteStep(si);
+        editGen4NoteCell(si, midi, isSelected ? 'erase' : 'draw');
       });
       gen4NoteCellEls[si].set(midi, cell);
       row.appendChild(cell);
@@ -3852,12 +4487,19 @@ function setGen4NoteChannel(ci) {
 }
 
 function setGen4EditorMode(mode) {
-  if (mode !== 'grid' && mode !== 'notes') return;
+  if (mode !== 'grid' && mode !== 'notes' && mode !== 'locks') return;
   gen4EditorMode = mode;
   if (mode === 'notes' && gen4NoteCellEls.every((cells) => cells.size === 0)) {
     renderGen4NoteRoll();
   }
+  if (gen4HintsEl) {
+    gen4HintsEl.innerHTML =
+      mode === 'locks'
+        ? '<span class="drum-hint"><span class="drum-hint-key">select step</span> edit its instrument controls · locked values glow</span>'
+        : '<span class="drum-hint"><span class="drum-hint-key">drag ↕</span> velocity</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">drag ↔</span> timing</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">shift + click</span> active step → cycle probability</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">right-click</span> active step → cycle stutter</span>';
+  }
   refreshGen4NoteEditor();
+  refreshGen4LockEditor();
 }
 
 function buildGen4NoteEditor() {
@@ -3879,8 +4521,54 @@ function buildGen4NoteEditor() {
     lanes.appendChild(btn);
   });
 
+  const pencil = document.createElement('button');
+  pencil.type = 'button';
+  pencil.className = 'drum-note-pencil-btn active';
+  pencil.textContent = '✎';
+  pencil.title = 'Pencil: drag to draw; start on a note to erase';
+  pencil.setAttribute('aria-label', 'Pencil tool');
+  pencil.setAttribute('aria-pressed', 'true');
+  pencil.addEventListener('click', () => {
+    gen4NotePencilEnabled = !gen4NotePencilEnabled;
+    pencil.classList.toggle('active', gen4NotePencilEnabled);
+    pencil.setAttribute('aria-pressed', String(gen4NotePencilEnabled));
+  });
+  lanes.appendChild(pencil);
+  gen4NotePencilBtn = pencil;
+
   const roll = document.createElement('div');
   roll.className = 'drum-note-roll';
+  roll.addEventListener('pointerdown', (event) => {
+    if (!gen4NotePencilEnabled || event.button !== 0) return;
+    const cell = event.target.closest('.drum-note-cell');
+    if (!cell || cell.classList.contains('step-inactive')) return;
+    event.preventDefault();
+    const stepIdx = Number(cell.dataset.step);
+    const midi = Number(cell.dataset.midi);
+    const ch = GEN4.channels[gen4SelectedNoteChannel];
+    const currentMidi = Number.isFinite(ch.notes[stepIdx])
+      ? ch.notes[stepIdx]
+      : clamp(getGen4BaseMidi(gen4SelectedNoteChannel), GEN4_NOTE_MIN, GEN4_NOTE_MAX);
+    gen4NoteDrawState.active = true;
+    gen4NoteDrawState.action = ch.steps[stepIdx] && currentMidi === midi ? 'erase' : 'draw';
+    gen4NoteDrawState.pointerId = event.pointerId;
+    gen4NoteDrawState.visited.clear();
+    roll.setPointerCapture(event.pointerId);
+    editGen4NoteCellFromElement(cell);
+  });
+  roll.addEventListener('pointermove', (event) => {
+    if (!gen4NoteDrawState.active || event.pointerId !== gen4NoteDrawState.pointerId) return;
+    const cell = document.elementFromPoint(event.clientX, event.clientY)?.closest('.drum-note-cell');
+    if (cell && roll.contains(cell)) editGen4NoteCellFromElement(cell);
+  });
+  const finishPencilGesture = (event) => {
+    if (!gen4NoteDrawState.active || event.pointerId !== gen4NoteDrawState.pointerId) return;
+    gen4NoteDrawState.active = false;
+    gen4NoteDrawState.pointerId = null;
+    gen4NoteDrawState.visited.clear();
+  };
+  roll.addEventListener('pointerup', finishPencilGesture);
+  roll.addEventListener('pointercancel', finishPencilGesture);
   editor.append(lanes, roll);
   gen4NoteEditorEl = editor;
   gen4NoteRollEl = roll;
@@ -3905,6 +4593,7 @@ function buildDrumPanel() {
   [
     ['grid', 'Grid'],
     ['notes', 'Notes'],
+    ['locks', 'Lock'],
   ].forEach(([mode, label]) => {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -3916,6 +4605,44 @@ function buildDrumPanel() {
     editorModeGroup.appendChild(btn);
   });
   actions.appendChild(editorModeGroup);
+
+  gen4LockClearBtn = document.createElement('button');
+  gen4LockClearBtn.type = 'button';
+  gen4LockClearBtn.className = 'drum-lock-clear-btn';
+  gen4LockClearBtn.textContent = 'CLR';
+  gen4LockClearBtn.title = 'Clear parameter locks on the selected step';
+  gen4LockClearBtn.disabled = true;
+  gen4LockClearBtn.hidden = true;
+  gen4LockClearBtn.addEventListener('click', clearSelectedGen4Locks);
+  actions.appendChild(gen4LockClearBtn);
+
+  const variationGroup = document.createElement('div');
+  variationGroup.className = 'drum-variation-group';
+  gen4VariationBtns = ['A', 'B', 'C'].map((label, index) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'drum-variation-btn';
+    btn.textContent = label;
+    btn.title = index === 0 ? 'Original variation' : `Variation ${label} — generated once, then editable`;
+    btn.addEventListener('click', () => setGen4Variation(index));
+    if (index > 0) {
+      btn.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openGen4VariationMenu(index, event.clientX, event.clientY);
+      });
+    }
+    variationGroup.appendChild(btn);
+    return btn;
+  });
+  gen4FillBtn = document.createElement('button');
+  gen4FillBtn.type = 'button';
+  gen4FillBtn.className = 'drum-fill-btn';
+  gen4FillBtn.textContent = 'Fill';
+  gen4FillBtn.title = 'Generate a temporary fill for the rest of this cycle';
+  gen4FillBtn.addEventListener('click', toggleGen4Fill);
+  variationGroup.appendChild(gen4FillBtn);
+  actions.appendChild(variationGroup);
 
   const stepCounts = [12, 15, 16, 32];
   const stepsGroup = document.createElement('div');
@@ -3934,13 +4661,98 @@ function buildDrumPanel() {
   });
   actions.appendChild(stepsGroup);
 
+  // Swing value box — same interaction as the tempo box: vertical drag with
+  // pointer lock, double-click to type, Enter/blur commits.
+  const swingBox = document.createElement('div');
+  swingBox.className = 'drum-swing-box';
+  swingBox.title =
+    'Swing — drag vertically, double-click to type. Delays every other 16th, 100% = triplet feel (per loop)';
+  const swingLabel = document.createElement('span');
+  swingLabel.className = 'drum-swing-label';
+  swingLabel.textContent = 'swing';
+  gen4SwingInput = document.createElement('input');
+  gen4SwingInput.type = 'number';
+  gen4SwingInput.className = 'drum-swing-input';
+  gen4SwingInput.min = '0';
+  gen4SwingInput.max = '100';
+  gen4SwingInput.step = '1';
+  gen4SwingInput.value = '0';
+  gen4SwingInput.readOnly = true;
+  const swingSuffix = document.createElement('span');
+  swingSuffix.className = 'drum-swing-suffix';
+  swingSuffix.textContent = '%';
+
+  const commitSwing = (pct) => {
+    const loop = getEditLoop();
+    if (!loop || !Number.isFinite(pct)) return;
+    loop.gen4.swing = clamp(pct, 0, 100) / 100;
+  };
+
+  let swingArmed = false;
+  let swingDragging = false;
+  let swingDragPct = 0;
+  let swingDownY = 0;
+
+  gen4SwingInput.addEventListener('dblclick', () => {
+    gen4SwingInput.readOnly = false;
+    gen4SwingInput.focus();
+    gen4SwingInput.select();
+  });
+  gen4SwingInput.addEventListener('blur', () => {
+    commitSwing(Number.parseFloat(gen4SwingInput.value));
+    gen4SwingInput.readOnly = true;
+    refreshGen4SwingUI();
+  });
+  gen4SwingInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') gen4SwingInput.blur();
+  });
+
+  swingBox.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    if (!gen4SwingInput.readOnly) return; // typing mode — leave it alone
+    e.preventDefault();
+    swingArmed = true;
+    swingDownY = e.clientY;
+    swingDragPct = Math.round((getEditLoop()?.gen4.swing || 0) * 100);
+    swingBox.setPointerCapture(e.pointerId);
+  });
+  swingBox.addEventListener('pointermove', (e) => {
+    if (!swingArmed && !swingDragging) return;
+    if (!swingDragging) {
+      if (Math.abs(e.clientY - swingDownY) < 3) return; // still a click
+      swingDragging = true;
+      swingArmed = false;
+      swingBox.classList.add('dragging');
+      gen4SwingInput.blur();
+      swingBox.requestPointerLock?.();
+    }
+    swingDragPct = clamp(swingDragPct - e.movementY * (e.shiftKey ? 0.1 : 0.5), 0, 100);
+    commitSwing(swingDragPct);
+    refreshGen4SwingUI();
+  });
+  const endSwingDrag = (e) => {
+    swingArmed = false;
+    if (swingBox.hasPointerCapture(e.pointerId)) swingBox.releasePointerCapture(e.pointerId);
+    if (!swingDragging) return;
+    swingDragging = false;
+    swingBox.classList.remove('dragging');
+    if (document.pointerLockElement === swingBox) document.exitPointerLock();
+  };
+  swingBox.addEventListener('pointerup', endSwingDrag);
+  swingBox.addEventListener('pointercancel', endSwingDrag);
+
+  swingBox.append(swingLabel, gen4SwingInput, swingSuffix);
+  actions.appendChild(swingBox);
+
   header.append(title, actions);
   panel.appendChild(header);
 
   const hints = document.createElement('div');
   hints.className = 'drum-hints';
   hints.innerHTML =
-    '<span class="drum-hint"><span class="drum-hint-key">drag</span> active step → velocity</span>' +
+    '<span class="drum-hint"><span class="drum-hint-key">drag ↕</span> velocity</span>' +
+    '<span class="drum-hints-sep">·</span>' +
+    '<span class="drum-hint"><span class="drum-hint-key">drag ↔</span> timing</span>' +
     '<span class="drum-hints-sep">·</span>' +
     '<span class="drum-hint"><span class="drum-hint-key">shift + click</span> active step → cycle probability</span>' +
     '<span class="drum-hints-sep">·</span>' +
@@ -3984,10 +4796,26 @@ function buildDrumPanel() {
       btn.className = 'drum-step';
       gen4StepEls[ci][si] = btn;
 
+      const noteEl = document.createElement('span');
+      noteEl.className = 'drum-step-note';
+      noteEl.hidden = true;
+      btn.appendChild(noteEl);
+
       const stutterEl = document.createElement('span');
       stutterEl.className = 'drum-step-stutter';
       stutterEl.hidden = true;
       btn.appendChild(stutterEl);
+
+      const timingEl = document.createElement('span');
+      timingEl.className = 'drum-step-timing';
+      timingEl.hidden = true;
+      btn.appendChild(timingEl);
+
+      const lockEl = document.createElement('span');
+      lockEl.className = 'drum-step-lock';
+      lockEl.textContent = 'L';
+      lockEl.hidden = true;
+      btn.appendChild(lockEl);
 
       const probEl = document.createElement('span');
       probEl.className = 'drum-step-prob';
@@ -3998,6 +4826,14 @@ function buildDrumPanel() {
       gen4ApplyStepBtn(ci, si);
 
       btn.addEventListener('click', (e) => {
+        if (gen4DragState.suppressClick) {
+          gen4DragState.suppressClick = false;
+          return;
+        }
+        if (gen4EditorMode === 'locks') {
+          selectGen4LockStep(ci, si);
+          return;
+        }
         if (e.shiftKey && ch.steps[si]) {
           gen4CycleProbability(ci, si);
           return;
@@ -4006,6 +4842,8 @@ function buildDrumPanel() {
         // reset glitch state when turning off
         if (!ch.steps[si]) {
           ch.notes[si] = null;
+          ch.timing[si] = 0;
+          ch.locks[si] = {};
           ch.stutter[si] = 1;
           ch.probability[si] = 1.0;
         }
@@ -4014,16 +4852,22 @@ function buildDrumPanel() {
 
       btn.addEventListener('contextmenu', (e) => {
         e.preventDefault();
+        if (gen4EditorMode === 'locks') return;
         if (ch.steps[si]) gen4CycleStutter(ci, si);
       });
 
       btn.addEventListener('mousedown', (e) => {
-        if (!ch.steps[si] || e.shiftKey || e.button !== 0) return;
+        if (!ch.steps[si] || e.shiftKey || e.button !== 0 || gen4EditorMode === 'locks') return;
         gen4DragState.active = true;
         gen4DragState.ci = ci;
         gen4DragState.si = si;
+        gen4DragState.startX = e.clientX;
         gen4DragState.startY = e.clientY;
         gen4DragState.startVel = ch.velocity[si];
+        gen4DragState.startTiming = ch.timing[si];
+        gen4DragState.axis = null;
+        gen4DragState.moved = false;
+        gen4DragState.suppressClick = false;
         e.preventDefault();
       });
 
@@ -4033,11 +4877,14 @@ function buildDrumPanel() {
     const muteBtn = document.createElement('button');
     muteBtn.type = 'button';
     muteBtn.className = 'drum-mute-btn';
+    muteBtn.classList.toggle('muted', ch.muted);
     muteBtn.textContent = 'M';
-    muteBtn.title = 'Mute channel';
+    muteBtn.title = ch.muted ? 'Unmute channel' : 'Mute channel';
+    muteBtn.setAttribute('aria-label', `Mute ${def.label}`);
+    muteBtn.setAttribute('aria-pressed', String(ch.muted));
+    gen4MuteBtns[ci] = muteBtn;
     muteBtn.addEventListener('click', () => {
-      ch.muted = !ch.muted;
-      muteBtn.classList.toggle('muted', ch.muted);
+      gen4SetChannelMuted(ci, !ch.muted);
     });
 
     const actions = document.createElement('div');
@@ -4050,12 +4897,22 @@ function buildDrumPanel() {
       fxBtn.textContent = 'FX';
       fxBtn.title = 'Send to FX chain — click to bypass the drum effects';
       gen4FxSendBtns[ci] = fxBtn;
-      fxBtn.addEventListener('click', () => gen4SetChannelFxSend(ci, !ch.fxSend));
+      fxBtn.addEventListener('click', () => {
+        if (gen4EditorMode === 'locks' && gen4LockSelection?.ci === ci) {
+          const locks = ch.locks[gen4LockSelection.si];
+          locks._fxSend = Object.hasOwn(locks, '_fxSend') ? !locks._fxSend : !ch.fxSend;
+          gen4ApplyStepBtn(ci, gen4LockSelection.si);
+          refreshGen4LockEditor();
+          return;
+        }
+        gen4SetChannelFxSend(ci, !ch.fxSend);
+      });
       actions.appendChild(fxBtn);
     }
     actions.appendChild(muteBtn);
 
     row.append(lbl, stepsEl, actions);
+    row.classList.toggle('channel-muted', ch.muted);
     grid.appendChild(row);
   });
 
@@ -4069,9 +4926,15 @@ function buildDrumPanel() {
   GEN4_DEFS.forEach((def, ci) => {
     if (def.paramDefs.length === 0) return;
     const ch = GEN4.channels[ci];
-    const { section, content, setCollapsed } = createFxSection(def.label, 'drum-param-section');
+    const { section, header, content, toggle, setCollapsed } = createFxSection(
+      def.label,
+      'drum-param-section',
+    );
     section.querySelector('.fx-section-label').style.color = def.color;
+    const presetSelect = buildGen4PresetSelect(ci);
+    if (presetSelect) header.insertBefore(presetSelect, toggle);
     setCollapsed(true);
+    gen4ParamSections.set(ci, { section, setCollapsed });
 
     const controls = document.createElement('div');
     controls.className = 'gen-controls';
@@ -4082,7 +4945,22 @@ function buildDrumPanel() {
         p,
         ch.params[p.key],
         (v) => {
+          if (gen4EditorMode === 'locks' && gen4LockSelection?.ci === ci) {
+            const locks = ch.locks[gen4LockSelection.si];
+            locks[p.key] = v;
+            ctrl.classList.add('parameter-locked');
+            gen4ApplyStepBtn(ci, gen4LockSelection.si);
+            refreshGen4LockEditor();
+            return;
+          }
+          markGen4PresetCustom(ci);
           ch.params[p.key] = v;
+          if (p.key === 'tune' || p.key === 'tone') {
+            for (let si = 0; si < 32; si++) gen4ApplyStepBtn(ci, si);
+            if (ci === gen4SelectedNoteChannel && gen4EditorMode === 'notes') {
+              for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
+            }
+          }
         },
         { genIdx: 4, key: `${def.id}:${p.key}` },
       );
@@ -4097,6 +4975,7 @@ function buildDrumPanel() {
   panel.appendChild(paramsWrap);
   gen4RefreshStepDisplay();
   refreshGen4NoteEditor();
+  refreshGen4VariationUI();
   return panel;
 }
 
@@ -4651,25 +5530,166 @@ let songPlayBtnEl = null;
 let songAddBtnEl = null;
 let songPlayheadRendered = { entryIdx: -2, repeat: -2 };
 
+function createGen4PatternData(stepCount = 16) {
+  return {
+    stepCount,
+    channels: GEN4_DEFS.map(() => ({
+      steps: new Array(32).fill(false),
+      notes: new Array(32).fill(null),
+      velocity: new Array(32).fill(1.0),
+      timing: new Array(32).fill(0),
+      locks: Array.from({ length: 32 }, () => ({})),
+      stutter: new Array(32).fill(1),
+      probability: new Array(32).fill(1.0),
+    })),
+  };
+}
+
+function cloneGen4Pattern(pattern) {
+  const clone = createGen4PatternData(pattern?.stepCount || 16);
+  clone.channels.forEach((channel, ci) => {
+    const source = pattern?.channels?.[ci];
+    if (!source) return;
+    channel.steps = [...source.steps];
+    channel.notes = [...source.notes];
+    channel.velocity = [...source.velocity];
+    channel.timing = [...source.timing];
+    channel.locks = source.locks.map((locks) => ({ ...locks }));
+    channel.stutter = [...source.stutter];
+    channel.probability = [...source.probability];
+  });
+  return clone;
+}
+
+function serializeGen4Pattern(pattern) {
+  if (!pattern) return null;
+  return {
+    stepCount: pattern.stepCount,
+    channels: pattern.channels.map((channel) => ({
+      steps: [...channel.steps],
+      notes: [...channel.notes],
+      velocity: [...channel.velocity],
+      timing: [...channel.timing],
+      locks: channel.locks.map((locks) => ({ ...locks })),
+      stutter: [...channel.stutter],
+      probability: [...channel.probability],
+    })),
+  };
+}
+
+function deserializeGen4Pattern(data) {
+  const stepCount = [12, 15, 16, 32].includes(data?.stepCount) ? data.stepCount : 16;
+  const pattern = createGen4PatternData(stepCount);
+  (data?.channels || []).forEach((saved, ci) => {
+    const channel = pattern.channels[ci];
+    const def = GEN4_DEFS[ci];
+    if (!channel || !saved || !def) return;
+    if (Array.isArray(saved.steps))
+      saved.steps.slice(0, 32).forEach((value, si) => (channel.steps[si] = !!value));
+    if (Array.isArray(saved.notes))
+      saved.notes.slice(0, 32).forEach((value, si) => {
+        channel.notes[si] = Number.isFinite(value) ? clamp(Math.round(value), 0, 127) : null;
+      });
+    if (Array.isArray(saved.velocity))
+      saved.velocity
+        .slice(0, 32)
+        .forEach((value, si) => (channel.velocity[si] = clamp(value, 0.05, 1)));
+    if (Array.isArray(saved.timing))
+      saved.timing
+        .slice(0, 32)
+        .forEach((value, si) => (channel.timing[si] = clamp(Math.round(value), -4, 4)));
+    if (Array.isArray(saved.locks))
+      saved.locks.slice(0, 32).forEach((values, si) => {
+        if (!values || typeof values !== 'object') return;
+        def.paramDefs.forEach((pd) => {
+          if (typeof values[pd.key] === 'number') {
+            channel.locks[si][pd.key] = clamp(values[pd.key], pd.min, pd.max);
+          }
+        });
+        if (typeof values._fxSend === 'boolean') channel.locks[si]._fxSend = values._fxSend;
+      });
+    if (Array.isArray(saved.stutter))
+      saved.stutter
+        .slice(0, 32)
+        .forEach((value, si) => (channel.stutter[si] = clamp(Math.round(value), 1, 4)));
+    if (Array.isArray(saved.probability))
+      saved.probability
+        .slice(0, 32)
+        .forEach((value, si) => (channel.probability[si] = clamp(value, 0, 1)));
+  });
+  return pattern;
+}
+
+function ensureGen4Variations(loop) {
+  if (!loop?.gen4) return;
+  if (!Array.isArray(loop.gen4.variations)) {
+    loop.gen4.variations = [
+      { stepCount: loop.gen4.stepCount, channels: loop.gen4.channels },
+      null,
+      null,
+    ];
+    loop.gen4.activeVariation = 0;
+  }
+  while (loop.gen4.variations.length < 3) loop.gen4.variations.push(null);
+  loop.gen4.activeVariation = clamp(Math.round(loop.gen4.activeVariation || 0), 0, 2);
+  loop.gen4.variations[loop.gen4.activeVariation] = {
+    stepCount: loop.gen4.stepCount,
+    channels: loop.gen4.channels,
+  };
+}
+
+function generateGen4Variation(source, intensity = 1) {
+  const pattern = cloneGen4Pattern(source);
+  pattern.channels.forEach((channel) => {
+    for (let si = 0; si < pattern.stepCount; si++) {
+      if (!channel.steps[si]) continue;
+      channel.velocity[si] = clamp(
+        channel.velocity[si] * (0.82 + Math.random() * 0.26),
+        0.05,
+        1,
+      );
+      if (Math.random() < 0.12 * intensity) channel.probability[si] = intensity > 1 ? 0.5 : 0.75;
+      if (Math.random() < 0.08 * intensity) channel.stutter[si] = intensity > 1 ? 3 : 2;
+    }
+  });
+  return pattern;
+}
+
+function generateGen4Fill(source) {
+  const pattern = cloneGen4Pattern(source);
+  const start = Math.max(0, pattern.stepCount - 4);
+  pattern.channels.forEach((channel, ci) => {
+    const id = GEN4_DEFS[ci].id;
+    if (id === 'kick' || id === 'osc') return;
+    for (let si = start; si < pattern.stepCount; si++) {
+      if (!channel.steps[si] && Math.random() < 0.62) channel.steps[si] = true;
+      if (!channel.steps[si]) continue;
+      channel.velocity[si] = clamp(0.55 + Math.random() * 0.4, 0.05, 1);
+      channel.timing[si] = Math.floor(Math.random() * 3) - 1;
+      channel.probability[si] = 1;
+      if (si >= pattern.stepCount - 2 && Math.random() < 0.55) {
+        channel.stutter[si] = 2 + Math.floor(Math.random() * 3);
+      }
+    }
+  });
+  return pattern;
+}
+
 function createLoopData(name) {
   do {
     LOOPS.counter += 1;
   } while (LOOPS.list.some((l) => l.id === `loop-${LOOPS.counter}`));
-  return {
+  const pattern = createGen4PatternData(16);
+  const loop = {
     id: `loop-${LOOPS.counter}`,
     name,
     // New loops inherit the sound currently on the granulators, so switching
     // to a fresh loop never jumps the audio; freeze stays engine state.
     gens: [{ ...state[0], freeze: false }, { ...state[1], freeze: false }],
     gen4: {
-      stepCount: 16,
-      channels: GEN4_DEFS.map(() => ({
-        steps: new Array(32).fill(false),
-        notes: new Array(32).fill(null),
-        velocity: new Array(32).fill(1.0),
-        stutter: new Array(32).fill(1),
-        probability: new Array(32).fill(1.0),
-      })),
+      stepCount: pattern.stepCount,
+      swing: 0,
+      channels: pattern.channels,
     },
     gen3: { lockedMidis: new Set() },
     seq: {
@@ -4678,6 +5698,8 @@ function createLoopData(name) {
       stepBeats: 0.25,
     },
   };
+  ensureGen4Variations(loop);
+  return loop;
 }
 
 function nextLoopName() {
@@ -4699,10 +5721,13 @@ function adoptInitialLoop() {
       gens: [state[0], state[1]],
       gen4: {
         stepCount: GEN4.stepCount,
+        swing: 0,
         channels: GEN4.channels.map((ch) => ({
           steps: ch.steps,
           notes: ch.notes,
           velocity: ch.velocity,
+          timing: ch.timing,
+          locks: ch.locks,
           stutter: ch.stutter,
           probability: ch.probability,
         })),
@@ -4715,6 +5740,7 @@ function adoptInitialLoop() {
       },
     },
   ];
+  ensureGen4Variations(LOOPS.list[0]);
   LOOPS.editIndex = 0;
 }
 
@@ -4741,20 +5767,141 @@ function getAudibleLoop() {
   return getEditLoop();
 }
 
+function refreshGen4VariationUI() {
+  const loop = getEditLoop();
+  const active = loop?.gen4?.activeVariation || 0;
+  gen4VariationBtns.forEach((btn, index) => btn.classList.toggle('active', index === active));
+  if (gen4FillBtn) gen4FillBtn.classList.toggle('active', gen4FillState.active);
+}
+
+function setGen4Variation(index) {
+  const loop = getEditLoop();
+  if (!loop || index < 0 || index > 2) return;
+  ensureGen4Variations(loop);
+  const currentIndex = loop.gen4.activeVariation;
+  if (index === currentIndex) return;
+  if (gen4FillState.active) clearGen4Fill();
+  loop.gen4.variations[currentIndex] = {
+    stepCount: loop.gen4.stepCount,
+    channels: loop.gen4.channels,
+  };
+  if (!loop.gen4.variations[index]) {
+    loop.gen4.variations[index] = generateGen4Variation(
+      loop.gen4.variations[0],
+      index === 1 ? 1 : 1.8,
+    );
+  }
+  const pattern = loop.gen4.variations[index];
+  loop.gen4.activeVariation = index;
+  loop.gen4.stepCount = pattern.stepCount;
+  loop.gen4.channels = pattern.channels;
+  gen4LockSelection = null;
+  bindEditLoop();
+  refreshGen4VariationUI();
+}
+
+let gen4VariationMenuEl = null;
+
+function closeGen4VariationMenu() {
+  if (!gen4VariationMenuEl) return;
+  gen4VariationMenuEl.remove();
+  gen4VariationMenuEl = null;
+}
+
+function regenerateGen4Variation(index) {
+  const loop = getEditLoop();
+  if (!loop || index < 1 || index > 2) return;
+  ensureGen4Variations(loop);
+  if (gen4FillState.active) clearGen4Fill();
+  loop.gen4.variations[index] = generateGen4Variation(
+    loop.gen4.variations[0],
+    index === 1 ? 1 : 1.8,
+  );
+  if (loop.gen4.activeVariation === index) {
+    const pattern = loop.gen4.variations[index];
+    loop.gen4.stepCount = pattern.stepCount;
+    loop.gen4.channels = pattern.channels;
+    gen4LockSelection = null;
+    bindEditLoop();
+  }
+  setStatus(`variation ${index === 1 ? 'B' : 'C'} generated again`);
+  refreshGen4VariationUI();
+}
+
+function openGen4VariationMenu(index, x, y) {
+  closeGen4VariationMenu();
+  closeKnobContextMenu();
+  closeModSourceMenu();
+
+  const menu = document.createElement('div');
+  menu.className = 'mod-source-menu knob-context-menu';
+  gen4VariationMenuEl = menu;
+
+  const title = document.createElement('div');
+  title.className = 'mod-source-menu-title';
+  title.textContent = `Variation ${index === 1 ? 'B' : 'C'}`;
+
+  const generateBtn = document.createElement('button');
+  generateBtn.type = 'button';
+  generateBtn.className = 'mod-source-option knob-context-option';
+  generateBtn.textContent = 'Generate again';
+  generateBtn.addEventListener('click', () => {
+    regenerateGen4Variation(index);
+    closeGen4VariationMenu();
+  });
+
+  menu.append(title, generateBtn);
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+}
+
+window.addEventListener('pointerdown', (event) => {
+  if (gen4VariationMenuEl && !gen4VariationMenuEl.contains(event.target)) {
+    closeGen4VariationMenu();
+  }
+});
+
+function clearGen4Fill() {
+  gen4FillState.active = false;
+  gen4FillState.loopId = null;
+  gen4FillState.pattern = null;
+  refreshGen4VariationUI();
+}
+
+function toggleGen4Fill() {
+  if (gen4FillState.active) {
+    clearGen4Fill();
+    return;
+  }
+  const loop = getSchedulerLoop() || getEditLoop();
+  if (!loop) return;
+  gen4FillState.active = true;
+  gen4FillState.loopId = loop.id;
+  gen4FillState.pattern = generateGen4Fill(loop.gen4);
+  refreshGen4VariationUI();
+}
+
+function getGen4PlaybackPattern(loop) {
+  if (gen4FillState.active && gen4FillState.loopId === loop?.id && gen4FillState.pattern) {
+    return gen4FillState.pattern;
+  }
+  return loop?.gen4;
+}
+
 function serializeLoop(loop) {
+  ensureGen4Variations(loop);
   return {
     id: loop.id,
     name: loop.name,
     gens: loop.gens.map((g) => ({ ...g })),
     gen4: {
       stepCount: loop.gen4.stepCount,
-      channels: loop.gen4.channels.map((c) => ({
-        steps: [...c.steps],
-        notes: [...c.notes],
-        velocity: [...c.velocity],
-        stutter: [...c.stutter],
-        probability: [...c.probability],
-      })),
+      swing: loop.gen4.swing || 0,
+      channels: serializeGen4Pattern(loop.gen4).channels,
+      activeVariation: loop.gen4.activeVariation,
+      variations: loop.gen4.variations.map(serializeGen4Pattern),
     },
     gen3: { lockedMidis: [...loop.gen3.lockedMidis] },
     seq: {
@@ -4780,23 +5927,27 @@ function deserializeLoop(data) {
     });
   }
   const g4 = data?.gen4;
-  if ([12, 15, 16, 32].includes(g4?.stepCount)) loop.gen4.stepCount = g4.stepCount;
-  (g4?.channels || []).forEach((saved, ci) => {
-    const pat = loop.gen4.channels[ci];
-    if (!pat || !saved) return;
-    if (Array.isArray(saved.steps))
-      saved.steps.slice(0, 32).forEach((v, si) => (pat.steps[si] = !!v));
-    if (Array.isArray(saved.notes))
-      saved.notes.slice(0, 32).forEach((v, si) => {
-        pat.notes[si] = Number.isFinite(v) ? clamp(Math.round(v), 0, 127) : null;
-      });
-    if (Array.isArray(saved.velocity))
-      saved.velocity.slice(0, 32).forEach((v, si) => (pat.velocity[si] = clamp(v, 0.05, 1.0)));
-    if (Array.isArray(saved.stutter))
-      saved.stutter.slice(0, 32).forEach((v, si) => (pat.stutter[si] = clamp(Math.round(v), 1, 4)));
-    if (Array.isArray(saved.probability))
-      saved.probability.slice(0, 32).forEach((v, si) => (pat.probability[si] = clamp(v, 0, 1)));
-  });
+  const activePattern = deserializeGen4Pattern(g4);
+  loop.gen4.stepCount = activePattern.stepCount;
+  loop.gen4.channels = activePattern.channels;
+  if (typeof g4?.swing === 'number') loop.gen4.swing = clamp(g4.swing, 0, 1);
+  if (Array.isArray(g4?.variations)) {
+    loop.gen4.variations = g4.variations.slice(0, 3).map((saved) =>
+      saved && typeof saved === 'object' ? deserializeGen4Pattern(saved) : null,
+    );
+    while (loop.gen4.variations.length < 3) loop.gen4.variations.push(null);
+    loop.gen4.activeVariation = clamp(Math.round(g4.activeVariation || 0), 0, 2);
+    if (!loop.gen4.variations[loop.gen4.activeVariation]) {
+      loop.gen4.activeVariation = 0;
+    }
+    if (!loop.gen4.variations[0]) loop.gen4.variations[0] = activePattern;
+    const selectedPattern = loop.gen4.variations[loop.gen4.activeVariation] || activePattern;
+    loop.gen4.stepCount = selectedPattern.stepCount;
+    loop.gen4.channels = selectedPattern.channels;
+  } else {
+    loop.gen4.variations = [activePattern, null, null];
+    loop.gen4.activeVariation = 0;
+  }
   if (Array.isArray(data?.gen3?.lockedMidis)) {
     loop.gen3.lockedMidis = new Set(data.gen3.lockedMidis.filter((m) => Number.isFinite(m)));
   }
@@ -4828,6 +5979,8 @@ function legacyLoopData(preset) {
         steps: ch?.steps,
         notes: ch?.notes,
         velocity: ch?.velocity,
+        timing: ch?.timing,
+        locks: ch?.locks,
         stutter: ch?.stutter,
         probability: ch?.probability,
       })),
@@ -4854,10 +6007,16 @@ function bindEditLoop() {
     ch.steps = pat.steps;
     ch.notes = pat.notes;
     ch.velocity = pat.velocity;
+    ch.timing = pat.timing;
+    ch.locks = pat.locks;
     ch.stutter = pat.stutter;
     ch.probability = pat.probability;
   });
-  const chordChanged = GEN3.lockedMidis !== loop.gen3.lockedMidis;
+  const sustainChordShouldFollowEditLoop =
+    GEN3.sustainMode &&
+    !!GEN3.nodes &&
+    (GEN4.playing || GEN3.activeNotes.size > 0) &&
+    !(PLAY.mode === 'song' && GEN4.playing);
   GEN3.lockedMidis = loop.gen3.lockedMidis;
   STEP_SEQ.steps = loop.seq.steps;
   STEP_SEQ.subdivision = loop.seq.subdivision;
@@ -4866,17 +6025,16 @@ function bindEditLoop() {
   STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
 
   gen4SetStepCount(loop.gen4.stepCount, { duplicateOnExpand: false });
+  refreshGen4SwingUI();
+  refreshGen4VariationUI();
   GEN4.channels.forEach((_, ci) => {
     for (let si = 0; si < 32; si++) gen4ApplyStepBtn(ci, si);
   });
   gen4RefreshStepDisplay();
   if (gen4EditorMode === 'notes') refreshGen4NoteEditor();
+  if (gen4EditorMode === 'locks') refreshGen4LockEditor();
 
-  if (chordChanged && GEN3.sustainMode && GEN3.nodes && GEN3.activeNotes.size > 0) {
-    // A sustained drone follows the newly bound loop's chord.
-    stopAllGen3Notes();
-    GEN3.lockedMidis.forEach((m) => addGen3Note(m, 440 * Math.pow(2, (m - 69) / 12)));
-  }
+  if (sustainChordShouldFollowEditLoop) syncGen3SustainChord(GEN3.lockedMidis);
   refreshGen3KeyStates();
   refreshSequencerUI();
   refreshBackPanelState();
@@ -4887,6 +6045,8 @@ function selectEditLoop(index) {
   if (index < 0 || index >= LOOPS.list.length) return;
   if (index !== LOOPS.editIndex) {
     LOOPS.editIndex = index;
+    gen4LockSelection = null;
+    if (gen4FillState.active && PLAY.mode === 'loop') clearGen4Fill();
     bindEditLoop();
   }
   renderLoopsBar();
@@ -4910,7 +6070,7 @@ function addLoop({ duplicate = false } = {}) {
   );
 }
 
-function deleteLoop(index) {
+async function deleteLoop(index) {
   const loop = LOOPS.list[index];
   if (!loop) return;
   if (LOOPS.list.length <= 1) {
@@ -4922,7 +6082,7 @@ function deleteLoop(index) {
     used > 0
       ? `Delete loop "${loop.name}"? It is used ${used}× in the song.`
       : `Delete loop "${loop.name}"?`;
-  if (!window.confirm(msg)) return;
+  if (!(await appConfirm(msg, { confirmLabel: 'Delete', danger: true }))) return;
   LOOPS.list.splice(index, 1);
   SONG.entries = SONG.entries.filter((e) => e.loopId !== loop.id);
   if (index < LOOPS.editIndex) LOOPS.editIndex -= 1;
@@ -4994,6 +6154,8 @@ function updateSongPlayhead(audible) {
       sendParams(0);
       sendParams(1);
     }
+    const audibleLoop = getAudibleLoop();
+    if (audibleLoop) syncGen3SustainChord(audibleLoop.gen3.lockedMidis);
   }
   renderSongPlayhead(audible.repeat);
 }
@@ -5071,6 +6233,11 @@ function closeSettingsMenu() {
 function initSettingsMenu() {
   const modal = getSettingsModal();
   const btn = document.getElementById('settingsMenuBtn');
+  const themeSelect = document.getElementById('themeSelect');
+  if (themeSelect) {
+    themeSelect.value = document.documentElement.dataset.theme || 'original';
+    themeSelect.addEventListener('change', () => setAppTheme(themeSelect.value));
+  }
   btn?.addEventListener('click', () => {
     modal?.open ? modal.close() : modal?.showModal();
     btn.classList.toggle('open', !!modal?.open);
@@ -5080,6 +6247,57 @@ function initSettingsMenu() {
     if (event.target === modal) modal.close();
   });
   modal?.addEventListener('close', () => btn?.classList.remove('open'));
+}
+
+// ── In-app confirm dialog ── replaces window.confirm so destructive actions
+// keep the app's look instead of raising the browser's native modal.
+
+let confirmDialogResolve = null;
+
+function appConfirm(message, { confirmLabel = 'OK', danger = false } = {}) {
+  const dialog = document.getElementById('confirmDialog');
+  if (!dialog?.showModal) return Promise.resolve(window.confirm(message));
+  const msgEl = document.getElementById('confirmDialogMsg');
+  const okBtn = document.getElementById('confirmDialogOk');
+  return new Promise((resolve) => {
+    confirmDialogResolve = resolve;
+    if (msgEl) msgEl.textContent = message;
+    if (okBtn) {
+      okBtn.textContent = confirmLabel;
+      okBtn.classList.toggle('danger', danger);
+    }
+    dialog.showModal();
+    okBtn?.focus();
+  });
+}
+
+function settleConfirmDialog(result) {
+  const resolve = confirmDialogResolve;
+  confirmDialogResolve = null;
+  const dialog = document.getElementById('confirmDialog');
+  if (dialog?.open) dialog.close();
+  resolve?.(result);
+}
+
+function initConfirmDialog() {
+  const dialog = document.getElementById('confirmDialog');
+  if (!dialog) return;
+  document
+    .getElementById('confirmDialogOk')
+    ?.addEventListener('click', () => settleConfirmDialog(true));
+  document
+    .getElementById('confirmDialogCancel')
+    ?.addEventListener('click', () => settleConfirmDialog(false));
+  // Esc lands here as a native close; settle already ran for button clicks.
+  dialog.addEventListener('close', () => {
+    const resolve = confirmDialogResolve;
+    confirmDialogResolve = null;
+    resolve?.(false);
+  });
+  // A click on the ::backdrop reports the dialog itself as target.
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) settleConfirmDialog(false);
+  });
 }
 
 // ── Song entry ops ──
@@ -7482,6 +8700,7 @@ function capturePreset() {
     })),
     gen4: {
       channels: GEN4.channels.map((ch) => ({
+        muted: ch.muted,
         fxSend: ch.fxSend,
         params: { ...ch.params },
       })),
@@ -7495,7 +8714,7 @@ function capturePreset() {
   };
 }
 
-function applyPreset(preset) {
+function applyPreset(preset, { resetSources = true } = {}) {
   if (!preset) return;
   if (typeof preset.transport?.bpm === 'number') {
     setTransportBpm(preset.transport.bpm, { refresh: false });
@@ -7515,7 +8734,7 @@ function applyPreset(preset) {
       state[genIdx].densitySyncIndex = gen.densitySyncIndex;
     refreshGeneratorUI(genIdx);
   });
-  resetGranularSources();
+  if (resetSources) resetGranularSources();
 
   if (preset.gen3) {
     // The chord (lockedMidis) is loop data now — legacy presets carry it here
@@ -7615,16 +8834,19 @@ function applyPreset(preset) {
     GEN4.channels.forEach((ch, ci) => {
       const def = GEN4_DEFS[ci];
       if (!def) return;
+      gen4SetChannelMuted(ci, false);
       gen4SetChannelFxSend(ci, def.id !== 'kick');
       def.paramDefs.forEach((pd) => {
         ch.params[pd.key] = pd.value;
         gen4ControlBindings[ci].get(pd.key)?.setValue(pd.value);
       });
+      refreshGen4PresetSelection(ci);
     });
     preset.gen4.channels.forEach((saved, ci) => {
       const ch = GEN4.channels[ci];
       const def = GEN4_DEFS[ci];
       if (!ch || !saved || !def) return;
+      gen4SetChannelMuted(ci, saved.muted === true);
       if (typeof saved.fxSend === 'boolean') gen4SetChannelFxSend(ci, saved.fxSend);
       def.paramDefs.forEach((pd) => {
         const savedValue = saved.params?.[pd.key];
@@ -7632,6 +8854,7 @@ function applyPreset(preset) {
           typeof savedValue === 'number' ? clamp(savedValue, pd.min, pd.max) : pd.value;
         gen4ControlBindings[ci].get(pd.key)?.setValue(ch.params[pd.key]);
       });
+      refreshGen4PresetSelection(ci);
     });
   }
 
@@ -7736,10 +8959,112 @@ function openProject(name) {
   setStatus(`opened "${proj.name}"`);
 }
 
-function deleteProject(name) {
+// ── Project file export/import ── a portable .grnsh.json: the full preset
+// plus both generators' source clips (float32 samples, base64), so a project
+// survives browser-data wipes and moves between machines.
+
+function floatsToBase64(f32) {
+  const bytes = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+function base64ToFloats(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Float32Array(bytes.buffer);
+}
+
+// Same conditions as persistAudioForScope, but reading the live source state
+// into a JSON-safe shape.
+function captureExportAudio() {
+  const audio = {};
+  for (let genIdx = 0; genIdx < 2; genIdx++) {
+    const source = getSourceState(genIdx);
+    if (source.mode === 'file' && source.bufferData) {
+      audio[`gen${genIdx}`] = {
+        mode: 'file',
+        samples: floatsToBase64(source.bufferData),
+        sampleRate: audioCtx?.sampleRate || 48000,
+        durationSec: source.durationSec,
+        fileName: source.fileName,
+      };
+    } else if (source.mode === 'mic' && source.frozenData && state[genIdx].freeze) {
+      audio[`gen${genIdx}`] = {
+        mode: 'frozen',
+        samples: floatsToBase64(source.frozenData.samples),
+        frozenAt: source.frozenData.frozenAt,
+        sampleRate: source.frozenData.sampleRate,
+      };
+    }
+  }
+  return audio;
+}
+
+function exportProjectFile() {
+  const name = currentProjectName || getProjectNameInput()?.value.trim() || 'grnsh-project';
+  const payload = {
+    format: 'grnsh-project',
+    version: 1,
+    name,
+    savedAt: Date.now(),
+    data: capturePreset(),
+    audio: captureExportAudio(),
+  };
+  const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${name.replace(/[^\w.-]+/g, '_')}.grnsh.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus(`exported "${name}"`);
+}
+
+async function importProjectFile(file) {
+  let payload;
+  try {
+    payload = JSON.parse(await file.text());
+  } catch (e) {
+    payload = null;
+  }
+  if (payload?.format !== 'grnsh-project' || !payload.data) {
+    setStatus('import failed: not a grnsh project file');
+    return;
+  }
+  applyPreset(payload.data);
+  for (let genIdx = 0; genIdx < 2; genIdx++) {
+    const clip = payload.audio?.[`gen${genIdx}`];
+    if (!clip?.samples) continue;
+    try {
+      await applyRestoredClip(genIdx, { ...clip, samples: base64ToFloats(clip.samples) });
+    } catch (e) {}
+  }
+  queueAutosaveAudio();
+  currentProjectName = typeof payload.name === 'string' && payload.name ? payload.name : null;
+  const input = getProjectNameInput();
+  if (input && currentProjectName) input.value = currentProjectName;
+  closeProjectMenu();
+  refreshProjectUI();
+  historyCaptureNow();
+  setStatus(`imported "${currentProjectName || 'project'}" — Save to keep it`);
+}
+
+async function deleteProject(name) {
   const idx = findProjectIndex(name);
   if (idx < 0) return;
-  if (!window.confirm(`Delete project "${projectStore[idx].name}"?`)) return;
+  const confirmed = await appConfirm(`Delete project "${projectStore[idx].name}"?`, {
+    confirmLabel: 'Delete',
+    danger: true,
+  });
+  if (!confirmed) return;
+  if (findProjectIndex(name) !== idx) return; // store changed while the dialog was up
   deleteAudioForScope(`project:${projectStore[idx].name}`);
   if (projectStore[idx].name === currentProjectName) currentProjectName = null;
   projectStore.splice(idx, 1);
@@ -7821,9 +9146,12 @@ function refreshProjectUI() {
   });
 }
 
-function newProject() {
+async function newProject() {
   if (!defaultProjectSnapshot) return;
-  if (!window.confirm('Start a new blank project? Unsaved changes will be lost.')) return;
+  const confirmed = await appConfirm('Start a new blank project? Unsaved changes will be lost.', {
+    confirmLabel: 'New project',
+  });
+  if (!confirmed) return;
   // Clone so the pristine snapshot is never mutated by applyPreset.
   applyPreset(JSON.parse(JSON.stringify(defaultProjectSnapshot)));
   queueAutosaveAudio();
@@ -7844,6 +9172,16 @@ function buildProjectUI() {
   getProjectMenu()?.addEventListener('click', (event) => event.stopPropagation());
   document.getElementById('projectSaveBtn')?.addEventListener('click', saveProjectFromInput);
   document.getElementById('projectNewBtn')?.addEventListener('click', newProject);
+  document.getElementById('projectExportBtn')?.addEventListener('click', exportProjectFile);
+  const importInput = document.getElementById('projectImportInput');
+  document
+    .getElementById('projectImportBtn')
+    ?.addEventListener('click', () => importInput?.click());
+  importInput?.addEventListener('change', () => {
+    const file = importInput.files?.[0];
+    importInput.value = '';
+    if (file) importProjectFile(file);
+  });
   getProjectNameInput()?.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();
@@ -8561,8 +9899,14 @@ getBpmInput()?.addEventListener('change', () => {
 });
 
 getRecordBtn()?.addEventListener('click', () => {
+  if (BOUNCE.active) {
+    finishBounce('bounce cancelled', { save: false });
+    return;
+  }
   REC.isRecording ? stopRecording() : startRecording();
 });
+
+document.getElementById('bounceBtn')?.addEventListener('click', bounceSong);
 
 function syncGateUI() {
   const enable = getGateEnable();
@@ -8598,6 +9942,7 @@ renderSongLane();
 initModeToggle();
 initStripPlayBtn();
 initSettingsMenu();
+initConfirmDialog();
 buildBackPanel();
 buildVisualPanel();
 refreshInputDevices();
@@ -8609,6 +9954,7 @@ setTransportBpm(TRANSPORT.bpm);
 defaultProjectSnapshot = capturePreset();
 // Bring back whatever the user was working on last session.
 restoreAutosave();
+initHistory();
 setInterval(writeAutosave, AUTOSAVE_INTERVAL_MS);
 window.addEventListener('beforeunload', () => {
   writeAutosave();
@@ -8621,11 +9967,15 @@ window.addEventListener('resize', () => {
 });
 
 window.addEventListener('keydown', (event) => {
+  // While any modal dialog is up, keys belong to it — Esc closes it natively,
+  // and Space/Tab must not reach the transport or panel toggle underneath.
+  if (document.querySelector('dialog[open]')) return;
   if (event.key === 'Escape') {
     clearBackPatchSelection();
     closeProjectMenu();
     closeSongBlockMenu();
     closeModSourceMenu();
+    closeGen4VariationMenu();
     closeSettingsMenu();
   }
   if (event.key === 'Tab' && !event.target.closest('input, textarea, select')) {
@@ -8645,10 +9995,26 @@ window.addEventListener('keydown', (event) => {
 window.addEventListener(
   'keydown',
   (event) => {
+    if (document.querySelector('dialog[open]')) return;
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
       event.preventDefault();
       if (currentProjectName) saveProject(currentProjectName);
       else openProjectMenu(); // unnamed project — pick a name first
+    }
+    // Readonly fields (the tempo box outside typing mode) have no native text
+    // undo — only a genuinely editable field keeps the browser's ⌘Z.
+    const inTextField = event.target.closest?.(
+      'input[type="text"]:not([readonly]), input[type="number"]:not([readonly]), textarea',
+    );
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z' && !inTextField) {
+      // Text fields keep the browser's native text undo.
+      event.preventDefault();
+      if (event.shiftKey) redo();
+      else undo();
+    }
+    if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === 'y' && !inTextField) {
+      event.preventDefault();
+      redo();
     }
   },
   { capture: true },
