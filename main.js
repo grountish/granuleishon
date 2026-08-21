@@ -816,6 +816,9 @@ function stopRecording() {
   const left = mergeFloat32(REC.left, REC.sampleCount);
   const right = mergeFloat32(REC.right, REC.sampleCount);
   if (REC.sampleCount > 0 && audioCtx) {
+    // The merged buffers already exist — handing them to the mastering view
+    // costs no copy and no processing until that view is opened.
+    setMasteringSource(left, right, audioCtx.sampleRate, REC.downloadName || 'recording');
     downloadRecording(encodeWav(left, right, audioCtx.sampleRate));
   }
 
@@ -6509,9 +6512,28 @@ function startLoopRename(chip, loop) {
   input.addEventListener('blur', () => finish(true));
 }
 
+// Vertical trackpad/wheel motion pans a horizontal strip; native horizontal
+// deltas pass through untouched. Guarded so re-renders don't stack listeners.
+function attachStripWheelPan(el) {
+  if (!el || el.dataset.wheelPan) return;
+  el.dataset.wheelPan = '1';
+  el.addEventListener(
+    'wheel',
+    (e) => {
+      if (e.altKey) return; // ⌥ scroll fine-tunes repeats on song blocks
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      if (el.scrollWidth <= el.clientWidth) return;
+      e.preventDefault();
+      el.scrollLeft += e.deltaY;
+    },
+    { passive: false },
+  );
+}
+
 function renderLoopsBar() {
   const bar = document.getElementById('loopsBar');
   if (!bar) return;
+  attachStripWheelPan(bar);
   bar.innerHTML = '';
 
   const label = document.createElement('span');
@@ -6610,7 +6632,7 @@ function renderSongLane() {
     badge.type = 'button';
     badge.className = 'song-block-repeats';
     badge.textContent = entry.repeats > 1 ? `×${entry.repeats}` : '';
-    badge.title = 'Repeats — click to cycle, scroll to fine-tune';
+    badge.title = 'Repeats — click to cycle, ⌥ scroll to fine-tune';
     badge.addEventListener('click', (e) => {
       e.stopPropagation();
       const pos = SONG_REPEAT_CYCLE.indexOf(entry.repeats);
@@ -6621,13 +6643,18 @@ function renderSongLane() {
       setSongEntryRepeats(entry.id, nextRepeats);
     });
 
-    block.title = `${loop?.name ?? '?'} — right-click: cycles / remove · scroll: ±1 cycle`;
+    block.title = `${loop?.name ?? '?'} — right-click: cycles / remove · ⌥ scroll: ±1 cycle`;
     block.addEventListener('click', () => {
       const idx = LOOPS.list.findIndex((l) => l.id === entry.loopId);
       if (idx >= 0) selectEditLoop(idx);
     });
     block.addEventListener('wheel', (e) => {
+      // Plain scrolling pans the strip (see attachStripWheelPan) — only a
+      // deliberate ⌥ scroll edits repeats, so panning across blocks can't
+      // mutate them.
+      if (!e.altKey) return;
       e.preventDefault();
+      e.stopPropagation();
       setSongEntryRepeats(entry.id, entry.repeats - Math.sign(e.deltaY));
     });
     block.addEventListener('contextmenu', (e) => {
@@ -6662,6 +6689,7 @@ function renderSongLane() {
     if (after == null) blocksWrap.appendChild(dragging);
     else if (after !== dragging) blocksWrap.insertBefore(dragging, after);
   });
+  attachStripWheelPan(blocksWrap);
   lane.appendChild(blocksWrap);
 
   const cycleBtn = document.createElement('button');
@@ -7926,15 +7954,1991 @@ function refreshBackPanelState() {
   if (UI_VIEW.mode === 'back') requestAnimationFrame(renderBackPanelConnections);
 }
 
+// ── Mastering view ── a lazy fourth panel that polishes rendered audio
+// (the song bounce or a loaded WAV). Nothing here touches the live graph:
+// the DOM is built on first entry, preview runs on its own AudioContext
+// (suspended on exit), and the final render happens in an OfflineAudioContext.
+// While the view is closed the feature costs zero CPU.
+
+const MASTERING = {
+  built: false,
+  source: null, // { left, right, sampleRate, name }
+  params: {
+    lowGain: 0,
+    lowFreq: 120,
+    lowQ: 0.7,
+    lowMidGain: 0,
+    lowMidFreq: 350,
+    lowMidQ: 1,
+    midGain: 0,
+    midFreq: 900,
+    midQ: 0.7,
+    highMidGain: 0,
+    highMidFreq: 3000,
+    highMidQ: 1,
+    highGain: 0,
+    highFreq: 8000,
+    highQ: 0.7,
+    compThreshold: -18,
+    compRatio: 2,
+    compAttack: 0.03,
+    compRelease: 0.25,
+    compMakeup: 0,
+    optoReduction: 0,
+    optoMakeup: 0,
+    optoMode: '2a',
+    tapeDrive: 0,
+    tapeBump: 0,
+    tapeRolloff: 20,
+    tapeLevel: 0,
+    excTune: 3000,
+    excHarmonics: 0,
+    excMix: 0,
+    width: 1,
+    widthBassFreq: 0, // 0 = full-range; raise it to keep lows mono when widening
+    enabled: { eq: true, opto: true, comp: true, tape: true, exciter: true, width: true, limit: true },
+    drive: 0,
+    ceiling: -1,
+    outGain: 0,
+    order: ['eq', 'opto', 'comp', 'tape', 'exciter', 'width', 'limit'],
+  },
+  ctx: null, // preview AudioContext — created on demand, suspended on view exit
+  preview: null, // { srcNode, chain, analysers, startAt, duration }
+  previewBuffer: null, // AudioBuffer cache for the current source
+  renderedPeaks: null, // decimated min/max envelope of the last offline render
+  vizFrame: null, // rAF id — only ever set while preview is playing
+  eqBandIndex: 0,
+  eqSolo: false,
+  playheadSec: 0,
+  loopMode: 'off', // off | section | all
+  loopSelection: null, // { start, end } in seconds
+  els: {},
+};
+
+const MASTERING_PEAK_BINS = 2048;
+
+function buildMasteringPeaks(L, R) {
+  const bins = Math.min(MASTERING_PEAK_BINS, L.length);
+  const mins = new Float32Array(bins);
+  const maxs = new Float32Array(bins);
+  const per = L.length / bins;
+  for (let b = 0; b < bins; b++) {
+    let min = 1;
+    let max = -1;
+    const start = Math.floor(b * per);
+    const end = Math.min(Math.floor((b + 1) * per), L.length);
+    for (let i = start; i < end; i++) {
+      const v = (L[i] + R[i]) * 0.5;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    mins[b] = min > max ? 0 : min;
+    maxs[b] = min > max ? 0 : max;
+  }
+  return { mins, maxs, bins };
+}
+
+const dbToLin = (db) => Math.pow(10, db / 20);
+
+function setMasteringSource(left, right, sampleRate, name) {
+  if (MASTERING.built) stopMasteringPreview({ preservePosition: false });
+  MASTERING.source = { left, right, sampleRate, name: name || 'audio' };
+  MASTERING.previewBuffer = null;
+  MASTERING.renderedPeaks = null; // stale — belongs to the previous source
+  MASTERING.playheadSec = 0;
+  MASTERING.loopMode = 'off';
+  MASTERING.loopSelection = null;
+  if (MASTERING.built) {
+    refreshMasteringSourceUI();
+  }
+}
+
+const MASTERING_MODULE_IDS = ['eq', 'opto', 'comp', 'tape', 'exciter', 'width', 'limit'];
+
+function getMasteringOrder() {
+  const order = MASTERING.params.order;
+  const valid =
+    Array.isArray(order) &&
+    order.length === MASTERING_MODULE_IDS.length &&
+    MASTERING_MODULE_IDS.every((id) => order.includes(id));
+  return valid ? order : [...MASTERING_MODULE_IDS];
+}
+
+// Chain shared by preview and offline render — ctx-agnostic node builder.
+// Three modules (eq / comp / limit) wired in the user's order, output trim
+// always last.
+function buildMasteringChain(ctx, { eqSolo = MASTERING.eqSolo } = {}) {
+  const low = ctx.createBiquadFilter();
+  low.type = 'peaking';
+  const lowMid = ctx.createBiquadFilter();
+  lowMid.type = 'peaking';
+  const mid = ctx.createBiquadFilter();
+  mid.type = 'peaking';
+  const highMid = ctx.createBiquadFilter();
+  highMid.type = 'peaking';
+  const high = ctx.createBiquadFilter();
+  high.type = 'peaking';
+  low.connect(lowMid);
+  lowMid.connect(mid);
+  mid.connect(highMid);
+  highMid.connect(high);
+
+  let eqOutput = high;
+  let eqAudition = null;
+  if (eqSolo) {
+    eqAudition = ctx.createBiquadFilter();
+    eqAudition.type = 'bandpass';
+    high.connect(eqAudition);
+    eqOutput = eqAudition;
+  }
+
+  const comp = ctx.createDynamicsCompressor();
+  comp.knee.value = 6;
+  const makeup = ctx.createGain();
+  comp.connect(makeup);
+
+  // Opto-style program compressor: slow attack, gentle ratio, huge soft knee.
+  const optoComp = ctx.createDynamicsCompressor();
+  const optoMakeup = ctx.createGain();
+  optoComp.connect(optoMakeup);
+
+  // Tape: drive into the kneed saturator (level-compensated so quiet material
+  // stays unity), head-bump low shelf, HF rolloff, output trim.
+  const tapeIn = ctx.createGain();
+  const tapeShaper = ctx.createWaveShaper();
+  tapeShaper.oversample = '4x';
+  tapeShaper.curve = getMasteringClipCurve();
+  const tapeComp = ctx.createGain();
+  const tapeBump = ctx.createBiquadFilter();
+  tapeBump.type = 'lowshelf';
+  tapeBump.frequency.value = 80;
+  const tapeRoll = ctx.createBiquadFilter();
+  tapeRoll.type = 'lowpass';
+  tapeRoll.Q.value = 0.7071;
+  const tapeLevel = ctx.createGain();
+  tapeIn.connect(tapeShaper);
+  tapeShaper.connect(tapeComp);
+  tapeComp.connect(tapeBump);
+  tapeBump.connect(tapeRoll);
+  tapeRoll.connect(tapeLevel);
+
+  // Exciter: parallel high band → saturation → mixed back under the dry path.
+  const excIn = ctx.createGain();
+  const excSum = ctx.createGain();
+  const excHp = ctx.createBiquadFilter();
+  excHp.type = 'highpass';
+  excHp.Q.value = 0.7071;
+  const excDrive = ctx.createGain();
+  const excShaper = ctx.createWaveShaper();
+  excShaper.oversample = '4x';
+  excShaper.curve = getMasteringTanhCurve();
+  const excMix = ctx.createGain();
+  excIn.connect(excSum); // dry
+  excIn.connect(excHp);
+  excHp.connect(excDrive);
+  excDrive.connect(excShaper);
+  excShaper.connect(excMix);
+  excMix.connect(excSum);
+
+  // Width: M/S matrix; the side signal is high-passed (bass stays mono),
+  // scaled, and folded back: L' = M + w·S, R' = M − w·S.
+  const widthIn = ctx.createGain();
+  const widthSplit = ctx.createChannelSplitter(2);
+  const midLIn = ctx.createGain();
+  const midRIn = ctx.createGain();
+  const sideLIn = ctx.createGain();
+  const sideRIn = ctx.createGain();
+  midLIn.gain.value = 0.5;
+  midRIn.gain.value = 0.5;
+  sideLIn.gain.value = 0.5;
+  sideRIn.gain.value = -0.5;
+  const widthMidSum = ctx.createGain();
+  const widthSideSum = ctx.createGain();
+  const widthSideHp = ctx.createBiquadFilter();
+  widthSideHp.type = 'highpass';
+  widthSideHp.Q.value = 0.7071;
+  const widthPos = ctx.createGain();
+  const widthNeg = ctx.createGain();
+  const widthOutL = ctx.createGain();
+  const widthOutR = ctx.createGain();
+  const widthMerge = ctx.createChannelMerger(2);
+  widthIn.connect(widthSplit);
+  widthSplit.connect(midLIn, 0);
+  widthSplit.connect(midRIn, 1);
+  widthSplit.connect(sideLIn, 0);
+  widthSplit.connect(sideRIn, 1);
+  midLIn.connect(widthMidSum);
+  midRIn.connect(widthMidSum);
+  sideLIn.connect(widthSideSum);
+  sideRIn.connect(widthSideSum);
+  widthSideSum.connect(widthSideHp);
+  widthSideHp.connect(widthPos);
+  widthSideHp.connect(widthNeg);
+  widthMidSum.connect(widthOutL);
+  widthMidSum.connect(widthOutR);
+  widthPos.connect(widthOutL);
+  widthNeg.connect(widthOutR);
+  widthOutL.connect(widthMerge, 0, 0);
+  widthOutR.connect(widthMerge, 0, 1);
+
+  const drive = ctx.createGain();
+  const preClip = ctx.createGain();
+  const clip = ctx.createWaveShaper();
+  clip.oversample = '4x';
+  const postClip = ctx.createGain();
+  drive.connect(preClip);
+  preClip.connect(clip);
+  clip.connect(postClip);
+
+  const modules = {
+    eq: { input: low, output: eqOutput },
+    opto: { input: optoComp, output: optoMakeup },
+    comp: { input: comp, output: makeup },
+    tape: { input: tapeIn, output: tapeLevel },
+    exciter: { input: excIn, output: excSum },
+    width: { input: widthIn, output: widthMerge },
+    limit: { input: drive, output: postClip },
+  };
+  const out = ctx.createGain();
+  const chainIn = ctx.createGain();
+  // True bypass: disabled modules are left out of the path entirely.
+  const active = getMasteringOrder().filter((id) => MASTERING.params.enabled?.[id] !== false);
+  let prevOut = chainIn;
+  active.forEach((id) => {
+    prevOut.connect(modules[id].input);
+    prevOut = modules[id].output;
+  });
+  prevOut.connect(out);
+
+  const chain = {
+    input: chainIn,
+    output: out,
+    nodes: {
+      low,
+      lowMid,
+      mid,
+      highMid,
+      high,
+      eqAudition,
+      optoComp,
+      optoMakeup,
+      comp,
+      makeup,
+      tapeIn,
+      tapeShaper,
+      tapeComp,
+      tapeBump,
+      tapeRoll,
+      tapeLevel,
+      excHp,
+      excDrive,
+      excMix,
+      widthSideHp,
+      widthPos,
+      widthNeg,
+      drive,
+      preClip,
+      clip,
+      postClip,
+      out,
+    },
+  };
+  applyMasteringParams(chain);
+  return chain;
+}
+
+let masteringTanhCurve = null;
+
+function getMasteringTanhCurve() {
+  if (!masteringTanhCurve) {
+    const N = 2048;
+    const curve = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const x = (i / (N - 1)) * 2 - 1;
+      curve[i] = Math.tanh(2 * x);
+    }
+    masteringTanhCurve = curve;
+  }
+  return masteringTanhCurve;
+}
+
+// Live reorder: keep the playing source, swap the chain behind it.
+function rebuildMasteringPreviewChain() {
+  const pv = MASTERING.preview;
+  if (!pv || !MASTERING.ctx) return;
+  try {
+    pv.srcNode.disconnect();
+    pv.chain.output.disconnect();
+  } catch (e) {}
+  const chain = buildMasteringChain(MASTERING.ctx);
+  pv.srcNode.connect(chain.input);
+  chain.output.connect(MASTERING.ctx.destination);
+  if (pv.splitter) chain.output.connect(pv.splitter); // keep the spectrum fed
+  if (MASTERING.meter?.tap) chain.output.connect(MASTERING.meter.tap); // and the LUFS/peak tap
+  pv.chain = chain;
+}
+
+let masteringClipCurve = null;
+
+function getMasteringClipCurve() {
+  if (!masteringClipCurve) {
+    // Unity gain (slope exactly 1) below the knee, tanh squash above it, so
+    // program material under the ceiling passes untouched and only peaks
+    // saturate. The WaveShaper clamps inputs beyond ±1 to the curve edge,
+    // which caps the worst case just under the ceiling.
+    const N = 4096;
+    const curve = new Float32Array(N);
+    const knee = 0.7; // ≈ −3 dB below the (normalized) ceiling
+    for (let i = 0; i < N; i++) {
+      const x = (i / (N - 1)) * 2 - 1;
+      const ax = Math.abs(x);
+      const y = ax <= knee ? ax : knee + (1 - knee) * Math.tanh((ax - knee) / (1 - knee));
+      curve[i] = Math.sign(x) * y;
+    }
+    masteringClipCurve = curve;
+  }
+  return masteringClipCurve;
+}
+
+function applyMasteringParams(chain) {
+  if (!chain) return;
+  const p = MASTERING.params;
+  const n = chain.nodes;
+  n.low.frequency.value = p.lowFreq;
+  n.low.gain.value = p.lowGain;
+  n.low.Q.value = p.lowQ;
+  n.lowMid.frequency.value = p.lowMidFreq;
+  n.lowMid.gain.value = p.lowMidGain;
+  n.lowMid.Q.value = p.lowMidQ;
+  n.mid.frequency.value = p.midFreq;
+  n.mid.gain.value = p.midGain;
+  n.mid.Q.value = p.midQ;
+  n.highMid.frequency.value = p.highMidFreq;
+  n.highMid.gain.value = p.highMidGain;
+  n.highMid.Q.value = p.highMidQ;
+  n.high.frequency.value = p.highFreq;
+  n.high.gain.value = p.highGain;
+  n.high.Q.value = p.highQ;
+  if (n.eqAudition) {
+    const band = MASTERING_EQ_BANDS[MASTERING.eqBandIndex] || MASTERING_EQ_BANDS[0];
+    n.eqAudition.frequency.value = p[band.freqKey];
+    n.eqAudition.Q.value = p[band.qKey];
+  }
+  n.comp.threshold.value = p.compThreshold;
+  n.comp.ratio.value = p.compRatio;
+  n.comp.attack.value = p.compAttack;
+  n.comp.release.value = p.compRelease;
+  n.makeup.gain.value = dbToLin(p.compMakeup);
+  if (n.optoComp) {
+    // 2A: slow and creamy; 3A: a touch faster and firmer.
+    const is3a = p.optoMode === '3a';
+    n.optoComp.threshold.value = -p.optoReduction;
+    n.optoComp.ratio.value = is3a ? 4 : 3;
+    n.optoComp.attack.value = is3a ? 0.003 : 0.01;
+    n.optoComp.release.value = is3a ? 0.3 : 0.6;
+    n.optoComp.knee.value = is3a ? 10 : 18;
+    n.optoMakeup.gain.value = dbToLin(p.optoMakeup);
+  }
+  if (n.tapeIn) {
+    const driveLin = dbToLin(p.tapeDrive);
+    n.tapeIn.gain.value = driveLin;
+    n.tapeComp.gain.value = 1 / driveLin; // unity at low level, saturation on peaks
+    n.tapeBump.gain.value = p.tapeBump;
+    n.tapeRoll.frequency.value = Math.min(p.tapeRolloff * 1000, 20000);
+    n.tapeLevel.gain.value = dbToLin(p.tapeLevel);
+  }
+  if (n.excHp) {
+    n.excHp.frequency.value = p.excTune;
+    n.excDrive.gain.value = dbToLin(p.excHarmonics);
+    n.excMix.gain.value = p.excMix / 100;
+  }
+  if (n.widthSideHp) {
+    n.widthSideHp.frequency.value = Math.max(10, p.widthBassFreq);
+    n.widthPos.gain.value = p.width;
+    n.widthNeg.gain.value = -p.width;
+  }
+  n.drive.gain.value = dbToLin(p.drive);
+  const ceil = dbToLin(p.ceiling);
+  n.preClip.gain.value = 1 / ceil;
+  n.clip.curve = getMasteringClipCurve();
+  n.postClip.gain.value = ceil;
+  n.out.gain.value = dbToLin(p.outGain);
+}
+
+function getMasteringDuration() {
+  const s = MASTERING.source;
+  return s ? s.left.length / s.sampleRate : 0;
+}
+
+function getMasteringLoopBounds() {
+  const duration = getMasteringDuration();
+  if (duration <= 0 || MASTERING.loopMode === 'off') return null;
+  if (MASTERING.loopMode === 'all') return { start: 0, end: duration };
+  const selection = MASTERING.loopSelection;
+  if (!selection || selection.end - selection.start < 0.05) return null;
+  return {
+    start: clamp(selection.start, 0, duration),
+    end: clamp(selection.end, 0, duration),
+  };
+}
+
+function getMasteringPlayhead() {
+  const pv = MASTERING.preview;
+  const duration = getMasteringDuration();
+  if (!pv || !MASTERING.ctx) return clamp(MASTERING.playheadSec, 0, duration);
+  const elapsed = Math.max(0, MASTERING.ctx.currentTime - pv.startAt);
+  let position;
+  if (pv.loopEnd > pv.loopStart) {
+    const length = pv.loopEnd - pv.loopStart;
+    const relative = pv.offsetSec - pv.loopStart + elapsed;
+    position = pv.loopStart + (((relative % length) + length) % length);
+  } else {
+    position = Math.min(pv.offsetSec + elapsed, pv.duration);
+  }
+  MASTERING.playheadSec = position;
+  return position;
+}
+
+function updateMasteringTransportUI(position = MASTERING.playheadSec) {
+  const duration = getMasteringDuration();
+  const input = MASTERING.els.positionInput;
+  if (input) {
+    input.max = `${duration}`;
+    input.disabled = duration <= 0;
+    if (document.activeElement !== input) input.value = position.toFixed(2);
+  }
+  if (MASTERING.els.durationLabel) {
+    MASTERING.els.durationLabel.textContent = `/ ${duration.toFixed(2)} s`;
+  }
+  const selectionReady = Boolean(
+    MASTERING.loopSelection && MASTERING.loopSelection.end - MASTERING.loopSelection.start >= 0.05,
+  );
+  if (MASTERING.els.loopSectionBtn) {
+    MASTERING.els.loopSectionBtn.disabled = duration <= 0 || !selectionReady;
+    MASTERING.els.loopSectionBtn.classList.toggle(
+      'active',
+      MASTERING.loopMode === 'section',
+    );
+  }
+  if (MASTERING.els.loopAllBtn) {
+    MASTERING.els.loopAllBtn.disabled = duration <= 0;
+    MASTERING.els.loopAllBtn.classList.toggle('active', MASTERING.loopMode === 'all');
+  }
+}
+
+function drawMasteringOverlay(position = getMasteringPlayhead()) {
+  const overlay = MASTERING.els.waveOverlay;
+  if (!overlay) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = overlay.clientWidth || 600;
+  const h = overlay.clientHeight || 90;
+  overlay.width = Math.round(w * dpr);
+  overlay.height = Math.round(h * dpr);
+  const g = overlay.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  const duration = getMasteringDuration();
+  updateMasteringTransportUI(position);
+  if (duration <= 0) return;
+
+  const styles = getComputedStyle(document.documentElement);
+  const accent = styles.getPropertyValue('--accent-0').trim() || '#3cb870';
+  const accentFx = styles.getPropertyValue('--accent-fx').trim() || '#d4892a';
+  const selection = MASTERING.loopSelection;
+  if (selection && selection.end > selection.start) {
+    const x1 = (selection.start / duration) * w;
+    const x2 = (selection.end / duration) * w;
+    g.globalAlpha = MASTERING.loopMode === 'section' ? 0.24 : 0.12;
+    g.fillStyle = accent;
+    g.fillRect(x1, 0, Math.max(1, x2 - x1), h);
+    g.globalAlpha = 0.9;
+    g.fillRect(x1, 0, 1, h);
+    g.fillRect(x2 - 1, 0, 1, h);
+    g.globalAlpha = 1;
+  }
+  if (MASTERING.loopMode === 'all') {
+    g.strokeStyle = accent;
+    g.lineWidth = 2;
+    g.strokeRect(1, 1, w - 2, h - 2);
+  }
+
+  const x = Math.round((clamp(position, 0, duration) / duration) * w) + 0.5;
+  g.strokeStyle = accentFx;
+  g.lineWidth = 1;
+  g.beginPath();
+  g.moveTo(x, 0);
+  g.lineTo(x, h);
+  g.stroke();
+}
+
+function stopMasteringPreview({ preservePosition = true } = {}) {
+  const pv = MASTERING.preview;
+  if (pv && preservePosition) MASTERING.playheadSec = getMasteringPlayhead();
+  if (MASTERING.vizFrame) {
+    cancelAnimationFrame(MASTERING.vizFrame);
+    MASTERING.vizFrame = null;
+  }
+  destroyMasteringMeter();
+  if (MASTERING.built) drawMasteringMetersIdle();
+  MASTERING.preview = null;
+  if (pv) {
+    try {
+      pv.srcNode.onended = null;
+      pv.srcNode.stop();
+    } catch (e) {}
+    try {
+      pv.srcNode.disconnect();
+      pv.chain.output.disconnect();
+    } catch (e) {}
+  }
+  MASTERING.els.previewBtn?.classList.remove('active');
+  if (MASTERING.els.previewBtn) MASTERING.els.previewBtn.textContent = '▶ preview';
+  drawMasteringOverlay(MASTERING.playheadSec);
+}
+
+// ── Metering ── a ScriptProcessor tap on the chain output feeds streaming
+// BS.1770 K-weighting (real biquads with persistent state, not an FFT
+// approximation), so momentary/short-term LUFS, sample peaks, and stereo
+// correlation are measured continuously. Everything is torn down with the
+// preview — the meters cost nothing while idle.
+
+const METER_FLOOR_DB = -60;
+const METER_PEAK_FALL = 28; // dB/s display ballistics
+const METER_HOLD_MS = 1600;
+
+function newBiquadState() {
+  return { x1: 0, x2: 0, y1: 0, y2: 0 };
+}
+
+function stepBiquad(state, [b0, b1, b2, a1, a2], x) {
+  const y = b0 * x + b1 * state.x1 + b2 * state.x2 - a1 * state.y1 - a2 * state.y2;
+  state.x2 = state.x1;
+  state.x1 = x;
+  state.y2 = state.y1;
+  state.y1 = y;
+  return y;
+}
+
+function createMasteringMeter(ctx, chainOutput) {
+  const sr = ctx.sampleRate;
+  const meter = {
+    shelfCoefs: rbjHighShelf(sr, 1681.97, 3.99976, 0.7071752),
+    hpCoefs: rbjHighpass(sr, 38.135, 0.5003),
+    fL1: newBiquadState(),
+    fL2: newBiquadState(),
+    fR1: newBiquadState(),
+    fR2: newBiquadState(),
+    blocks: [], // { ms, corr, dur } newest-last, ~3s kept
+    framePeakL: 0,
+    framePeakR: 0,
+    dispL: METER_FLOOR_DB,
+    dispR: METER_FLOOR_DB,
+    holdL: { db: METER_FLOOR_DB, until: 0 },
+    holdR: { db: METER_FLOOR_DB, until: 0 },
+    corr: 0,
+    lastTick: performance.now(),
+    tap: null,
+    sink: null,
+  };
+
+  const tap = ctx.createScriptProcessor(4096, 2, 2);
+  const sink = ctx.createGain();
+  sink.gain.value = 0;
+  tap.onaudioprocess = (e) => {
+    const inL = e.inputBuffer.getChannelData(0);
+    const inR = e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : inL;
+    e.outputBuffer.getChannelData(0).set(inL);
+    e.outputBuffer.getChannelData(1).set(inR);
+    let peakL = 0;
+    let peakR = 0;
+    let sumK = 0;
+    let sumLR = 0;
+    let sumL2 = 0;
+    let sumR2 = 0;
+    for (let i = 0; i < inL.length; i++) {
+      const l = inL[i];
+      const r = inR[i];
+      const al = Math.abs(l);
+      const ar = Math.abs(r);
+      if (al > peakL) peakL = al;
+      if (ar > peakR) peakR = ar;
+      const kl = stepBiquad(meter.fL2, meter.hpCoefs, stepBiquad(meter.fL1, meter.shelfCoefs, l));
+      const kr = stepBiquad(meter.fR2, meter.hpCoefs, stepBiquad(meter.fR1, meter.shelfCoefs, r));
+      sumK += kl * kl + kr * kr;
+      sumLR += l * r;
+      sumL2 += l * l;
+      sumR2 += r * r;
+    }
+    meter.framePeakL = Math.max(meter.framePeakL, peakL);
+    meter.framePeakR = Math.max(meter.framePeakR, peakR);
+    const denom = Math.sqrt(sumL2 * sumR2);
+    meter.blocks.push({
+      ms: sumK / inL.length,
+      corr: denom > 1e-12 ? sumLR / denom : 0,
+      dur: inL.length / sr,
+    });
+    let total = 0;
+    for (let i = meter.blocks.length - 1; i >= 0; i--) {
+      total += meter.blocks[i].dur;
+      if (total > 3.2) {
+        meter.blocks.splice(0, i);
+        break;
+      }
+    }
+  };
+  chainOutput.connect(tap);
+  tap.connect(sink);
+  sink.connect(ctx.destination);
+  meter.tap = tap;
+  meter.sink = sink;
+  return meter;
+}
+
+function destroyMasteringMeter() {
+  const meter = MASTERING.meter;
+  if (!meter) return;
+  MASTERING.meter = null;
+  if (meter.tap) {
+    meter.tap.onaudioprocess = null;
+    try {
+      meter.tap.disconnect();
+    } catch (e) {}
+  }
+  try {
+    meter.sink?.disconnect();
+  } catch (e) {}
+}
+
+function meterWindowLufs(meter, windowSec) {
+  let total = 0;
+  let energy = 0;
+  for (let i = meter.blocks.length - 1; i >= 0; i--) {
+    const b = meter.blocks[i];
+    total += b.dur;
+    energy += b.ms * b.dur;
+    if (total >= windowSec) break;
+  }
+  if (total <= 0 || energy <= 0) return -Infinity;
+  return -0.691 + 10 * Math.log10(energy / total);
+}
+
+const meterDbToX = (db, w) => clamp((db - METER_FLOOR_DB) / -METER_FLOOR_DB, 0, 1) * w;
+
+function updatePeakBallistics(meter, key, holdKey, framePeak, dt, now) {
+  const target = framePeak > 0 ? Math.max(METER_FLOOR_DB, 20 * Math.log10(framePeak)) : METER_FLOOR_DB;
+  meter[key] = Math.max(target, meter[key] - METER_PEAK_FALL * dt);
+  const hold = meter[holdKey];
+  if (target >= hold.db) {
+    hold.db = target;
+    hold.until = now + METER_HOLD_MS;
+  } else if (now > hold.until) {
+    hold.db = Math.max(target, hold.db - METER_PEAK_FALL * 1.5 * dt);
+  }
+}
+
+function drawMasteringMeters(pv) {
+  const canvas = MASTERING.els.meterCanvas;
+  const meter = MASTERING.meter;
+  if (!canvas || !meter) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 600;
+  const h = canvas.clientHeight || 140;
+  if (canvas.width !== Math.round(w * dpr)) {
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
+  const g = canvas.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  const styles = getComputedStyle(document.documentElement);
+  const accent = styles.getPropertyValue('--accent-0').trim() || '#3cb870';
+  const accentFx = styles.getPropertyValue('--accent-fx').trim() || '#d4892a';
+  const mutedCol = styles.getPropertyValue('--muted').trim() || '#5a5a5a';
+  const borderCol = styles.getPropertyValue('--border').trim() || '#3a3a3a';
+
+  const now = performance.now();
+  const dt = Math.min(0.1, (now - meter.lastTick) / 1000);
+  meter.lastTick = now;
+
+  // ── Spectrum (log frequency, post-chain, L/R averaged) ──
+  const specH = h - 46;
+  const an0 = pv.analysers[0];
+  const an1 = pv.analysers[1];
+  if (!meter.freq0) {
+    meter.freq0 = new Float32Array(an0.frequencyBinCount);
+    meter.freq1 = new Float32Array(an1.frequencyBinCount);
+  }
+  an0.getFloatFrequencyData(meter.freq0);
+  an1.getFloatFrequencyData(meter.freq1);
+  const sr = MASTERING.ctx.sampleRate;
+  const binHz = sr / 2 / an0.frequencyBinCount;
+  g.beginPath();
+  g.moveTo(0, specH);
+  for (let x = 0; x <= w; x += 2) {
+    const f = EQ_FMIN * Math.pow(EQ_FMAX / EQ_FMIN, x / w);
+    const bin = clamp(Math.round(f / binHz), 0, an0.frequencyBinCount - 1);
+    const db = (meter.freq0[bin] + meter.freq1[bin]) / 2; // ~[-100, 0]
+    const norm = clamp((db + 90) / 80, 0, 1);
+    g.lineTo(x, specH - norm * (specH - 14));
+  }
+  g.lineTo(w, specH);
+  g.closePath();
+  g.globalAlpha = 0.25;
+  g.fillStyle = accent;
+  g.fill();
+  g.globalAlpha = 1;
+  g.strokeStyle = accent;
+  g.lineWidth = 1;
+  g.stroke();
+  g.fillStyle = mutedCol;
+  g.font = '7px ui-monospace, monospace';
+  [[100, '100'], [1000, '1k'], [10000, '10k']].forEach(([f, lbl]) => {
+    g.fillText(lbl, eqFreqToX(f, w) + 2, specH - 3);
+  });
+
+  // ── Loudness / correlation / gain-reduction readout ──
+  const momentary = meterWindowLufs(meter, 0.4);
+  const shortTerm = meterWindowLufs(meter, 3.0);
+  const recent = meter.blocks.slice(-6);
+  const rawCorr = recent.length
+    ? recent.reduce((acc, b) => acc + b.corr, 0) / recent.length
+    : 0;
+  meter.corr = meter.corr * 0.7 + rawCorr * 0.3;
+  const gr =
+    (pv.chain.nodes.comp.reduction || 0) + (pv.chain.nodes.optoComp?.reduction || 0);
+  const fmtLufs = (v) => (Number.isFinite(v) ? v.toFixed(1) : '−∞');
+  g.font = '9px ui-monospace, monospace';
+  g.fillStyle = accentFx;
+  g.fillText(`M ${fmtLufs(momentary)}`, 8, 12);
+  g.fillStyle = mutedCol;
+  g.fillText(`S ${fmtLufs(shortTerm)} LUFS`, 78, 12);
+  g.fillText(`CORR ${meter.corr >= 0 ? '+' : ''}${meter.corr.toFixed(2)}`, 190, 12);
+  g.fillStyle = gr < -0.5 ? accentFx : mutedCol;
+  g.fillText(`GR ${gr.toFixed(1)} dB`, 280, 12);
+
+  // ── Stereo peak bars with scale + hold ticks ──
+  updatePeakBallistics(meter, 'dispL', 'holdL', meter.framePeakL, dt, now);
+  updatePeakBallistics(meter, 'dispR', 'holdR', meter.framePeakR, dt, now);
+  meter.framePeakL = 0;
+  meter.framePeakR = 0;
+  const bars = [
+    ['L', meter.dispL, meter.holdL],
+    ['R', meter.dispR, meter.holdR],
+  ];
+  const barH = 8;
+  const redX = meterDbToX(-1, w - 20);
+  bars.forEach(([lbl, db, hold], i) => {
+    const by = specH + 6 + i * (barH + 4);
+    g.fillStyle = mutedCol;
+    g.font = '7px ui-monospace, monospace';
+    g.fillText(lbl, 2, by + barH - 1);
+    const bx = 12;
+    const bw = w - 20;
+    g.fillStyle = 'rgba(0,0,0,0.35)';
+    g.fillRect(bx, by, bw, barH);
+    const fillW = meterDbToX(db, bw);
+    g.fillStyle = accent;
+    g.fillRect(bx, by, Math.min(fillW, redX), barH);
+    if (fillW > redX) {
+      g.fillStyle = '#d05050';
+      g.fillRect(bx + redX, by, fillW - redX, barH);
+    }
+    const hx = bx + meterDbToX(hold.db, bw);
+    g.fillStyle = hold.db > -1 ? '#d05050' : accentFx;
+    g.fillRect(hx - 1, by, 2, barH);
+    g.fillStyle = mutedCol;
+    g.font = '7px ui-monospace, monospace';
+    g.fillText(`${db <= METER_FLOOR_DB ? '−∞' : db.toFixed(1)}`, bx + bw - 26, by + barH - 1);
+  });
+  // dB scale ticks under the bars.
+  g.fillStyle = mutedCol;
+  [-60, -30, -18, -12, -6, -3].forEach((db) => {
+    const x = 12 + meterDbToX(db, w - 20);
+    g.fillRect(x, h - 10, 1, 3);
+    g.fillText(`${db}`, x + 2, h - 3);
+  });
+
+  g.strokeStyle = borderCol;
+  g.strokeRect(0.5, 0.5, w - 1, h - 1);
+}
+
+function drawMasteringMetersIdle() {
+  const canvas = MASTERING.els.meterCanvas;
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 600;
+  const h = canvas.clientHeight || 140;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  const g = canvas.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  const mutedCol =
+    getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#5a5a5a';
+  g.fillStyle = mutedCol;
+  g.font = '9px ui-monospace, monospace';
+  g.fillText('meters run during preview — M/S LUFS · peaks · correlation · spectrum · GR', 8, 14);
+}
+
+// Per-frame output viz — runs ONLY while preview plays.
+function masteringVizTick() {
+  MASTERING.vizFrame = null;
+  const pv = MASTERING.preview;
+  if (!pv || !MASTERING.ctx) return;
+  drawMasteringOverlay();
+  drawMasteringMeters(pv);
+  MASTERING.vizFrame = requestAnimationFrame(masteringVizTick);
+}
+
+function getMasteringPreviewBuffer(ctx) {
+  const s = MASTERING.source;
+  if (!s) return null;
+  if (
+    !MASTERING.previewBuffer ||
+    MASTERING.previewBuffer.length !== s.left.length ||
+    MASTERING.previewBuffer.sampleRate !== s.sampleRate
+  ) {
+    const buf = ctx.createBuffer(2, s.left.length, s.sampleRate);
+    buf.getChannelData(0).set(s.left);
+    buf.getChannelData(1).set(s.right);
+    MASTERING.previewBuffer = buf;
+  }
+  return MASTERING.previewBuffer;
+}
+
+async function startMasteringPreview(offsetSec = MASTERING.playheadSec) {
+  if (!MASTERING.source) {
+    setStatus('no audio in mastering — bounce the song or load a wav');
+    return;
+  }
+  if (!MASTERING.ctx) MASTERING.ctx = new AudioContext();
+  const ctx = MASTERING.ctx;
+  if (ctx.state === 'suspended') await ctx.resume();
+  const duration = getMasteringDuration();
+  const loopBounds = getMasteringLoopBounds();
+  let offset = clamp(offsetSec, 0, duration);
+  if (loopBounds && (offset < loopBounds.start || offset >= loopBounds.end)) {
+    offset = loopBounds.start;
+  } else if (!loopBounds && offset >= duration - 0.001) {
+    offset = 0;
+  }
+  const chain = buildMasteringChain(ctx);
+  const srcNode = ctx.createBufferSource();
+  srcNode.buffer = getMasteringPreviewBuffer(ctx);
+  if (loopBounds) {
+    srcNode.loop = true;
+    srcNode.loopStart = loopBounds.start;
+    srcNode.loopEnd = loopBounds.end;
+  }
+  srcNode.connect(chain.input);
+  chain.output.connect(ctx.destination);
+  // Post-chain stereo analysers for the output meters.
+  const splitter = ctx.createChannelSplitter(2);
+  chain.output.connect(splitter);
+  const analysers = [0, 1].map((ch) => {
+    const an = ctx.createAnalyser();
+    an.fftSize = 2048;
+    splitter.connect(an, ch);
+    return an;
+  });
+  const preview = {
+    srcNode,
+    chain,
+    splitter,
+    analysers,
+    startAt: ctx.currentTime,
+    offsetSec: offset,
+    loopStart: loopBounds?.start ?? 0,
+    loopEnd: loopBounds?.end ?? 0,
+    duration: srcNode.buffer.duration,
+  };
+  MASTERING.preview = preview;
+  MASTERING.playheadSec = offset;
+  srcNode.onended = () => {
+    if (MASTERING.preview !== preview) return;
+    MASTERING.playheadSec = 0;
+    stopMasteringPreview({ preservePosition: false });
+  };
+  srcNode.start(0, offset);
+  MASTERING.meter = createMasteringMeter(ctx, chain.output);
+  MASTERING.els.previewBtn?.classList.add('active');
+  if (MASTERING.els.previewBtn) MASTERING.els.previewBtn.textContent = '■ stop';
+  if (!MASTERING.vizFrame) MASTERING.vizFrame = requestAnimationFrame(masteringVizTick);
+}
+
+async function seekMasteringPreview(seconds) {
+  const duration = getMasteringDuration();
+  if (duration <= 0) return;
+  let target = clamp(Number(seconds) || 0, 0, duration);
+  const loopBounds = getMasteringLoopBounds();
+  if (
+    MASTERING.loopMode === 'section' &&
+    loopBounds &&
+    (target < loopBounds.start || target >= loopBounds.end)
+  ) {
+    target = loopBounds.start;
+  }
+  const wasPlaying = Boolean(MASTERING.preview);
+  if (wasPlaying) stopMasteringPreview({ preservePosition: false });
+  MASTERING.playheadSec = target;
+  drawMasteringOverlay(target);
+  if (wasPlaying) await startMasteringPreview(target);
+}
+
+async function setMasteringLoopMode(mode) {
+  if (mode === 'section' && !MASTERING.loopSelection) {
+    setStatus('drag across the waveform to select a loop section');
+    return;
+  }
+  const position = getMasteringPlayhead();
+  const wasPlaying = Boolean(MASTERING.preview);
+  if (wasPlaying) stopMasteringPreview({ preservePosition: false });
+  MASTERING.loopMode = mode;
+  let nextPosition = position;
+  const bounds = getMasteringLoopBounds();
+  if (bounds && (nextPosition < bounds.start || nextPosition >= bounds.end)) {
+    nextPosition = bounds.start;
+  }
+  MASTERING.playheadSec = nextPosition;
+  updateMasteringTransportUI(nextPosition);
+  drawMasteringOverlay(nextPosition);
+  if (wasPlaying) await startMasteringPreview(nextPosition);
+}
+
+async function toggleMasteringPreview() {
+  if (MASTERING.preview) {
+    stopMasteringPreview();
+    return;
+  }
+  await startMasteringPreview();
+}
+
+async function renderMastering() {
+  const s = MASTERING.source;
+  if (!s) {
+    setStatus('no audio in mastering — bounce the song or load a wav');
+    return;
+  }
+  setStatus('rendering master…');
+  const tail = Math.round(s.sampleRate * 0.05);
+  const oc = new OfflineAudioContext(2, s.left.length + tail, s.sampleRate);
+  const buf = oc.createBuffer(2, s.left.length, s.sampleRate);
+  buf.getChannelData(0).set(s.left);
+  buf.getChannelData(1).set(s.right);
+  // Band solo is an audition aid and must never be printed into the master.
+  const chain = buildMasteringChain(oc, { eqSolo: false });
+  const srcNode = oc.createBufferSource();
+  srcNode.buffer = buf;
+  srcNode.connect(chain.input);
+  chain.output.connect(oc.destination);
+  srcNode.start();
+  const rendered = await oc.startRendering();
+  const L = rendered.getChannelData(0);
+  const R = rendered.getChannelData(1);
+  const lufs = measureIntegratedLufs(L, R, s.sampleRate);
+  let peak = 0;
+  for (let i = 0; i < L.length; i++) {
+    const a = Math.abs(L[i]);
+    const b = Math.abs(R[i]);
+    if (a > peak) peak = a;
+    if (b > peak) peak = b;
+  }
+  const peakDb = peak > 0 ? 20 * Math.log10(peak) : -Infinity;
+  if (MASTERING.els.meters) {
+    MASTERING.els.meters.textContent = `${Number.isFinite(lufs) ? lufs.toFixed(1) : '−∞'} LUFS · peak ${Number.isFinite(peakDb) ? peakDb.toFixed(2) : '−∞'} dBFS`;
+  }
+  MASTERING.renderedPeaks = buildMasteringPeaks(L, R);
+  drawMasteringWave();
+  REC.downloadName = `${(s.name || 'grnsh').replace(/\.wav$/i, '').replace(/[^\w.-]+/g, '_')}-master.wav`;
+  downloadRecording(encodeWav(L, R, s.sampleRate));
+  setStatus('master rendered');
+}
+
+// Integrated loudness per ITU-R BS.1770: K-weighting (RBJ biquads at the
+// source rate), 400ms blocks with 75% overlap, −70 LUFS absolute gate then
+// −10 LU relative gate.
+function measureIntegratedLufs(left, right, sampleRate) {
+  const shelf = rbjHighShelf(sampleRate, 1681.97, 3.99976, 0.7071752);
+  const hp = rbjHighpass(sampleRate, 38.135, 0.5003);
+  const kwL = applyBiquad(applyBiquad(left, shelf), hp);
+  const kwR = applyBiquad(applyBiquad(right, shelf), hp);
+  const blockLen = Math.round(sampleRate * 0.4);
+  const hop = Math.round(sampleRate * 0.1);
+  if (kwL.length < blockLen) return -Infinity;
+  const blocks = [];
+  for (let start = 0; start + blockLen <= kwL.length; start += hop) {
+    let sum = 0;
+    for (let i = start; i < start + blockLen; i++) sum += kwL[i] * kwL[i] + kwR[i] * kwR[i];
+    const ms = sum / blockLen;
+    blocks.push(-0.691 + 10 * Math.log10(ms || 1e-12));
+  }
+  const absGated = blocks.filter((l) => l > -70);
+  if (!absGated.length) return -Infinity;
+  const mean = (arr) =>
+    10 * Math.log10(arr.reduce((acc, l) => acc + Math.pow(10, l / 10), 0) / arr.length);
+  const relThreshold = mean(absGated) - 10 + 0.691;
+  const relGated = absGated.filter((l) => l > relThreshold - 0.691);
+  if (!relGated.length) return -Infinity;
+  return mean(relGated);
+}
+
+function rbjHighShelf(sr, f0, gainDb, q) {
+  const A = Math.pow(10, gainDb / 40);
+  const w0 = (2 * Math.PI * f0) / sr;
+  const alpha = Math.sin(w0) / (2 * q);
+  const cosw = Math.cos(w0);
+  const sqA = Math.sqrt(A);
+  const b0 = A * (A + 1 + (A - 1) * cosw + 2 * sqA * alpha);
+  const b1 = -2 * A * (A - 1 + (A + 1) * cosw);
+  const b2 = A * (A + 1 + (A - 1) * cosw - 2 * sqA * alpha);
+  const a0 = A + 1 - (A - 1) * cosw + 2 * sqA * alpha;
+  const a1 = 2 * (A - 1 - (A + 1) * cosw);
+  const a2 = A + 1 - (A - 1) * cosw - 2 * sqA * alpha;
+  return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
+}
+
+function rbjHighpass(sr, f0, q) {
+  const w0 = (2 * Math.PI * f0) / sr;
+  const alpha = Math.sin(w0) / (2 * q);
+  const cosw = Math.cos(w0);
+  const b0 = (1 + cosw) / 2;
+  const b1 = -(1 + cosw);
+  const b2 = (1 + cosw) / 2;
+  const a0 = 1 + alpha;
+  const a1 = -2 * cosw;
+  const a2 = 1 - alpha;
+  return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
+}
+
+function applyBiquad(input, [b0, b1, b2, a1, a2]) {
+  const out = new Float32Array(input.length);
+  let x1 = 0,
+    x2 = 0,
+    y1 = 0,
+    y2 = 0;
+  for (let i = 0; i < input.length; i++) {
+    const x0 = input[i];
+    const y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    out[i] = y0;
+    x2 = x1;
+    x1 = x0;
+    y2 = y1;
+    y1 = y0;
+  }
+  return out;
+}
+
+async function loadMasteringFile(file) {
+  try {
+    const raw = await file.arrayBuffer();
+    // decodeAudioData resamples to the context rate — pin a fixed 48k so
+    // results are deterministic regardless of the output device.
+    const decodeCtx = new OfflineAudioContext(2, 2, 48000);
+    const buf = await decodeCtx.decodeAudioData(raw);
+    const left = new Float32Array(buf.getChannelData(0));
+    const right = new Float32Array(
+      buf.numberOfChannels > 1 ? buf.getChannelData(1) : buf.getChannelData(0),
+    );
+    setMasteringSource(left, right, buf.sampleRate, file.name);
+    setStatus(`loaded "${file.name}" into mastering`);
+  } catch (e) {
+    setStatus('could not decode that audio file');
+  }
+}
+
+function refreshMasteringSourceUI() {
+  const s = MASTERING.source;
+  const info = MASTERING.els.sourceInfo;
+  if (info) {
+    info.textContent = s
+      ? `${s.name} — ${(s.left.length / s.sampleRate).toFixed(1)}s @ ${s.sampleRate}Hz`
+      : 'no audio yet — bounce the song or load a wav';
+  }
+  if (MASTERING.els.meters && !s) MASTERING.els.meters.textContent = '';
+  drawMasteringWave();
+  drawMasteringOverlay(MASTERING.playheadSec);
+}
+
+function drawMasteringWave() {
+  const canvas = MASTERING.els.wave;
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 600;
+  const h = canvas.clientHeight || 90;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  const g = canvas.getContext('2d');
+  g.scale(dpr, dpr);
+  g.clearRect(0, 0, w, h);
+  const s = MASTERING.source;
+  if (!s) return;
+  const styles = getComputedStyle(document.documentElement);
+  const accent = styles.getPropertyValue('--accent-0').trim() || '#3cb870';
+  const mutedCol = styles.getPropertyValue('--muted').trim() || '#5a5a5a';
+  const rendered = MASTERING.renderedPeaks;
+  const mid = h / 2;
+
+  // Source envelope — accent when it's the only layer, dimmed under a render.
+  g.strokeStyle = rendered ? mutedCol : accent;
+  g.lineWidth = 1;
+  const samplesPerCol = Math.max(1, Math.floor(s.left.length / w));
+  g.beginPath();
+  for (let x = 0; x < w; x++) {
+    let min = 1,
+      max = -1;
+    const start = x * samplesPerCol;
+    const end = Math.min(start + samplesPerCol, s.left.length);
+    for (let i = start; i < end; i++) {
+      const v = (s.left[i] + s.right[i]) * 0.5;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    if (min > max) continue;
+    g.moveTo(x + 0.5, mid - max * (mid - 2));
+    g.lineTo(x + 0.5, mid - min * (mid - 2) + 0.5);
+  }
+  g.stroke();
+
+  // Last render on top — the actual output the export produced.
+  if (rendered) {
+    g.strokeStyle = accent;
+    g.beginPath();
+    for (let x = 0; x < w; x++) {
+      const b = Math.min(rendered.bins - 1, Math.floor((x / w) * rendered.bins));
+      g.moveTo(x + 0.5, mid - rendered.maxs[b] * (mid - 2));
+      g.lineTo(x + 0.5, mid - rendered.mins[b] * (mid - 2) + 0.5);
+    }
+    g.stroke();
+    g.fillStyle = mutedCol;
+    g.font = '7px ui-monospace, monospace';
+    g.fillText('source', 6, 10);
+    g.fillStyle = accent;
+    g.fillText('master', 6, 19);
+  }
+}
+
+const MASTERING_CONTROL_SPECS = [
+  {
+    id: 'comp',
+    section: 'Glue Comp',
+    controls: [
+      { key: 'compThreshold', label: 'Thresh', min: -40, max: 0, step: 0.5, unit: 'dB' },
+      { key: 'compRatio', label: 'Ratio', min: 1, max: 10, step: 0.5, unit: '' },
+      { key: 'compAttack', label: 'Attack', min: 0.001, max: 0.1, step: 0.001, unit: 's' },
+      { key: 'compRelease', label: 'Release', min: 0.05, max: 1, step: 0.01, unit: 's' },
+      { key: 'compMakeup', label: 'Makeup', min: 0, max: 12, step: 0.5, unit: 'dB' },
+    ],
+  },
+  {
+    id: 'opto',
+    section: 'Opto',
+    controls: [
+      { key: 'optoReduction', label: 'Reduction', min: 0, max: 40, step: 0.5, unit: 'dB' },
+      { key: 'optoMakeup', label: 'Gain', min: 0, max: 24, step: 0.5, unit: 'dB' },
+    ],
+  },
+  {
+    id: 'tape',
+    section: 'Tape',
+    controls: [
+      { key: 'tapeDrive', label: 'Drive', min: 0, max: 18, step: 0.5, unit: 'dB' },
+      { key: 'tapeBump', label: 'Bump', min: 0, max: 6, step: 0.5, unit: 'dB' },
+      { key: 'tapeRolloff', label: 'Rolloff', min: 8, max: 20, step: 0.5, unit: 'kHz' },
+      { key: 'tapeLevel', label: 'Level', min: -12, max: 12, step: 0.5, unit: 'dB' },
+    ],
+  },
+  {
+    id: 'exciter',
+    section: 'Exciter',
+    controls: [
+      { key: 'excTune', label: 'Tune', min: 1000, max: 8000, step: 100, unit: 'Hz' },
+      { key: 'excHarmonics', label: 'Harmonics', min: 0, max: 24, step: 0.5, unit: 'dB' },
+      { key: 'excMix', label: 'Mix', min: 0, max: 50, step: 1, unit: '%' },
+    ],
+  },
+  {
+    id: 'width',
+    section: 'Width',
+    controls: [
+      { key: 'width', label: 'Width', min: 0, max: 2, step: 0.05, unit: '' },
+      { key: 'widthBassFreq', label: 'Bass Mono', min: 0, max: 300, step: 5, unit: 'Hz' },
+    ],
+  },
+  {
+    id: 'limit',
+    section: 'Limit',
+    controls: [
+      { key: 'drive', label: 'Drive', min: 0, max: 12, step: 0.5, unit: 'dB' },
+      { key: 'ceiling', label: 'Ceiling', min: -6, max: -0.1, step: 0.1, unit: 'dB' },
+      { key: 'outGain', label: 'Output', min: -12, max: 6, step: 0.5, unit: 'dB' },
+    ],
+  },
+];
+
+// ── Graphical EQ ── log-frequency response plot with five draggable,
+// fully-parametric band handles: horizontal = frequency, vertical = gain.
+// The compact control below the graph edits Q for the selected band.
+
+const MASTERING_EQ_BANDS = [
+  {
+    gainKey: 'lowGain',
+    freqKey: 'lowFreq',
+    qKey: 'lowQ',
+    label: 'LOW',
+    fmin: 30,
+    fmax: 300,
+    defaultQ: 0.7,
+  },
+  {
+    gainKey: 'lowMidGain',
+    freqKey: 'lowMidFreq',
+    qKey: 'lowMidQ',
+    label: 'LOW MID',
+    fmin: 80,
+    fmax: 1500,
+    defaultQ: 1,
+  },
+  {
+    gainKey: 'midGain',
+    freqKey: 'midFreq',
+    qKey: 'midQ',
+    label: 'MID',
+    fmin: 200,
+    fmax: 5000,
+    defaultQ: 0.7,
+  },
+  {
+    gainKey: 'highMidGain',
+    freqKey: 'highMidFreq',
+    qKey: 'highMidQ',
+    label: 'HIGH MID',
+    fmin: 800,
+    fmax: 12000,
+    defaultQ: 1,
+  },
+  {
+    gainKey: 'highGain',
+    freqKey: 'highFreq',
+    qKey: 'highQ',
+    label: 'HIGH',
+    fmin: 3000,
+    fmax: 18000,
+    defaultQ: 0.7,
+  },
+];
+const EQ_DB_RANGE = 12;
+const EQ_FMIN = 20;
+const EQ_FMAX = 20000;
+const EQ_DISPLAY_SR = 48000;
+
+function rbjLowShelf(sr, f0, gainDb, q) {
+  const A = Math.pow(10, gainDb / 40);
+  const w0 = (2 * Math.PI * f0) / sr;
+  const alpha = Math.sin(w0) / (2 * q);
+  const cosw = Math.cos(w0);
+  const sqA = Math.sqrt(A);
+  const b0 = A * (A + 1 - (A - 1) * cosw + 2 * sqA * alpha);
+  const b1 = 2 * A * (A - 1 - (A + 1) * cosw);
+  const b2 = A * (A + 1 - (A - 1) * cosw - 2 * sqA * alpha);
+  const a0 = A + 1 + (A - 1) * cosw + 2 * sqA * alpha;
+  const a1 = -2 * (A - 1 + (A + 1) * cosw);
+  const a2 = A + 1 + (A - 1) * cosw - 2 * sqA * alpha;
+  return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
+}
+
+function rbjPeaking(sr, f0, gainDb, q) {
+  const A = Math.pow(10, gainDb / 40);
+  const w0 = (2 * Math.PI * f0) / sr;
+  const alpha = Math.sin(w0) / (2 * q);
+  const cosw = Math.cos(w0);
+  const b0 = 1 + alpha * A;
+  const b1 = -2 * cosw;
+  const b2 = 1 - alpha * A;
+  const a0 = 1 + alpha / A;
+  const a1 = -2 * cosw;
+  const a2 = 1 - alpha / A;
+  return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
+}
+
+function biquadMagnitudeDb([b0, b1, b2, a1, a2], freq, sr) {
+  const w = (2 * Math.PI * freq) / sr;
+  const cw = Math.cos(w);
+  const c2w = Math.cos(2 * w);
+  const sw = Math.sin(w);
+  const s2w = Math.sin(2 * w);
+  const numRe = b0 + b1 * cw + b2 * c2w;
+  const numIm = -(b1 * sw + b2 * s2w);
+  const denRe = 1 + a1 * cw + a2 * c2w;
+  const denIm = -(a1 * sw + a2 * s2w);
+  const num = numRe * numRe + numIm * numIm;
+  const den = denRe * denRe + denIm * denIm;
+  return 10 * Math.log10((num || 1e-20) / (den || 1e-20));
+}
+
+function masteringEqResponseDb(freq) {
+  const p = MASTERING.params;
+  return MASTERING_EQ_BANDS.reduce((sum, band) => {
+    const coeffs = rbjPeaking(
+      EQ_DISPLAY_SR,
+      p[band.freqKey],
+      p[band.gainKey],
+      p[band.qKey],
+    );
+    return sum + biquadMagnitudeDb(coeffs, freq, EQ_DISPLAY_SR);
+  }, 0);
+}
+
+const eqFreqToX = (f, w) => (Math.log(f / EQ_FMIN) / Math.log(EQ_FMAX / EQ_FMIN)) * w;
+const eqXToFreq = (x, w) => EQ_FMIN * Math.pow(EQ_FMAX / EQ_FMIN, clamp(x / w, 0, 1));
+const eqDbToY = (db, h) => h / 2 - (db / EQ_DB_RANGE) * (h / 2 - 8);
+const eqYToDb = (y, h) => clamp(((h / 2 - y) / (h / 2 - 8)) * EQ_DB_RANGE, -EQ_DB_RANGE, EQ_DB_RANGE);
+
+function drawMasteringEq() {
+  const canvas = MASTERING.els.eqCanvas;
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 280;
+  const h = canvas.clientHeight || 130;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  const g = canvas.getContext('2d');
+  g.scale(dpr, dpr);
+  g.clearRect(0, 0, w, h);
+  const styles = getComputedStyle(document.documentElement);
+  const borderCol = styles.getPropertyValue('--border').trim() || '#3a3a3a';
+  const mutedCol = styles.getPropertyValue('--muted').trim() || '#5a5a5a';
+  const bandCols = [
+    styles.getPropertyValue('--accent-0').trim() || '#3cb870',
+    styles.getPropertyValue('--accent-1').trim() || '#8b6ed4',
+    styles.getPropertyValue('--accent-fx').trim() || '#d4892a',
+    styles.getPropertyValue('--accent-1').trim() || '#8b6ed4',
+    styles.getPropertyValue('--accent-0').trim() || '#3cb870',
+  ];
+
+  // Grid: octave-ish frequency lines + 0/±6 dB lines.
+  g.strokeStyle = borderCol;
+  g.lineWidth = 1;
+  g.globalAlpha = 0.5;
+  [50, 100, 200, 500, 1000, 2000, 5000, 10000].forEach((f) => {
+    const x = Math.round(eqFreqToX(f, w)) + 0.5;
+    g.beginPath();
+    g.moveTo(x, 0);
+    g.lineTo(x, h);
+    g.stroke();
+  });
+  [-6, 0, 6].forEach((db) => {
+    const y = Math.round(eqDbToY(db, h)) + 0.5;
+    g.globalAlpha = db === 0 ? 0.9 : 0.5;
+    g.beginPath();
+    g.moveTo(0, y);
+    g.lineTo(w, y);
+    g.stroke();
+  });
+  g.globalAlpha = 1;
+  g.fillStyle = mutedCol;
+  g.font = '7px ui-monospace, monospace';
+  [[100, '100'], [1000, '1k'], [10000, '10k']].forEach(([f, lbl]) => {
+    g.fillText(lbl, eqFreqToX(f, w) + 2, h - 3);
+  });
+
+  // Combined response curve.
+  g.strokeStyle = bandCols[0];
+  g.lineWidth = 1.5;
+  g.beginPath();
+  const steps = 160;
+  for (let i = 0; i <= steps; i++) {
+    const f = EQ_FMIN * Math.pow(EQ_FMAX / EQ_FMIN, i / steps);
+    const y = eqDbToY(clamp(masteringEqResponseDb(f), -EQ_DB_RANGE, EQ_DB_RANGE), h);
+    if (i === 0) g.moveTo(eqFreqToX(f, w), y);
+    else g.lineTo(eqFreqToX(f, w), y);
+  }
+  g.stroke();
+
+  // Band handles.
+  MASTERING_EQ_BANDS.forEach((band, bi) => {
+    const x = eqFreqToX(MASTERING.params[band.freqKey], w);
+    const y = eqDbToY(MASTERING.params[band.gainKey], h);
+    if (bi === MASTERING.eqBandIndex) {
+      g.strokeStyle = bandCols[bi];
+      g.lineWidth = 1.5;
+      g.beginPath();
+      g.arc(x, y, 7.5, 0, Math.PI * 2);
+      g.stroke();
+    }
+    g.fillStyle = bandCols[bi];
+    g.beginPath();
+    g.arc(x, y, 4.5, 0, Math.PI * 2);
+    g.fill();
+    g.strokeStyle = borderCol;
+    g.lineWidth = 1;
+    g.stroke();
+  });
+}
+
+function setMasteringEqReadout(band) {
+  const el = MASTERING.els.eqReadout;
+  if (!el) return;
+  if (!band) {
+    el.textContent = '';
+    return;
+  }
+  const f = MASTERING.params[band.freqKey];
+  const dB = MASTERING.params[band.gainKey];
+  const q = MASTERING.params[band.qKey];
+  const fLabel = f >= 1000 ? `${(f / 1000).toFixed(1)}k` : `${Math.round(f)}`;
+  el.textContent = `${band.label} ${fLabel} Hz ${dB >= 0 ? '+' : ''}${dB.toFixed(1)} dB · Q ${q.toFixed(2)}`;
+}
+
+// ── Mastering persistence ── params ride inside the preset (autosave, named
+// projects, file export, undo history). No mastering data → reset to defaults
+// so an old project never inherits the previous project's chain.
+
+const MASTERING_DEFAULT_PARAMS = JSON.parse(JSON.stringify(MASTERING.params));
+
+function applyMasteringPreset(saved) {
+  const src = saved && typeof saved === 'object' ? saved : MASTERING_DEFAULT_PARAMS;
+  const p = MASTERING.params;
+  Object.keys(MASTERING_DEFAULT_PARAMS).forEach((key) => {
+    if (key === 'order' || key === 'enabled') return;
+    const fallback = MASTERING_DEFAULT_PARAMS[key];
+    p[key] = typeof src[key] === typeof fallback ? src[key] : fallback;
+  });
+  p.order = Array.isArray(src.order) ? [...src.order] : [...MASTERING_DEFAULT_PARAMS.order];
+  p.order = getMasteringOrder(); // sanitizes unknown/missing module ids
+  p.enabled = { ...MASTERING_DEFAULT_PARAMS.enabled };
+  if (src.enabled && typeof src.enabled === 'object') {
+    MASTERING_MODULE_IDS.forEach((id) => {
+      if (typeof src.enabled[id] === 'boolean') p.enabled[id] = src.enabled[id];
+    });
+  }
+  rebuildMasterPanelUI();
+}
+
+// Loaded params can change knob values, chain order, and bypass states at
+// once — rebuilding the (cheap, static) panel DOM is simpler and safer than
+// patching every control in place. A running preview keeps playing and gets
+// the new chain swapped in behind it.
+function rebuildMasterPanelUI() {
+  if (!MASTERING.built) return;
+  const panel = document.getElementById('masterPanel');
+  if (panel) panel.innerHTML = '';
+  MASTERING.built = false;
+  MASTERING.els = {};
+  buildMasterPanel();
+  if (MASTERING.preview) {
+    rebuildMasteringPreviewChain();
+    if (MASTERING.els.previewBtn) {
+      MASTERING.els.previewBtn.classList.add('active');
+      MASTERING.els.previewBtn.textContent = '■ stop';
+    }
+  }
+}
+
+// Power toggle for one chain module: true bypass via a chain rebuild, so an
+// off module costs nothing and colors nothing.
+function makeMasteringModulePower(id, box) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'master-power';
+  btn.title = 'Enable / bypass module';
+  const sync = () => {
+    const on = MASTERING.params.enabled[id] !== false;
+    btn.classList.toggle('active', on);
+    box.classList.toggle('bypassed', !on);
+  };
+  sync();
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    MASTERING.params.enabled[id] = MASTERING.params.enabled[id] === false;
+    sync();
+    rebuildMasteringPreviewChain();
+  });
+  return btn;
+}
+
+function buildMasteringEqSection() {
+  const box = document.createElement('div');
+  box.className = 'master-section master-section-eq';
+  box.dataset.module = 'eq';
+  const label = document.createElement('div');
+  label.className = 'master-section-label';
+  label.textContent = 'EQ';
+  label.prepend(makeMasteringModulePower('eq', box));
+  const readout = document.createElement('span');
+  readout.className = 'master-eq-readout';
+  MASTERING.els.eqReadout = readout;
+  label.appendChild(readout);
+  box.appendChild(label);
+
+  const canvas = document.createElement('canvas');
+  canvas.className = 'master-eq-canvas';
+  canvas.title = 'Drag: ↔ frequency, ↕ gain · select a band to edit Q/gain · double-click to reset';
+  MASTERING.els.eqCanvas = canvas;
+  box.appendChild(canvas);
+
+  const qRow = document.createElement('div');
+  qRow.className = 'master-eq-q';
+  const qLabel = document.createElement('span');
+  qLabel.textContent = 'Q';
+  const qInput = document.createElement('input');
+  qInput.type = 'range';
+  qInput.min = '0.1';
+  qInput.max = '12';
+  qInput.step = '0.05';
+  const qValue = document.createElement('output');
+  const soloBtn = document.createElement('button');
+  soloBtn.type = 'button';
+  soloBtn.className = 'master-eq-solo';
+  soloBtn.textContent = 'S';
+  soloBtn.title = 'Solo selected band while previewing';
+  soloBtn.classList.toggle('active', MASTERING.eqSolo);
+  qRow.append(qLabel, qInput, qValue, soloBtn);
+  box.appendChild(qRow);
+
+  const gainRow = document.createElement('div');
+  gainRow.className = 'master-eq-gain';
+  const gainLabel = document.createElement('span');
+  gainLabel.textContent = 'GAIN';
+  const gainInput = document.createElement('input');
+  gainInput.type = 'range';
+  gainInput.min = `${-EQ_DB_RANGE}`;
+  gainInput.max = `${EQ_DB_RANGE}`;
+  gainInput.step = '0.5';
+  const gainValue = document.createElement('output');
+  const gainSpacer = document.createElement('span');
+  gainSpacer.className = 'master-eq-param-spacer';
+  gainRow.append(gainLabel, gainInput, gainValue, gainSpacer);
+  box.appendChild(gainRow);
+
+  let activeBand = null;
+
+  const selectedBand = () => MASTERING_EQ_BANDS[MASTERING.eqBandIndex] || MASTERING_EQ_BANDS[0];
+  const formatEqGain = (gain) => `${gain >= 0 ? '+' : ''}${gain.toFixed(1)}`;
+  const syncBandControls = (band) => {
+    const q = MASTERING.params[band.qKey];
+    const gain = MASTERING.params[band.gainKey];
+    qInput.value = `${q}`;
+    qValue.textContent = q.toFixed(2);
+    gainInput.value = `${gain}`;
+    gainValue.textContent = formatEqGain(gain);
+  };
+  const selectBand = (band) => {
+    const previousIndex = MASTERING.eqBandIndex;
+    MASTERING.eqBandIndex = MASTERING_EQ_BANDS.indexOf(band);
+    syncBandControls(band);
+    setMasteringEqReadout(band);
+    drawMasteringEq();
+    if (MASTERING.eqSolo && previousIndex !== MASTERING.eqBandIndex) {
+      rebuildMasteringPreviewChain();
+    }
+  };
+
+  qInput.addEventListener('input', () => {
+    const band = selectedBand();
+    const q = Number(qInput.value);
+    MASTERING.params[band.qKey] = q;
+    qValue.textContent = q.toFixed(2);
+    applyMasteringParams(MASTERING.preview?.chain);
+    setMasteringEqReadout(band);
+    drawMasteringEq();
+  });
+
+  gainInput.addEventListener('input', () => {
+    const band = selectedBand();
+    const gain = Number(gainInput.value);
+    MASTERING.params[band.gainKey] = gain;
+    gainValue.textContent = formatEqGain(gain);
+    applyMasteringParams(MASTERING.preview?.chain);
+    setMasteringEqReadout(band);
+    drawMasteringEq();
+  });
+
+  soloBtn.addEventListener('click', () => {
+    MASTERING.eqSolo = !MASTERING.eqSolo;
+    soloBtn.classList.toggle('active', MASTERING.eqSolo);
+    soloBtn.title = MASTERING.eqSolo
+      ? 'Stop soloing the selected band'
+      : 'Solo selected band while previewing';
+    rebuildMasteringPreviewChain();
+    setStatus(MASTERING.eqSolo ? `soloing EQ ${selectedBand().label.toLowerCase()}` : 'EQ solo off');
+  });
+
+  const bandAtPoint = (px, py, w, h) => {
+    let best = null;
+    let bestDist = 12; // px hit radius
+    MASTERING_EQ_BANDS.forEach((band) => {
+      const x = eqFreqToX(MASTERING.params[band.freqKey], w);
+      const y = eqDbToY(MASTERING.params[band.gainKey], h);
+      const d = Math.hypot(px - x, py - y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = band;
+      }
+    });
+    return best;
+  };
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const rect = canvas.getBoundingClientRect();
+    const band = bandAtPoint(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
+    if (!band) return;
+    e.preventDefault();
+    activeBand = band;
+    canvas.setPointerCapture(e.pointerId);
+    selectBand(band);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!activeBand) return;
+    const rect = canvas.getBoundingClientRect();
+    const f = clamp(
+      eqXToFreq(e.clientX - rect.left, rect.width),
+      activeBand.fmin,
+      activeBand.fmax,
+    );
+    const dB = Math.round(eqYToDb(e.clientY - rect.top, rect.height) * 2) / 2;
+    MASTERING.params[activeBand.freqKey] = Math.round(f);
+    MASTERING.params[activeBand.gainKey] = dB;
+    syncBandControls(activeBand);
+    applyMasteringParams(MASTERING.preview?.chain);
+    setMasteringEqReadout(activeBand);
+    drawMasteringEq();
+  });
+  const endEqDrag = (e) => {
+    if (!activeBand) return;
+    activeBand = null;
+    if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+  };
+  canvas.addEventListener('pointerup', endEqDrag);
+  canvas.addEventListener('pointercancel', endEqDrag);
+  canvas.addEventListener('dblclick', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const band = bandAtPoint(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
+    if (!band) return;
+    selectBand(band);
+    MASTERING.params[band.gainKey] = 0;
+    MASTERING.params[band.qKey] = band.defaultQ;
+    syncBandControls(band);
+    applyMasteringParams(MASTERING.preview?.chain);
+    setMasteringEqReadout(band);
+    drawMasteringEq();
+  });
+
+  syncBandControls(selectedBand());
+  setMasteringEqReadout(selectedBand());
+
+  return box;
+}
+
+function buildMasterPanel() {
+  if (MASTERING.built) return;
+  MASTERING.built = true;
+  const panel = document.getElementById('masterPanel');
+  if (!panel) return;
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'master-toolbar';
+
+  const sourceInfo = document.createElement('span');
+  sourceInfo.className = 'master-source-info';
+  MASTERING.els.sourceInfo = sourceInfo;
+
+  const bounceBtn = document.createElement('button');
+  bounceBtn.type = 'button';
+  bounceBtn.textContent = 'Bounce song → here';
+  bounceBtn.title = 'Silent one-pass render of the arrangement, fed straight into mastering';
+  bounceBtn.addEventListener('click', bounceSong);
+
+  const loadInput = document.createElement('input');
+  loadInput.type = 'file';
+  loadInput.accept = 'audio/*';
+  loadInput.hidden = true;
+  loadInput.addEventListener('change', () => {
+    const file = loadInput.files?.[0];
+    loadInput.value = '';
+    if (file) loadMasteringFile(file);
+  });
+  const loadBtn = document.createElement('button');
+  loadBtn.type = 'button';
+  loadBtn.textContent = 'Load WAV';
+  loadBtn.addEventListener('click', () => loadInput.click());
+
+  const previewBtn = document.createElement('button');
+  previewBtn.type = 'button';
+  previewBtn.textContent = '▶ preview';
+  previewBtn.title = 'Play the source through the mastering chain';
+  previewBtn.addEventListener('click', toggleMasteringPreview);
+  MASTERING.els.previewBtn = previewBtn;
+
+  const positionBox = document.createElement('label');
+  positionBox.className = 'master-position-box';
+  positionBox.title = 'Seek to an exact second';
+  const positionInput = document.createElement('input');
+  positionInput.type = 'number';
+  positionInput.className = 'master-position-input';
+  positionInput.min = '0';
+  positionInput.step = '0.01';
+  positionInput.value = '0.00';
+  const durationLabel = document.createElement('span');
+  durationLabel.className = 'master-duration-label';
+  durationLabel.textContent = '/ 0.00 s';
+  positionBox.append(positionInput, durationLabel);
+  MASTERING.els.positionInput = positionInput;
+  MASTERING.els.durationLabel = durationLabel;
+  const commitMasteringSeek = () => seekMasteringPreview(Number(positionInput.value));
+  positionInput.addEventListener('change', commitMasteringSeek);
+  positionInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    commitMasteringSeek();
+    positionInput.blur();
+  });
+
+  const loopSectionBtn = document.createElement('button');
+  loopSectionBtn.type = 'button';
+  loopSectionBtn.className = 'master-loop-btn';
+  loopSectionBtn.textContent = 'Loop sel';
+  loopSectionBtn.title = 'Drag across the waveform, then loop that section';
+  loopSectionBtn.addEventListener('click', () => {
+    setMasteringLoopMode(MASTERING.loopMode === 'section' ? 'off' : 'section');
+  });
+  MASTERING.els.loopSectionBtn = loopSectionBtn;
+
+  const loopAllBtn = document.createElement('button');
+  loopAllBtn.type = 'button';
+  loopAllBtn.className = 'master-loop-btn';
+  loopAllBtn.textContent = 'Loop all';
+  loopAllBtn.title = 'Loop the complete song during preview';
+  loopAllBtn.addEventListener('click', () => {
+    setMasteringLoopMode(MASTERING.loopMode === 'all' ? 'off' : 'all');
+  });
+  MASTERING.els.loopAllBtn = loopAllBtn;
+
+  const renderBtn = document.createElement('button');
+  renderBtn.type = 'button';
+  renderBtn.textContent = 'Render & export WAV';
+  renderBtn.title = 'Offline render through the chain, measures LUFS/peak, downloads the wav';
+  renderBtn.addEventListener('click', renderMastering);
+
+  const meters = document.createElement('span');
+  meters.className = 'master-meters';
+  meters.title = 'Integrated loudness (BS.1770) and sample peak of the last render — aim near −14 LUFS for streaming';
+  MASTERING.els.meters = meters;
+
+  toolbar.append(
+    sourceInfo,
+    bounceBtn,
+    loadBtn,
+    loadInput,
+    previewBtn,
+    positionBox,
+    loopSectionBtn,
+    loopAllBtn,
+    renderBtn,
+    meters,
+  );
+  panel.appendChild(toolbar);
+
+  const waveWrap = document.createElement('div');
+  waveWrap.className = 'master-wave-wrap';
+  const wave = document.createElement('canvas');
+  wave.className = 'master-wave';
+  wave.title = 'Click to seek · drag to select and loop a section';
+  MASTERING.els.wave = wave;
+  const waveOverlay = document.createElement('canvas');
+  waveOverlay.className = 'master-wave-overlay';
+  MASTERING.els.waveOverlay = waveOverlay;
+  waveWrap.append(wave, waveOverlay);
+  panel.appendChild(waveWrap);
+
+  let waveDrag = null;
+  const waveSecondAt = (clientX) => {
+    const rect = wave.getBoundingClientRect();
+    return clamp((clientX - rect.left) / rect.width, 0, 1) * getMasteringDuration();
+  };
+  wave.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || !MASTERING.source) return;
+    e.preventDefault();
+    wave.setPointerCapture(e.pointerId);
+    waveDrag = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startSec: waveSecondAt(e.clientX),
+      moved: false,
+      previousSelection: MASTERING.loopSelection ? { ...MASTERING.loopSelection } : null,
+    };
+  });
+  wave.addEventListener('pointermove', (e) => {
+    if (!waveDrag || e.pointerId !== waveDrag.pointerId) return;
+    if (Math.abs(e.clientX - waveDrag.startX) >= 4) waveDrag.moved = true;
+    if (!waveDrag.moved) return;
+    const currentSec = waveSecondAt(e.clientX);
+    MASTERING.loopSelection = {
+      start: Math.min(waveDrag.startSec, currentSec),
+      end: Math.max(waveDrag.startSec, currentSec),
+    };
+    updateMasteringTransportUI();
+    drawMasteringOverlay();
+  });
+  wave.addEventListener('pointerup', (e) => {
+    if (!waveDrag || e.pointerId !== waveDrag.pointerId) return;
+    const drag = waveDrag;
+    waveDrag = null;
+    if (wave.hasPointerCapture(e.pointerId)) wave.releasePointerCapture(e.pointerId);
+    if (drag.moved && MASTERING.loopSelection?.end - MASTERING.loopSelection?.start >= 0.05) {
+      setMasteringLoopMode('section');
+      setStatus(
+        `looping ${MASTERING.loopSelection.start.toFixed(2)}–${MASTERING.loopSelection.end.toFixed(2)} s`,
+      );
+    } else {
+      MASTERING.loopSelection = drag.previousSelection;
+      seekMasteringPreview(waveSecondAt(e.clientX));
+    }
+  });
+  wave.addEventListener('pointercancel', (e) => {
+    if (!waveDrag || e.pointerId !== waveDrag.pointerId) return;
+    MASTERING.loopSelection = waveDrag.previousSelection;
+    waveDrag = null;
+    updateMasteringTransportUI();
+    drawMasteringOverlay();
+  });
+
+  const meterCanvas = document.createElement('canvas');
+  meterCanvas.className = 'master-meters-canvas';
+  meterCanvas.title =
+    'Output metering — momentary/short-term LUFS (K-weighted), stereo peaks with hold, phase correlation, comp gain reduction, spectrum';
+  MASTERING.els.meterCanvas = meterCanvas;
+  panel.appendChild(meterCanvas);
+
+  const controls = document.createElement('div');
+  controls.className = 'master-controls';
+  MASTERING.els.controls = controls;
+
+  const sections = { eq: buildMasteringEqSection() };
+  MASTERING_CONTROL_SPECS.forEach(({ id, section, controls: specs }) => {
+    const box = document.createElement('div');
+    box.className = 'master-section';
+    box.dataset.module = id;
+    const label = document.createElement('div');
+    label.className = 'master-section-label';
+    label.textContent = section;
+    label.prepend(makeMasteringModulePower(id, box));
+    box.appendChild(label);
+    if (id === 'opto') {
+      // 2A (slow, creamy) / 3A (faster, firmer) character switch.
+      const modeGroup = document.createElement('div');
+      modeGroup.className = 'master-opto-modes';
+      ['2a', '3a'].forEach((mode) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = mode.toUpperCase();
+        btn.classList.toggle('active', MASTERING.params.optoMode === mode);
+        btn.addEventListener('click', () => {
+          MASTERING.params.optoMode = mode;
+          modeGroup
+            .querySelectorAll('button')
+            .forEach((b) => b.classList.toggle('active', b === btn));
+          applyMasteringParams(MASTERING.preview?.chain);
+        });
+        modeGroup.appendChild(btn);
+      });
+      label.appendChild(modeGroup);
+    }
+    specs.forEach((spec) => {
+      const row = makeControlRow(spec, MASTERING.params[spec.key], (v) => {
+        MASTERING.params[spec.key] = v;
+        applyMasteringParams(MASTERING.preview?.chain);
+      });
+      box.appendChild(row);
+    });
+    sections[id] = box;
+  });
+  getMasteringOrder().forEach((id) => controls.appendChild(sections[id]));
+
+  // Reorder by dragging a section's label; the audio chain follows the DOM
+  // order (output trim always stays last).
+  Object.values(sections).forEach((box) => {
+    const label = box.querySelector('.master-section-label');
+    label.draggable = true;
+    label.addEventListener('dragstart', (e) => {
+      box.classList.add('dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        try {
+          e.dataTransfer.setData('text/plain', box.dataset.module);
+        } catch (_) {}
+      }
+    });
+    label.addEventListener('dragend', () => {
+      box.classList.remove('dragging');
+      const order = [...controls.querySelectorAll('.master-section')].map(
+        (el) => el.dataset.module,
+      );
+      if (order.join() !== getMasteringOrder().join()) {
+        MASTERING.params.order = order;
+        rebuildMasteringPreviewChain();
+        setStatus(`master chain: ${order.join(' → ')}`);
+      }
+    });
+  });
+  controls.addEventListener('dragover', (e) => {
+    const dragging = controls.querySelector('.master-section.dragging');
+    if (!dragging) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    const others = [...controls.querySelectorAll('.master-section:not(.dragging)')];
+    const after = others.find((el) => {
+      const rect = el.getBoundingClientRect();
+      return e.clientX < rect.left + rect.width / 2;
+    });
+    if (!after) controls.appendChild(dragging);
+    else if (after !== dragging) controls.insertBefore(dragging, after);
+  });
+
+  panel.appendChild(controls);
+
+  refreshMasteringSourceUI();
+  drawMasteringEq();
+}
+
+function enterMasteringView() {
+  buildMasterPanel();
+  refreshMasteringSourceUI();
+  drawMasteringEq(); // re-entry redraw: theme or window size may have changed
+  if (!MASTERING.preview) drawMasteringMetersIdle();
+}
+
+function leaveMasteringView() {
+  if (!MASTERING.built) return;
+  stopMasteringPreview();
+  // Suspend (not close) so re-entry is instant; a suspended context costs
+  // nothing per-frame.
+  MASTERING.ctx?.suspend?.();
+}
+
+const PANEL_VIEWS = ['front', 'back', 'visual', 'master'];
+
 function setPanelView(mode) {
   UI_VIEW.mode = mode;
+  // Mirror the view into the URL so a refresh lands back on the same panel;
+  // the default front view keeps the URL clean.
+  try {
+    const url = new URL(window.location);
+    if (mode === 'front') url.searchParams.delete('view');
+    else url.searchParams.set('view', mode);
+    history.replaceState(null, '', url);
+  } catch (e) {}
   document.getElementById('loopStrip')?.classList.toggle('hidden-panel', mode !== 'front');
   getFrontWorkspace()?.classList.toggle('hidden-panel', mode !== 'front');
   getBackPanel()?.classList.toggle('hidden-panel', mode !== 'back');
   document.getElementById('visualPanel')?.classList.toggle('hidden-panel', mode !== 'visual');
+  document.getElementById('masterPanel')?.classList.toggle('hidden-panel', mode !== 'master');
   getViewToggle()
     ?.querySelectorAll('.view-btn')
     .forEach((btn) => btn.classList.toggle('active', btn.dataset.view === mode));
+  if (mode === 'master') enterMasteringView();
+  else leaveMasteringView();
   if (mode === 'back') {
     refreshBackPanelState();
     rebuildBackWireSVG();
@@ -8706,6 +10710,7 @@ function capturePreset() {
       })),
     },
     kickSc: { release: KICK_SC.release, amount: KICK_SC.amount },
+    mastering: JSON.parse(JSON.stringify(MASTERING.params)),
     mappings: [...lfoMappings.values()].map(({ genIdx, key, sourceIdx }) => ({
       genIdx,
       key,
@@ -8901,6 +10906,7 @@ function applyPreset(preset, { resetSources = true } = {}) {
   sendParams(1);
   applyGen3Modulation();
   applyFxModulation();
+  applyMasteringPreset(preset.mastering || null);
   refreshBackPanelState();
 }
 
@@ -9960,10 +11966,20 @@ window.addEventListener('beforeunload', () => {
   writeAutosave();
   flushAutosaveAudio();
 });
-setPanelView('front');
+{
+  // Restore the panel a refresh happened on (?view=master etc.).
+  const requestedView = new URLSearchParams(window.location.search).get('view');
+  setPanelView(PANEL_VIEWS.includes(requestedView) ? requestedView : 'front');
+}
 
 window.addEventListener('resize', () => {
   if (UI_VIEW.mode === 'back') rebuildBackWireSVG();
+  if (UI_VIEW.mode === 'master' && MASTERING.built) {
+    drawMasteringWave();
+    drawMasteringOverlay();
+    drawMasteringEq();
+    if (!MASTERING.preview) drawMasteringMetersIdle();
+  }
 });
 
 window.addEventListener('keydown', (event) => {

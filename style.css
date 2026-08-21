@@ -152,6 +152,255 @@ main {
   gap: 4px;
 }
 
+/* ── Mastering view ─────────────────────────────────────────── */
+
+.master-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.master-panel.hidden-panel {
+  display: none;
+}
+
+.master-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.master-source-info {
+  font-size: 10px;
+  color: var(--muted);
+  margin-right: auto;
+}
+
+.master-meters {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-0);
+}
+
+.master-position-box {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.master-position-input {
+  width: 58px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: right;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.master-position-input::-webkit-inner-spin-button,
+.master-position-input::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.master-loop-btn.active {
+  color: var(--surface);
+  border-color: var(--accent-0);
+  background: var(--accent-0);
+}
+
+.master-wave-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.master-wave {
+  display: block;
+  width: 100%;
+  height: 90px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+
+.master-wave-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.master-meters-canvas {
+  display: block;
+  width: 100%;
+  height: 140px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+
+.master-controls {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.master-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  min-width: 150px;
+}
+
+.master-section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: grab;
+}
+
+.master-section.dragging {
+  opacity: 0.4;
+}
+
+.master-section-eq {
+  min-width: 280px;
+}
+
+.master-eq-canvas {
+  width: 280px;
+  height: 130px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  touch-action: none;
+}
+
+.master-power {
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.master-power.active {
+  background: var(--accent-0);
+  border-color: var(--accent-0);
+}
+
+.master-section.bypassed > :not(.master-section-label) {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.master-opto-modes {
+  display: flex;
+  gap: 3px;
+}
+
+.master-opto-modes button {
+  padding: 2px 6px;
+  font-size: 7px;
+}
+
+.master-opto-modes button.active {
+  background: var(--accent-0-dim);
+  border-color: var(--accent-0);
+  color: #fff;
+}
+
+.master-eq-readout {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.master-eq-q,
+.master-eq-gain {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 34px 22px;
+  align-items: center;
+  gap: 7px;
+  height: 18px;
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.master-eq-q input,
+.master-eq-gain input {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--accent-fx);
+}
+
+.master-eq-q output,
+.master-eq-gain output {
+  color: var(--text);
+  text-align: right;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+.master-eq-param-spacer {
+  width: 22px;
+}
+
+.master-eq-solo {
+  width: 22px;
+  min-width: 22px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+  font-size: 8px;
+}
+
+.master-eq-solo.active {
+  color: var(--surface);
+  border-color: var(--accent-fx);
+  background: var(--accent-fx);
+}
+
 .bounce-btn.active {
   color: var(--accent-fx);
   border-color: var(--accent-fx);
@@ -2988,6 +3237,7 @@ button:disabled {
   min-width: 0;
   display: flex;
   align-items: center;
+  align-self: stretch;
   gap: 4px;
   padding: 0 10px;
   overflow-x: auto;
@@ -3109,9 +3359,40 @@ button:disabled {
   align-items: center;
   gap: 4px;
   overflow-x: auto;
-  min-height: 24px;
+  align-self: stretch;
   flex: 1;
   min-width: 0;
+}
+
+/* The loop/song strips live inside the 36px header — the native horizontal
+   scrollbar is taller than the free space and paints over the blocks, so
+   both get a slim thumb-only bar hugging the bottom edge instead. */
+.loops-bar,
+.song-blocks {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  overscroll-behavior-x: contain;
+}
+
+.loops-bar::-webkit-scrollbar,
+.song-blocks::-webkit-scrollbar {
+  height: 3px;
+}
+
+.loops-bar::-webkit-scrollbar-track,
+.song-blocks::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.loops-bar::-webkit-scrollbar-thumb,
+.song-blocks::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+.loops-bar::-webkit-scrollbar-thumb:hover,
+.song-blocks::-webkit-scrollbar-thumb:hover {
+  background: #5a5a5a;
 }
 
 .song-block {
