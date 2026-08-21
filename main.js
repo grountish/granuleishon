@@ -7967,18 +7967,28 @@ const MASTERING = {
     lowGain: 0,
     lowFreq: 120,
     lowQ: 0.7,
+    lowDynThresh: 0,
+    lowDynRange: 0,
     lowMidGain: 0,
     lowMidFreq: 350,
     lowMidQ: 1,
+    lowMidDynThresh: 0,
+    lowMidDynRange: 0,
     midGain: 0,
     midFreq: 900,
     midQ: 0.7,
+    midDynThresh: 0,
+    midDynRange: 0,
     highMidGain: 0,
     highMidFreq: 3000,
     highMidQ: 1,
+    highMidDynThresh: 0,
+    highMidDynRange: 0,
     highGain: 0,
     highFreq: 8000,
     highQ: 0.7,
+    highDynThresh: 0,
+    highDynRange: 0,
     compThreshold: -18,
     compRatio: 2,
     compAttack: 0.03,
@@ -7994,19 +8004,29 @@ const MASTERING = {
     excTune: 3000,
     excHarmonics: 0,
     excMix: 0,
+    ottDepth: 0,
+    ottTime: 1,
+    ottIn: 0,
+    ottOut: 0,
+    ottLow: 0,
+    ottMid: 0,
+    ottHigh: 0,
+    levelerGain: 0, // input trim — always the first thing the signal meets
     width: 1,
     widthBassFreq: 0, // 0 = full-range; raise it to keep lows mono when widening
-    enabled: { eq: true, opto: true, comp: true, tape: true, exciter: true, width: true, limit: true },
+    enabled: { eq: true, opto: true, comp: true, ott: true, tape: true, exciter: true, width: true, limit: true },
     drive: 0,
     ceiling: -1,
     outGain: 0,
-    order: ['eq', 'opto', 'comp', 'tape', 'exciter', 'width', 'limit'],
+    order: ['eq', 'opto', 'comp', 'ott', 'tape', 'exciter', 'width', 'limit'],
   },
   ctx: null, // preview AudioContext — created on demand, suspended on view exit
   preview: null, // { srcNode, chain, analysers, startAt, duration }
   previewBuffer: null, // AudioBuffer cache for the current source
   renderedPeaks: null, // decimated min/max envelope of the last offline render
   vizFrame: null, // rAF id — only ever set while preview is playing
+  meterHover: null, // { x, y } in CSS px over the meter canvas, null when pointer is outside
+  eqHover: null, // { x, y } in CSS px over the EQ canvas, null when pointer is outside
   eqBandIndex: 0,
   eqSolo: false,
   playheadSec: 0,
@@ -8053,42 +8073,94 @@ function setMasteringSource(left, right, sampleRate, name) {
   }
 }
 
-const MASTERING_MODULE_IDS = ['eq', 'opto', 'comp', 'tape', 'exciter', 'width', 'limit'];
+const MASTERING_MODULE_IDS = ['eq', 'opto', 'comp', 'ott', 'tape', 'exciter', 'width', 'limit'];
 
+// Keeps whatever saved order is valid and appends any modules it doesn't know
+// yet, so an order saved before a module existed survives the upgrade.
 function getMasteringOrder() {
-  const order = MASTERING.params.order;
-  const valid =
-    Array.isArray(order) &&
-    order.length === MASTERING_MODULE_IDS.length &&
-    MASTERING_MODULE_IDS.every((id) => order.includes(id));
-  return valid ? order : [...MASTERING_MODULE_IDS];
+  const saved = Array.isArray(MASTERING.params.order) ? MASTERING.params.order : [];
+  const seen = new Set();
+  const order = [];
+  saved.concat(MASTERING_MODULE_IDS).forEach((id) => {
+    if (MASTERING_MODULE_IDS.includes(id) && !seen.has(id)) {
+      seen.add(id);
+      order.push(id);
+    }
+  });
+  return order;
 }
 
 // Chain shared by preview and offline render — ctx-agnostic node builder.
 // Three modules (eq / comp / limit) wired in the user's order, output trim
 // always last.
-function buildMasteringChain(ctx, { eqSolo = MASTERING.eqSolo } = {}) {
-  const low = ctx.createBiquadFilter();
-  low.type = 'peaking';
-  const lowMid = ctx.createBiquadFilter();
-  lowMid.type = 'peaking';
-  const mid = ctx.createBiquadFilter();
-  mid.type = 'peaking';
-  const highMid = ctx.createBiquadFilter();
-  highMid.type = 'peaking';
-  const high = ctx.createBiquadFilter();
-  high.type = 'peaking';
-  low.connect(lowMid);
-  lowMid.connect(mid);
-  mid.connect(highMid);
-  highMid.connect(high);
+// Contexts whose audioWorklet has the dynamic-EQ module loaded. Await
+// ensureMasteringEqModule(ctx) before the first buildMasteringChain on a ctx;
+// if loading failed the builder silently falls back to static biquads.
+const masteringEqModuleCtxs = new WeakSet();
 
-  let eqOutput = high;
+async function ensureMasteringEqModule(ctx) {
+  if (masteringEqModuleCtxs.has(ctx)) return;
+  try {
+    await Promise.all([
+      ctx.audioWorklet.addModule(workletUrl('dynamic-eq-processor.js')),
+      ctx.audioWorklet.addModule(workletUrl('ott-processor.js')),
+    ]);
+    masteringEqModuleCtxs.add(ctx);
+  } catch (e) {}
+}
+
+function buildMasteringChain(ctx, { eqSolo = MASTERING.eqSolo, bypassAll = MASTERING.bypassAll } = {}) {
+  // EQ: the dynamic-EQ worklet when its module is loaded on this ctx,
+  // otherwise five static peaking biquads.
+  let dynEq = null;
+  let low = null;
+  let lowMid = null;
+  let mid = null;
+  let highMid = null;
+  let high = null;
+  let eqInput;
+  let eqTail;
+  if (masteringEqModuleCtxs.has(ctx)) {
+    dynEq = new AudioWorkletNode(ctx, 'dynamic-eq-processor', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+    });
+    if (ctx === MASTERING.ctx) {
+      dynEq.port.onmessage = (e) => {
+        if (e.data?.liveGains) {
+          MASTERING.liveEqGains = e.data.liveGains;
+          MASTERING.liveEqDirty = true;
+        }
+      };
+    }
+    eqInput = dynEq;
+    eqTail = dynEq;
+  } else {
+    low = ctx.createBiquadFilter();
+    low.type = 'peaking';
+    lowMid = ctx.createBiquadFilter();
+    lowMid.type = 'peaking';
+    mid = ctx.createBiquadFilter();
+    mid.type = 'peaking';
+    highMid = ctx.createBiquadFilter();
+    highMid.type = 'peaking';
+    high = ctx.createBiquadFilter();
+    high.type = 'peaking';
+    low.connect(lowMid);
+    lowMid.connect(mid);
+    mid.connect(highMid);
+    highMid.connect(high);
+    eqInput = low;
+    eqTail = high;
+  }
+
+  let eqOutput = eqTail;
   let eqAudition = null;
   if (eqSolo) {
     eqAudition = ctx.createBiquadFilter();
     eqAudition.type = 'bandpass';
-    high.connect(eqAudition);
+    eqTail.connect(eqAudition);
     eqOutput = eqAudition;
   }
 
@@ -8181,6 +8253,18 @@ function buildMasteringChain(ctx, { eqSolo = MASTERING.eqSolo } = {}) {
   widthOutL.connect(widthMerge, 0, 0);
   widthOutR.connect(widthMerge, 0, 1);
 
+  // OTT: 3-band up/down compression worklet; a plain gain stands in (bit-
+  // transparent, matching depth 0) if the worklet module isn't available.
+  let ott = null;
+  if (masteringEqModuleCtxs.has(ctx)) {
+    ott = new AudioWorkletNode(ctx, 'ott-processor', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+    });
+  }
+  const ottNode = ott || ctx.createGain();
+
   const drive = ctx.createGain();
   const preClip = ctx.createGain();
   const clip = ctx.createWaveShaper();
@@ -8191,7 +8275,8 @@ function buildMasteringChain(ctx, { eqSolo = MASTERING.eqSolo } = {}) {
   clip.connect(postClip);
 
   const modules = {
-    eq: { input: low, output: eqOutput },
+    eq: { input: eqInput, output: eqOutput },
+    ott: { input: ottNode, output: ottNode },
     opto: { input: optoComp, output: optoMakeup },
     comp: { input: comp, output: makeup },
     tape: { input: tapeIn, output: tapeLevel },
@@ -8201,8 +8286,12 @@ function buildMasteringChain(ctx, { eqSolo = MASTERING.eqSolo } = {}) {
   };
   const out = ctx.createGain();
   const chainIn = ctx.createGain();
-  // True bypass: disabled modules are left out of the path entirely.
-  const active = getMasteringOrder().filter((id) => MASTERING.params.enabled?.[id] !== false);
+  // True bypass: disabled modules are left out of the path entirely. Global
+  // bypass short-circuits everything — leveler included (chainIn stays at
+  // unity via applyMasteringParams).
+  const active = bypassAll
+    ? []
+    : getMasteringOrder().filter((id) => MASTERING.params.enabled?.[id] !== false);
   let prevOut = chainIn;
   active.forEach((id) => {
     prevOut.connect(modules[id].input);
@@ -8213,13 +8302,17 @@ function buildMasteringChain(ctx, { eqSolo = MASTERING.eqSolo } = {}) {
   const chain = {
     input: chainIn,
     output: out,
+    bypassAll,
     nodes: {
+      chainIn,
       low,
       lowMid,
       mid,
       highMid,
       high,
       eqAudition,
+      dynEq,
+      ott,
       optoComp,
       optoMakeup,
       comp,
@@ -8304,21 +8397,34 @@ function applyMasteringParams(chain) {
   if (!chain) return;
   const p = MASTERING.params;
   const n = chain.nodes;
-  n.low.frequency.value = p.lowFreq;
-  n.low.gain.value = p.lowGain;
-  n.low.Q.value = p.lowQ;
-  n.lowMid.frequency.value = p.lowMidFreq;
-  n.lowMid.gain.value = p.lowMidGain;
-  n.lowMid.Q.value = p.lowMidQ;
-  n.mid.frequency.value = p.midFreq;
-  n.mid.gain.value = p.midGain;
-  n.mid.Q.value = p.midQ;
-  n.highMid.frequency.value = p.highMidFreq;
-  n.highMid.gain.value = p.highMidGain;
-  n.highMid.Q.value = p.highMidQ;
-  n.high.frequency.value = p.highFreq;
-  n.high.gain.value = p.highGain;
-  n.high.Q.value = p.highQ;
+  if (n.chainIn) n.chainIn.gain.value = chain.bypassAll ? 1 : dbToLin(p.levelerGain);
+  if (n.dynEq) {
+    n.dynEq.port.postMessage({
+      bands: MASTERING_EQ_BANDS.map((band) => ({
+        freq: p[band.freqKey],
+        gain: p[band.gainKey],
+        q: p[band.qKey],
+        thresh: p[band.threshKey],
+        range: p[band.rangeKey],
+      })),
+    });
+  } else if (n.low) {
+    n.low.frequency.value = p.lowFreq;
+    n.low.gain.value = p.lowGain;
+    n.low.Q.value = p.lowQ;
+    n.lowMid.frequency.value = p.lowMidFreq;
+    n.lowMid.gain.value = p.lowMidGain;
+    n.lowMid.Q.value = p.lowMidQ;
+    n.mid.frequency.value = p.midFreq;
+    n.mid.gain.value = p.midGain;
+    n.mid.Q.value = p.midQ;
+    n.highMid.frequency.value = p.highMidFreq;
+    n.highMid.gain.value = p.highMidGain;
+    n.highMid.Q.value = p.highMidQ;
+    n.high.frequency.value = p.highFreq;
+    n.high.gain.value = p.highGain;
+    n.high.Q.value = p.highQ;
+  }
   if (n.eqAudition) {
     const band = MASTERING_EQ_BANDS[MASTERING.eqBandIndex] || MASTERING_EQ_BANDS[0];
     n.eqAudition.frequency.value = p[band.freqKey];
@@ -8346,6 +8452,15 @@ function applyMasteringParams(chain) {
     n.tapeBump.gain.value = p.tapeBump;
     n.tapeRoll.frequency.value = Math.min(p.tapeRolloff * 1000, 20000);
     n.tapeLevel.gain.value = dbToLin(p.tapeLevel);
+  }
+  if (n.ott) {
+    n.ott.port.postMessage({
+      depth: p.ottDepth / 100,
+      time: p.ottTime,
+      inGain: p.ottIn,
+      outGain: p.ottOut,
+      bandGains: [p.ottLow, p.ottMid, p.ottHigh],
+    });
   }
   if (n.excHp) {
     n.excHp.frequency.value = p.excTune;
@@ -8479,7 +8594,12 @@ function stopMasteringPreview({ preservePosition = true } = {}) {
     MASTERING.vizFrame = null;
   }
   destroyMasteringMeter();
-  if (MASTERING.built) drawMasteringMetersIdle();
+  MASTERING.liveEqGains = null;
+  MASTERING.liveEqDirty = false;
+  if (MASTERING.built) {
+    drawMasteringMetersIdle();
+    drawMasteringEq(); // drop the live dots
+  }
   MASTERING.preview = null;
   if (pv) {
     try {
@@ -8636,6 +8756,31 @@ function updatePeakBallistics(meter, key, holdKey, framePeak, dt, now) {
   }
 }
 
+function formatMeterHz(f) {
+  return f < 1000 ? `${Math.round(f)} Hz` : `${(f / 1000).toFixed(f >= 10000 ? 1 : 2)} kHz`;
+}
+
+// Cursor frequency readout over the spectrum area — spectrum shares the EQ's log axis.
+function drawMeterHoverFreq(g, w, specH, col) {
+  const hov = MASTERING.meterHover;
+  if (!hov || hov.y > specH) return;
+  const f = eqXToFreq(hov.x, w);
+  g.strokeStyle = col;
+  g.globalAlpha = 0.4;
+  g.beginPath();
+  g.moveTo(Math.round(hov.x) + 0.5, 0);
+  g.lineTo(Math.round(hov.x) + 0.5, specH);
+  g.stroke();
+  g.globalAlpha = 1;
+  g.font = '8px ui-monospace, monospace';
+  const lbl = formatMeterHz(f);
+  const tw = g.measureText(lbl).width;
+  const tx = hov.x + 5 + tw > w - 2 ? hov.x - tw - 5 : hov.x + 5;
+  const ty = clamp(hov.y, 22, specH - 4);
+  g.fillStyle = col;
+  g.fillText(lbl, tx, ty);
+}
+
 function drawMasteringMeters(pv) {
   const canvas = MASTERING.els.meterCanvas;
   const meter = MASTERING.meter;
@@ -8696,6 +8841,7 @@ function drawMasteringMeters(pv) {
   [[100, '100'], [1000, '1k'], [10000, '10k']].forEach(([f, lbl]) => {
     g.fillText(lbl, eqFreqToX(f, w) + 2, specH - 3);
   });
+  drawMeterHoverFreq(g, w, specH, accentFx);
 
   // ── Loudness / correlation / gain-reduction readout ──
   const momentary = meterWindowLufs(meter, 0.4);
@@ -8774,11 +8920,13 @@ function drawMasteringMetersIdle() {
   const g = canvas.getContext('2d');
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
-  const mutedCol =
-    getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#5a5a5a';
+  const styles = getComputedStyle(document.documentElement);
+  const mutedCol = styles.getPropertyValue('--muted').trim() || '#5a5a5a';
   g.fillStyle = mutedCol;
   g.font = '9px ui-monospace, monospace';
   g.fillText('meters run during preview — M/S LUFS · peaks · correlation · spectrum · GR', 8, 14);
+  const accentFx = styles.getPropertyValue('--accent-fx').trim() || '#d4892a';
+  drawMeterHoverFreq(g, w, h - 46, accentFx);
 }
 
 // Per-frame output viz — runs ONLY while preview plays.
@@ -8788,6 +8936,8 @@ function masteringVizTick() {
   if (!pv || !MASTERING.ctx) return;
   drawMasteringOverlay();
   drawMasteringMeters(pv);
+  MASTERING.liveEqDirty = false;
+  drawMasteringEq(); // spectrum backdrop + live per-band gain dots move with the music
   MASTERING.vizFrame = requestAnimationFrame(masteringVizTick);
 }
 
@@ -8815,6 +8965,7 @@ async function startMasteringPreview(offsetSec = MASTERING.playheadSec) {
   if (!MASTERING.ctx) MASTERING.ctx = new AudioContext();
   const ctx = MASTERING.ctx;
   if (ctx.state === 'suspended') await ctx.resume();
+  await ensureMasteringEqModule(ctx);
   const duration = getMasteringDuration();
   const loopBounds = getMasteringLoopBounds();
   let offset = clamp(offsetSec, 0, duration);
@@ -8923,11 +9074,14 @@ async function renderMastering() {
   setStatus('rendering master…');
   const tail = Math.round(s.sampleRate * 0.05);
   const oc = new OfflineAudioContext(2, s.left.length + tail, s.sampleRate);
+  await ensureMasteringEqModule(oc);
   const buf = oc.createBuffer(2, s.left.length, s.sampleRate);
   buf.getChannelData(0).set(s.left);
   buf.getChannelData(1).set(s.right);
   // Band solo is an audition aid and must never be printed into the master.
-  const chain = buildMasteringChain(oc, { eqSolo: false });
+  // The export always renders the processed chain — global bypass is a
+  // listening A/B tool, not a render mode.
+  const chain = buildMasteringChain(oc, { eqSolo: false, bypassAll: false });
   const srcNode = oc.createBufferSource();
   srcNode.buffer = buf;
   srcNode.connect(chain.input);
@@ -9139,6 +9293,19 @@ const MASTERING_CONTROL_SPECS = [
     ],
   },
   {
+    id: 'ott',
+    section: 'OTT',
+    controls: [
+      { key: 'ottDepth', label: 'Depth', min: 0, max: 100, step: 1, unit: '%' },
+      { key: 'ottTime', label: 'Time', min: 0.33, max: 3, step: 0.01, unit: 'x' },
+      { key: 'ottIn', label: 'In', min: -12, max: 12, step: 0.5, unit: 'dB' },
+      { key: 'ottOut', label: 'Out', min: -12, max: 12, step: 0.5, unit: 'dB' },
+      { key: 'ottLow', label: 'Low', min: -12, max: 12, step: 0.5, unit: 'dB' },
+      { key: 'ottMid', label: 'Mid', min: -12, max: 12, step: 0.5, unit: 'dB' },
+      { key: 'ottHigh', label: 'High', min: -12, max: 12, step: 0.5, unit: 'dB' },
+    ],
+  },
+  {
     id: 'tape',
     section: 'Tape',
     controls: [
@@ -9183,15 +9350,19 @@ const MASTERING_CONTROL_SPECS = [
 const MASTERING_EQ_BANDS = [
   {
     gainKey: 'lowGain',
+    threshKey: 'lowDynThresh',
+    rangeKey: 'lowDynRange',
     freqKey: 'lowFreq',
     qKey: 'lowQ',
     label: 'LOW',
-    fmin: 30,
+    fmin: 20,
     fmax: 300,
     defaultQ: 0.7,
   },
   {
     gainKey: 'lowMidGain',
+    threshKey: 'lowMidDynThresh',
+    rangeKey: 'lowMidDynRange',
     freqKey: 'lowMidFreq',
     qKey: 'lowMidQ',
     label: 'LOW MID',
@@ -9201,6 +9372,8 @@ const MASTERING_EQ_BANDS = [
   },
   {
     gainKey: 'midGain',
+    threshKey: 'midDynThresh',
+    rangeKey: 'midDynRange',
     freqKey: 'midFreq',
     qKey: 'midQ',
     label: 'MID',
@@ -9210,6 +9383,8 @@ const MASTERING_EQ_BANDS = [
   },
   {
     gainKey: 'highMidGain',
+    threshKey: 'highMidDynThresh',
+    rangeKey: 'highMidDynRange',
     freqKey: 'highMidFreq',
     qKey: 'highMidQ',
     label: 'HIGH MID',
@@ -9219,6 +9394,8 @@ const MASTERING_EQ_BANDS = [
   },
   {
     gainKey: 'highGain',
+    threshKey: 'highDynThresh',
+    rangeKey: 'highDynRange',
     freqKey: 'highFreq',
     qKey: 'highQ',
     label: 'HIGH',
@@ -9342,6 +9519,59 @@ function drawMasteringEq() {
     g.fillText(lbl, eqFreqToX(f, w) + 2, h - 3);
   });
 
+  // Live output spectrum behind the curves — analyser data is refreshed by
+  // drawMasteringMeters earlier in the same viz frame, so reuse it for free.
+  const pv = MASTERING.preview;
+  const meter = MASTERING.meter;
+  if (pv?.analysers && meter?.freq0 && MASTERING.ctx) {
+    const binHz = MASTERING.ctx.sampleRate / 2 / pv.analysers[0].frequencyBinCount;
+    g.beginPath();
+    g.moveTo(0, h);
+    for (let x = 0; x <= w; x += 2) {
+      const f = eqXToFreq(x, w);
+      const bin = clamp(Math.round(f / binHz), 0, meter.freq0.length - 1);
+      const db = (meter.freq0[bin] + meter.freq1[bin]) / 2;
+      const norm = clamp((db + 90) / 80, 0, 1);
+      g.lineTo(x, h - norm * (h - 8));
+    }
+    g.lineTo(w, h);
+    g.closePath();
+    g.fillStyle = mutedCol;
+    g.globalAlpha = 0.18;
+    g.fill();
+    g.globalAlpha = 1;
+  }
+
+  // Selected band's own response — tinted fill against the 0 dB line.
+  const selBand = MASTERING_EQ_BANDS[MASTERING.eqBandIndex];
+  if (selBand) {
+    const coeffs = rbjPeaking(
+      EQ_DISPLAY_SR,
+      MASTERING.params[selBand.freqKey],
+      MASTERING.params[selBand.gainKey],
+      MASTERING.params[selBand.qKey],
+    );
+    const y0 = eqDbToY(0, h);
+    const selCol = bandCols[MASTERING.eqBandIndex] || bandCols[0];
+    g.beginPath();
+    g.moveTo(0, y0);
+    for (let i = 0; i <= 120; i++) {
+      const f = EQ_FMIN * Math.pow(EQ_FMAX / EQ_FMIN, i / 120);
+      const db = clamp(biquadMagnitudeDb(coeffs, f, EQ_DISPLAY_SR), -EQ_DB_RANGE, EQ_DB_RANGE);
+      g.lineTo(eqFreqToX(f, w), eqDbToY(db, h));
+    }
+    g.lineTo(w, y0);
+    g.closePath();
+    g.fillStyle = selCol;
+    g.globalAlpha = 0.12;
+    g.fill();
+    g.globalAlpha = 0.5;
+    g.strokeStyle = selCol;
+    g.lineWidth = 1;
+    g.stroke();
+    g.globalAlpha = 1;
+  }
+
   // Combined response curve.
   g.strokeStyle = bandCols[0];
   g.lineWidth = 1.5;
@@ -9359,6 +9589,32 @@ function drawMasteringEq() {
   MASTERING_EQ_BANDS.forEach((band, bi) => {
     const x = eqFreqToX(MASTERING.params[band.freqKey], w);
     const y = eqDbToY(MASTERING.params[band.gainKey], h);
+    const range = MASTERING.params[band.rangeKey] || 0;
+    if (range > 0) {
+      // Dynamic range indicator: how far the band can be pulled down.
+      const yLow = eqDbToY(
+        clamp(MASTERING.params[band.gainKey] - range, -EQ_DB_RANGE, EQ_DB_RANGE),
+        h,
+      );
+      g.strokeStyle = bandCols[bi];
+      g.globalAlpha = 0.45;
+      g.lineWidth = 3;
+      g.beginPath();
+      g.moveTo(x, y);
+      g.lineTo(x, yLow);
+      g.stroke();
+      g.globalAlpha = 1;
+      g.lineWidth = 1;
+      // Live effective gain while previewing — the moving part.
+      const live = MASTERING.liveEqGains?.[bi];
+      if (MASTERING.preview && typeof live === 'number') {
+        const ly = eqDbToY(clamp(live, -EQ_DB_RANGE, EQ_DB_RANGE), h);
+        g.fillStyle = bandCols[bi];
+        g.beginPath();
+        g.arc(x, ly, 2.5, 0, Math.PI * 2);
+        g.fill();
+      }
+    }
     if (bi === MASTERING.eqBandIndex) {
       g.strokeStyle = bandCols[bi];
       g.lineWidth = 1.5;
@@ -9374,6 +9630,28 @@ function drawMasteringEq() {
     g.lineWidth = 1;
     g.stroke();
   });
+
+  // Cursor readout — freq/gain at the pointer while hovering.
+  const hov = MASTERING.eqHover;
+  if (hov) {
+    const f = eqXToFreq(hov.x, w);
+    const db = eqYToDb(hov.y, h);
+    g.strokeStyle = mutedCol;
+    g.globalAlpha = 0.5;
+    g.setLineDash([3, 3]);
+    g.beginPath();
+    g.moveTo(Math.round(hov.x) + 0.5, 0);
+    g.lineTo(Math.round(hov.x) + 0.5, h);
+    g.stroke();
+    g.setLineDash([]);
+    g.globalAlpha = 1;
+    g.font = '8px ui-monospace, monospace';
+    const lbl = `${formatMeterHz(f)} · ${db >= 0 ? '+' : ''}${db.toFixed(1)} dB`;
+    const tw = g.measureText(lbl).width;
+    const tx = hov.x + 6 + tw > w - 2 ? hov.x - tw - 6 : hov.x + 6;
+    g.fillStyle = styles.getPropertyValue('--text').trim() || '#ddd';
+    g.fillText(lbl, tx, clamp(hov.y - 6, 10, h - 14));
+  }
 }
 
 function setMasteringEqReadout(band) {
@@ -9435,6 +9713,16 @@ function rebuildMasterPanelUI() {
   }
 }
 
+// Grip dots: pure affordance — the whole label is the drag handle, this just
+// makes that discoverable.
+function makeMasteringDragGrip() {
+  const grip = document.createElement('span');
+  grip.className = 'master-drag-grip';
+  grip.textContent = '⠿';
+  grip.setAttribute('aria-hidden', 'true');
+  return grip;
+}
+
 // Power toggle for one chain module: true bypass via a chain rebuild, so an
 // off module costs nothing and colors nothing.
 function makeMasteringModulePower(id, box) {
@@ -9464,6 +9752,8 @@ function buildMasteringEqSection() {
   const label = document.createElement('div');
   label.className = 'master-section-label';
   label.textContent = 'EQ';
+  label.title = 'Drag to reorder the chain';
+  label.prepend(makeMasteringDragGrip());
   label.prepend(makeMasteringModulePower('eq', box));
   const readout = document.createElement('span');
   readout.className = 'master-eq-readout';
@@ -9473,60 +9763,58 @@ function buildMasteringEqSection() {
 
   const canvas = document.createElement('canvas');
   canvas.className = 'master-eq-canvas';
-  canvas.title = 'Drag: ↔ frequency, ↕ gain · select a band to edit Q/gain · double-click to reset';
+  canvas.title =
+    'Drag: ↔ frequency, ↕ gain (shift = fine) · wheel: Q · alt-click / double-click: reset band · type exact values below';
   MASTERING.els.eqCanvas = canvas;
   box.appendChild(canvas);
 
-  const qRow = document.createElement('div');
-  qRow.className = 'master-eq-q';
-  const qLabel = document.createElement('span');
-  qLabel.textContent = 'Q';
-  const qInput = document.createElement('input');
-  qInput.type = 'range';
-  qInput.min = '0.1';
-  qInput.max = '12';
-  qInput.step = '0.05';
-  const qValue = document.createElement('output');
+  // Pro-Q-style band strip: colored chips select a band, the value boxes
+  // below edit it by typing (Enter commits, Esc reverts, ↑↓/wheel nudge).
   const soloBtn = document.createElement('button');
   soloBtn.type = 'button';
   soloBtn.className = 'master-eq-solo';
   soloBtn.textContent = 'S';
   soloBtn.title = 'Solo selected band while previewing';
   soloBtn.classList.toggle('active', MASTERING.eqSolo);
-  qRow.append(qLabel, qInput, qValue, soloBtn);
-  box.appendChild(qRow);
+  const chipRow = document.createElement('div');
+  chipRow.className = 'master-eq-bands';
+  const CHIP_LABELS = ['LOW', 'LM', 'MID', 'HM', 'HI'];
+  const CHIP_COLORS = ['c0', 'c1', 'c2', 'c1', 'c0']; // mirror the canvas band colors
+  const chips = MASTERING_EQ_BANDS.map((band, bi) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = `master-eq-chip ${CHIP_COLORS[bi]}`;
+    chip.textContent = CHIP_LABELS[bi];
+    chip.title = band.label;
+    chip.addEventListener('click', () => selectBand(band));
+    return chip;
+  });
+  chipRow.append(...chips, soloBtn);
+  box.appendChild(chipRow);
 
-  const gainRow = document.createElement('div');
-  gainRow.className = 'master-eq-gain';
-  const gainLabel = document.createElement('span');
-  gainLabel.textContent = 'GAIN';
-  const gainInput = document.createElement('input');
-  gainInput.type = 'range';
-  gainInput.min = `${-EQ_DB_RANGE}`;
-  gainInput.max = `${EQ_DB_RANGE}`;
-  gainInput.step = '0.5';
-  const gainValue = document.createElement('output');
-  const gainSpacer = document.createElement('span');
-  gainSpacer.className = 'master-eq-param-spacer';
-  gainRow.append(gainLabel, gainInput, gainValue, gainSpacer);
-  box.appendChild(gainRow);
+  // Dynamics (THR/RNG): the band's gain is pulled down (up to RNG dB) while
+  // its own energy sits above THR — downward dynamic EQ, off at range 0.
+  const valueRow = document.createElement('div');
+  valueRow.className = 'master-eq-values';
+  box.appendChild(valueRow);
 
   let activeBand = null;
 
   const selectedBand = () => MASTERING_EQ_BANDS[MASTERING.eqBandIndex] || MASTERING_EQ_BANDS[0];
-  const formatEqGain = (gain) => `${gain >= 0 ? '+' : ''}${gain.toFixed(1)}`;
-  const syncBandControls = (band) => {
-    const q = MASTERING.params[band.qKey];
-    const gain = MASTERING.params[band.gainKey];
-    qInput.value = `${q}`;
-    qValue.textContent = q.toFixed(2);
-    gainInput.value = `${gain}`;
-    gainValue.textContent = formatEqGain(gain);
+  const syncBandControls = () => {
+    chips.forEach((chip, ci) => chip.classList.toggle('active', ci === MASTERING.eqBandIndex));
+    Object.values(boxes).forEach((b) => b.show());
+  };
+  const bandChanged = (band) => {
+    applyMasteringParams(MASTERING.preview?.chain);
+    setMasteringEqReadout(band);
+    syncBandControls();
+    drawMasteringEq();
   };
   const selectBand = (band) => {
     const previousIndex = MASTERING.eqBandIndex;
     MASTERING.eqBandIndex = MASTERING_EQ_BANDS.indexOf(band);
-    syncBandControls(band);
+    syncBandControls();
     setMasteringEqReadout(band);
     drawMasteringEq();
     if (MASTERING.eqSolo && previousIndex !== MASTERING.eqBandIndex) {
@@ -9534,25 +9822,216 @@ function buildMasteringEqSection() {
     }
   };
 
-  qInput.addEventListener('input', () => {
-    const band = selectedBand();
-    const q = Number(qInput.value);
-    MASTERING.params[band.qKey] = q;
-    qValue.textContent = q.toFixed(2);
-    applyMasteringParams(MASTERING.preview?.chain);
-    setMasteringEqReadout(band);
-    drawMasteringEq();
-  });
+  const fmtHzInput = (f) =>
+    f >= 1000 ? `${(f / 1000).toFixed(2).replace(/\.?0+$/, '')}k` : `${Math.round(f)}`;
+  const parseHzInput = (raw) => {
+    const s = raw.toLowerCase().replace(/\s|hz/g, '');
+    const n = parseFloat(s.replace('k', ''));
+    if (!Number.isFinite(n)) return NaN;
+    // "1.2k" is explicit; bare values under 20 (below the 20 Hz display floor)
+    // read as kHz, so "12" lands on 12 kHz instead of clamping to a minimum.
+    return s.includes('k') || n < 20 ? n * 1000 : n;
+  };
 
-  gainInput.addEventListener('input', () => {
-    const band = selectedBand();
-    const gain = Number(gainInput.value);
-    MASTERING.params[band.gainKey] = gain;
-    gainValue.textContent = formatEqGain(gain);
-    applyMasteringParams(MASTERING.preview?.chain);
-    setMasteringEqReadout(band);
-    drawMasteringEq();
-  });
+  // Same interaction as the tempo box: the number is readonly so the whole
+  // box is one drag surface (vertical drag with pointer lock, shift = fine);
+  // double-click switches to typing, Enter/blur commits, Esc reverts.
+  const makeValueBox = ({ label, title, get, set, format, parse, nudge, dragStep }) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'master-eq-value';
+    const cap = document.createElement('span');
+    cap.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.spellcheck = false;
+    input.autocomplete = 'off';
+    input.readOnly = true;
+    input.title = title;
+    wrap.append(cap, input);
+    valueRow.appendChild(wrap);
+    const show = () => {
+      if (document.activeElement !== input) input.value = format(get());
+    };
+    const commit = () => {
+      const v = parse(input.value.trim());
+      if (Number.isFinite(v)) {
+        set(v);
+        bandChanged(selectedBand());
+      }
+      input.value = format(get());
+    };
+
+    input.addEventListener('dblclick', () => {
+      input.readOnly = false;
+      input.focus();
+      input.select();
+    });
+    input.addEventListener('blur', () => {
+      commit();
+      input.readOnly = true;
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') input.blur();
+      else if (e.key === 'Escape') {
+        input.value = format(get());
+        input.blur();
+      } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        nudge(e.key === 'ArrowUp' ? 1 : -1, e.shiftKey);
+        bandChanged(selectedBand());
+        input.value = format(get());
+      }
+    });
+    input.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        nudge(e.deltaY < 0 ? 1 : -1, e.shiftKey);
+        bandChanged(selectedBand());
+        show();
+      },
+      { passive: false },
+    );
+
+    let armed = false; // pressed, not yet decided click-vs-drag
+    let dragging = false;
+    let dragVal = 0; // unrounded accumulator — keeps sub-step motion smooth
+    let downY = 0;
+    wrap.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      if (!input.readOnly) return; // typing mode — leave it alone
+      e.preventDefault();
+      armed = true;
+      downY = e.clientY;
+      dragVal = get();
+      wrap.setPointerCapture(e.pointerId);
+    });
+    wrap.addEventListener('pointermove', (e) => {
+      if (!armed && !dragging) return;
+      if (!dragging) {
+        if (Math.abs(e.clientY - downY) < 3) return; // still a click
+        dragging = true;
+        armed = false;
+        wrap.classList.add('dragging');
+        wrap.requestPointerLock?.();
+      }
+      // movementY works locked and unlocked alike; up = increase.
+      dragVal = dragStep(dragVal, -e.movementY, e.shiftKey);
+      set(dragVal);
+      bandChanged(selectedBand());
+      show();
+    });
+    const endDrag = (e) => {
+      armed = false;
+      if (wrap.hasPointerCapture(e.pointerId)) wrap.releasePointerCapture(e.pointerId);
+      if (!dragging) return;
+      dragging = false;
+      wrap.classList.remove('dragging');
+      if (document.pointerLockElement === wrap) document.exitPointerLock();
+    };
+    wrap.addEventListener('pointerup', endDrag);
+    wrap.addEventListener('pointercancel', endDrag);
+
+    return { show };
+  };
+
+  const p = MASTERING.params;
+  const boxes = {
+    freq: makeValueBox({
+      label: 'FREQ',
+      title: 'Band frequency — drag ↕ (shift = fine), double-click to type Hz ("250", "1.2k")',
+      get: () => p[selectedBand().freqKey],
+      set: (v) => {
+        const band = selectedBand();
+        p[band.freqKey] = clamp(Math.round(v), band.fmin, band.fmax);
+      },
+      format: fmtHzInput,
+      parse: parseHzInput,
+      nudge: (dir, big) => {
+        const band = selectedBand();
+        const cur = p[band.freqKey];
+        let next = Math.round(cur * Math.pow(big ? 1.12 : 1.02, dir));
+        if (next === cur) next = cur + dir;
+        p[band.freqKey] = clamp(next, band.fmin, band.fmax);
+      },
+      dragStep: (v, dy, fine) => {
+        const band = selectedBand();
+        return clamp(v * Math.exp(dy * (fine ? 0.0012 : 0.006)), band.fmin, band.fmax);
+      },
+    }),
+    gain: makeValueBox({
+      label: 'GAIN',
+      title: 'Band gain (dB) — drag ↕ (shift = fine), double-click to type',
+      get: () => p[selectedBand().gainKey],
+      set: (v) => {
+        p[selectedBand().gainKey] = clamp(Math.round(v * 10) / 10, -EQ_DB_RANGE, EQ_DB_RANGE);
+      },
+      format: (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}`,
+      parse: (raw) => parseFloat(raw.replace(/db/gi, '')),
+      nudge: (dir, big) => {
+        const band = selectedBand();
+        p[band.gainKey] = clamp(
+          Math.round((p[band.gainKey] + dir * (big ? 1 : 0.1)) * 10) / 10,
+          -EQ_DB_RANGE,
+          EQ_DB_RANGE,
+        );
+      },
+      dragStep: (v, dy, fine) =>
+        clamp(v + dy * (fine ? 0.02 : 0.1), -EQ_DB_RANGE, EQ_DB_RANGE),
+    }),
+    q: makeValueBox({
+      label: 'Q',
+      title: 'Band Q — drag ↕, double-click to type · also: wheel over the curve display',
+      get: () => p[selectedBand().qKey],
+      set: (v) => {
+        p[selectedBand().qKey] = clamp(Math.round(v * 100) / 100, 0.1, 12);
+      },
+      format: (v) => v.toFixed(2),
+      parse: parseFloat,
+      nudge: (dir, big) => {
+        const band = selectedBand();
+        const next = p[band.qKey] * Math.pow(big ? 1.25 : 1.05, dir);
+        p[band.qKey] = clamp(Math.round(next * 100) / 100, 0.1, 12);
+      },
+      dragStep: (v, dy, fine) => clamp(v * Math.exp(dy * (fine ? 0.002 : 0.01)), 0.1, 12),
+    }),
+    thresh: makeValueBox({
+      label: 'THR',
+      title:
+        'Dynamic threshold (dB) — the band ducks while its energy sits above this · drag ↕, double-click to type',
+      get: () => p[selectedBand().threshKey],
+      set: (v) => {
+        p[selectedBand().threshKey] = clamp(Math.round(v), -60, 0);
+      },
+      format: (v) => `${Math.round(v)}`,
+      parse: (raw) => parseFloat(raw.replace(/db/gi, '')),
+      nudge: (dir, big) => {
+        const band = selectedBand();
+        p[band.threshKey] = clamp(p[band.threshKey] + dir * (big ? 6 : 1), -60, 0);
+      },
+      dragStep: (v, dy, fine) => clamp(v + dy * (fine ? 0.05 : 0.3), -60, 0),
+    }),
+    range: makeValueBox({
+      label: 'RNG',
+      title:
+        'Dynamic range (dB) — how far the band can be pulled down, 0 = static band · drag ↕, double-click to type',
+      get: () => p[selectedBand().rangeKey],
+      set: (v) => {
+        p[selectedBand().rangeKey] = clamp(Math.round(v * 10) / 10, 0, 18);
+      },
+      format: (v) => (v > 0 ? v.toFixed(1) : 'off'),
+      parse: (raw) => (raw.toLowerCase() === 'off' ? 0 : parseFloat(raw.replace(/db/gi, ''))),
+      nudge: (dir, big) => {
+        const band = selectedBand();
+        p[band.rangeKey] = clamp(
+          Math.round((p[band.rangeKey] + dir * (big ? 3 : 0.5)) * 10) / 10,
+          0,
+          18,
+        );
+      },
+      dragStep: (v, dy, fine) => clamp(v + dy * (fine ? 0.02 : 0.1), 0, 18),
+    }),
+  };
 
   soloBtn.addEventListener('click', () => {
     MASTERING.eqSolo = !MASTERING.eqSolo;
@@ -9564,9 +10043,9 @@ function buildMasteringEqSection() {
     setStatus(MASTERING.eqSolo ? `soloing EQ ${selectedBand().label.toLowerCase()}` : 'EQ solo off');
   });
 
-  const bandAtPoint = (px, py, w, h) => {
+  const bandAtPoint = (px, py, w, h, radius = 12) => {
     let best = null;
-    let bestDist = 12; // px hit radius
+    let bestDist = radius; // px hit radius
     MASTERING_EQ_BANDS.forEach((band) => {
       const x = eqFreqToX(MASTERING.params[band.freqKey], w);
       const y = eqDbToY(MASTERING.params[band.gainKey], h);
@@ -9579,31 +10058,45 @@ function buildMasteringEqSection() {
     return best;
   };
 
+  const resetBand = (band) => {
+    p[band.gainKey] = 0;
+    p[band.qKey] = band.defaultQ;
+    p[band.threshKey] = 0;
+    p[band.rangeKey] = 0;
+    bandChanged(band);
+  };
+
   canvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     const rect = canvas.getBoundingClientRect();
     const band = bandAtPoint(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
     if (!band) return;
     e.preventDefault();
-    activeBand = band;
-    canvas.setPointerCapture(e.pointerId);
     selectBand(band);
+    if (e.altKey) {
+      resetBand(band);
+      return;
+    }
+    activeBand = band;
+    MASTERING.eqHover = null;
+    canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener('pointermove', (e) => {
-    if (!activeBand) return;
     const rect = canvas.getBoundingClientRect();
-    const f = clamp(
-      eqXToFreq(e.clientX - rect.left, rect.width),
-      activeBand.fmin,
-      activeBand.fmax,
-    );
-    const dB = Math.round(eqYToDb(e.clientY - rect.top, rect.height) * 2) / 2;
-    MASTERING.params[activeBand.freqKey] = Math.round(f);
-    MASTERING.params[activeBand.gainKey] = dB;
-    syncBandControls(activeBand);
-    applyMasteringParams(MASTERING.preview?.chain);
-    setMasteringEqReadout(activeBand);
-    drawMasteringEq();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    if (!activeBand) {
+      canvas.style.cursor = bandAtPoint(px, py, rect.width, rect.height) ? 'grab' : 'crosshair';
+      MASTERING.eqHover = { x: px, y: py };
+      if (!MASTERING.preview) drawMasteringEq();
+      return;
+    }
+    const f = clamp(eqXToFreq(px, rect.width), activeBand.fmin, activeBand.fmax);
+    const rawDb = eqYToDb(py, rect.height);
+    const dB = e.shiftKey ? Math.round(rawDb * 10) / 10 : Math.round(rawDb * 2) / 2;
+    p[activeBand.freqKey] = Math.round(f);
+    p[activeBand.gainKey] = dB;
+    bandChanged(activeBand);
   });
   const endEqDrag = (e) => {
     if (!activeBand) return;
@@ -9612,20 +10105,35 @@ function buildMasteringEqSection() {
   };
   canvas.addEventListener('pointerup', endEqDrag);
   canvas.addEventListener('pointercancel', endEqDrag);
+  canvas.addEventListener('pointerleave', () => {
+    if (activeBand) return; // pointer capture keeps the drag alive off-canvas
+    MASTERING.eqHover = null;
+    canvas.style.cursor = '';
+    drawMasteringEq();
+  });
+  canvas.addEventListener(
+    'wheel',
+    (e) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const band =
+        bandAtPoint(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height, 24) ||
+        selectedBand();
+      const factor = Math.exp((e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 0.03 : 0.1));
+      p[band.qKey] = clamp(Math.round(p[band.qKey] * factor * 100) / 100, 0.1, 12);
+      bandChanged(band);
+    },
+    { passive: false },
+  );
   canvas.addEventListener('dblclick', (e) => {
     const rect = canvas.getBoundingClientRect();
     const band = bandAtPoint(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
     if (!band) return;
     selectBand(band);
-    MASTERING.params[band.gainKey] = 0;
-    MASTERING.params[band.qKey] = band.defaultQ;
-    syncBandControls(band);
-    applyMasteringParams(MASTERING.preview?.chain);
-    setMasteringEqReadout(band);
-    drawMasteringEq();
+    resetBand(band);
   });
 
-  syncBandControls(selectedBand());
+  syncBandControls();
   setMasteringEqReadout(selectedBand());
 
   return box;
@@ -9670,6 +10178,23 @@ function buildMasterPanel() {
   previewBtn.title = 'Play the source through the mastering chain';
   previewBtn.addEventListener('click', toggleMasteringPreview);
   MASTERING.els.previewBtn = previewBtn;
+
+  const bypassBtn = document.createElement('button');
+  bypassBtn.type = 'button';
+  bypassBtn.className = 'master-bypass-btn';
+  bypassBtn.textContent = 'Bypass';
+  bypassBtn.title = 'A/B: hear the raw source — whole chain and leveler out of the path (export still renders processed)';
+  bypassBtn.classList.toggle('active', !!MASTERING.bypassAll);
+  bypassBtn.addEventListener('click', () => {
+    MASTERING.bypassAll = !MASTERING.bypassAll;
+    bypassBtn.classList.toggle('active', MASTERING.bypassAll);
+    document
+      .getElementById('masterPanel')
+      ?.classList.toggle('chain-bypassed', MASTERING.bypassAll);
+    rebuildMasteringPreviewChain();
+    setStatus(MASTERING.bypassAll ? 'mastering bypassed — raw source' : 'mastering chain active');
+  });
+  MASTERING.els.bypassBtn = bypassBtn;
 
   const positionBox = document.createElement('label');
   positionBox.className = 'master-position-box';
@@ -9732,6 +10257,7 @@ function buildMasterPanel() {
     loadBtn,
     loadInput,
     previewBtn,
+    bypassBtn,
     positionBox,
     loopSectionBtn,
     loopAllBtn,
@@ -9739,6 +10265,7 @@ function buildMasterPanel() {
     meters,
   );
   panel.appendChild(toolbar);
+  panel.classList.toggle('chain-bypassed', !!MASTERING.bypassAll);
 
   const waveWrap = document.createElement('div');
   waveWrap.className = 'master-wave-wrap';
@@ -9809,7 +10336,35 @@ function buildMasterPanel() {
   meterCanvas.title =
     'Output metering — momentary/short-term LUFS (K-weighted), stereo peaks with hold, phase correlation, comp gain reduction, spectrum';
   MASTERING.els.meterCanvas = meterCanvas;
+  meterCanvas.addEventListener('pointermove', (e) => {
+    const rect = meterCanvas.getBoundingClientRect();
+    MASTERING.meterHover = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    // While the preview plays the rAF loop repaints; idle needs an explicit redraw.
+    if (!MASTERING.vizFrame) drawMasteringMetersIdle();
+  });
+  meterCanvas.addEventListener('pointerleave', () => {
+    MASTERING.meterHover = null;
+    if (!MASTERING.vizFrame) drawMasteringMetersIdle();
+  });
   panel.appendChild(meterCanvas);
+
+  // Leveler: plain input trim, permanently first in the signal path — not a
+  // chain module, so it can't be reordered or bypassed (0 dB = off).
+  const leveler = document.createElement('div');
+  leveler.className = 'master-leveler';
+  const levelerLabel = document.createElement('span');
+  levelerLabel.className = 'master-section-label';
+  levelerLabel.textContent = 'Leveler · input';
+  const levelerRow = makeControlRow(
+    { key: 'levelerGain', label: 'Gain', min: -24, max: 24, step: 0.5, unit: 'dB' },
+    MASTERING.params.levelerGain,
+    (v) => {
+      MASTERING.params.levelerGain = v;
+      applyMasteringParams(MASTERING.preview?.chain);
+    },
+  );
+  leveler.append(levelerLabel, levelerRow);
+  panel.appendChild(leveler);
 
   const controls = document.createElement('div');
   controls.className = 'master-controls';
@@ -9823,6 +10378,8 @@ function buildMasterPanel() {
     const label = document.createElement('div');
     label.className = 'master-section-label';
     label.textContent = section;
+    label.title = 'Drag to reorder the chain';
+    label.prepend(makeMasteringDragGrip());
     label.prepend(makeMasteringModulePower(id, box));
     box.appendChild(label);
     if (id === 'opto') {
