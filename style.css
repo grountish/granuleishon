@@ -1320,6 +1320,39 @@ button:disabled {
   opacity: 1;
 }
 
+.viz-style-bar {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  display: flex;
+  gap: 6px;
+}
+
+.viz-style-btn {
+  font: 600 9px ui-monospace, monospace;
+  letter-spacing: 0.18em;
+  padding: 4px 8px;
+  background: rgba(10, 10, 14, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 3px;
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+}
+
+.viz-style-btn:hover {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.viz-style-btn.active {
+  border-color: rgba(255, 255, 255, 0.55);
+  color: #fff;
+  background: rgba(30, 30, 40, 0.7);
+}
+
+.visual-panel:fullscreen .viz-style-bar {
+  display: none;
+}
+
 .back-board {
   position: relative;
   min-height: 100%;
@@ -2591,6 +2624,37 @@ button:disabled {
   font-size: 11px;
   line-height: 1;
   color: #7a7a7a;
+}
+
+/* Per-unit power switch: off unplugs the unit from the bus chain. */
+.fx-power {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  margin-right: 7px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: transparent;
+}
+
+.fx-power:hover:not(:disabled) {
+  border-color: var(--accent-fx-dim);
+  background: transparent;
+}
+
+.fx-power.active {
+  border-color: var(--accent-fx);
+  background: var(--accent-fx);
+  box-shadow: 0 0 4px var(--accent-fx-dim);
+}
+
+.fx-section.fx-off .fx-section-label-text {
+  opacity: 0.5;
+}
+
+.fx-section.fx-off .fx-section-content {
+  opacity: 0.4;
 }
 
 .fx-section-content {

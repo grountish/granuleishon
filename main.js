@@ -38,6 +38,8 @@ let started = false;
 let granularModulePromise = null;
 let bitReducerModulePromise = null;
 let beatRepeatModulePromise = null;
+let resonatorModulePromise = null;
+let grainArpModulePromise = null;
 const LIVE_SOURCE_SECONDS = 10;
 const MAX_DELAY_SECONDS = 16;
 const INPUT_SOURCE = {
@@ -207,6 +209,24 @@ function getDelayTimeSeconds(busId = activeBus) {
   return clamp(d.sync ? beatsToSeconds(getTempoStep(d.syncIndex).beats) : d.time, 0, MAX_DELAY_SECONDS);
 }
 
+function midiToFreqHz(midi) {
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+function freqHzToMidi(freq) {
+  return 69 + 12 * Math.log2(Math.max(1, freq) / 440);
+}
+
+function formatResonatorNote(midi) {
+  const m = Math.round(midi);
+  return `${GEN4_ROOT_NAMES[((m % 12) + 12) % 12]}${Math.floor(m / 12) - 1}`;
+}
+
+function getResonatorFreqHz(busId = activeBus) {
+  const r = fxStates[busId].resonator;
+  return clamp(r.noteMode ? midiToFreqHz(r.note) : r.freq, 40, 2000);
+}
+
 function getBeatRepeatIntervalSeconds(busId = activeBus) {
   const b = fxStates[busId].beatrepeat;
   return b.sync ? beatsToSeconds(getTempoStep(b.syncIndex).beats) : b.interval;
@@ -215,6 +235,11 @@ function getBeatRepeatIntervalSeconds(busId = activeBus) {
 function getBeatRepeatGridSeconds(busId = activeBus) {
   const b = fxStates[busId].beatrepeat;
   return b.gridSync ? beatsToSeconds(getGrainSyncStep(b.gridSyncIndex).beats) : b.grid / 1000;
+}
+
+function getGrainArpGridSeconds(busId = activeBus) {
+  const g = fxStates[busId].grainarp;
+  return g.gridSync ? beatsToSeconds(getGrainSyncStep(g.gridSyncIndex).beats) : g.grid / 1000;
 }
 
 function getLfoRateHz(lfo) {
@@ -773,7 +798,18 @@ async function ensureFxModules() {
   if (!beatRepeatModulePromise) {
     beatRepeatModulePromise = audioCtx.audioWorklet.addModule(workletUrl('beat-repeat-processor.js'));
   }
-  await Promise.all([bitReducerModulePromise, beatRepeatModulePromise]);
+  if (!resonatorModulePromise) {
+    resonatorModulePromise = audioCtx.audioWorklet.addModule(workletUrl('resonator-processor.js'));
+  }
+  if (!grainArpModulePromise) {
+    grainArpModulePromise = audioCtx.audioWorklet.addModule(workletUrl('grain-arp-processor.js'));
+  }
+  await Promise.all([
+    bitReducerModulePromise,
+    beatRepeatModulePromise,
+    resonatorModulePromise,
+    grainArpModulePromise,
+  ]);
 }
 
 async function ensureGranularModule() {
@@ -956,17 +992,19 @@ function getBounceSongSeconds() {
 }
 
 function setBounceProgress(progress) {
-  const wrap = document.getElementById('bounceProgress');
-  const fill = document.getElementById('bounceProgressFill');
-  const label = document.getElementById('bounceProgressLabel');
   const normalized = clamp(progress, 0, 1);
   const percent = Math.round(normalized * 100);
-  if (wrap) {
+  // Two bars: the transport strip's, and the master toolbar's (the strip is
+  // hidden in master view, where bounces are also triggered).
+  [document.getElementById('bounceProgress'), MASTERING.els.bounceProgress].forEach((wrap) => {
+    if (!wrap) return;
     wrap.hidden = !BOUNCE.active;
     wrap.setAttribute('aria-valuenow', String(percent));
-  }
-  if (fill) fill.style.width = `${percent}%`;
-  if (label) label.textContent = `${percent}%`;
+    const fill = wrap.querySelector('.bounce-progress-fill');
+    const label = wrap.querySelector('.bounce-progress-label');
+    if (fill) fill.style.width = `${percent}%`;
+    if (label) label.textContent = `${percent}%`;
+  });
 }
 
 function refreshBounceProgress() {
@@ -1087,6 +1125,9 @@ function finishBounce(statusText, { save = true } = {}) {
   }
   SONG.loop = BOUNCE.prevSongLoop;
   setPlayMode(BOUNCE.prevMode);
+  // The bounce booted the engine; a bounce always begins from a stopped
+  // transport, so return to silence instead of leaving the granulars running.
+  stopTransport();
   refreshBounceUI();
   setStatus(statusText || (stemCount ? `song bounced + ${stemCount} stems` : 'song bounced'));
 }
@@ -1664,8 +1705,11 @@ const gen3ShapeButtons = new Map();
 let gen3SusBtnEl = null;
 const filterModeButtons = new Map();
 let delaySyncModeControl = null;
+let resonatorNoteModeControl = null;
 let beatRepeatSyncModeControl = null;
 let beatRepeatGridSyncModeControl = null;
+let grainArpGridSyncModeControl = null;
+const grainArpPatternButtons = new Map();
 const fxSectionEls = new Map(); // effect id → its draggable section element
 let fxLimiterSection = null; // the pinned (non-draggable) limiter section
 const delayModeButtons = new Map();
@@ -1690,12 +1734,23 @@ const FX_LFO_PARAMS = [
   { id: 'beatrepeat', key: 'decay', min: 0, max: 1 },
   { id: 'beatrepeat', key: 'chance', min: 0, max: 1 },
   { id: 'beatrepeat', key: 'mix', min: 0, max: 1 },
+  { id: 'grainarp', key: 'chance', min: 0, max: 1 },
+  { id: 'grainarp', key: 'shape', min: 0, max: 1 },
+  { id: 'grainarp', key: 'feedback', min: 0, max: 0.85 },
+  { id: 'grainarp', key: 'mix', min: 0, max: 1 },
   { id: 'delay', key: 'time', min: 0, max: MAX_DELAY_SECONDS },
   { id: 'delay', key: 'feedback', min: 0, max: 0.95 },
   { id: 'delay', key: 'mix', min: 0, max: 1 },
   { id: 'filter', key: 'cutoff', min: 80, max: 14000 },
   { id: 'filter', key: 'q', min: 0.1, max: 20 },
   { id: 'filter', key: 'mix', min: 0, max: 1 },
+  { id: 'resonator', key: 'freq', min: 40, max: 2000 },
+  { id: 'resonator', key: 'decay', min: 0, max: 0.98 },
+  { id: 'resonator', key: 'int2', min: -24, max: 24, unit: 'st' },
+  { id: 'resonator', key: 'int3', min: -24, max: 24, unit: 'st' },
+  { id: 'resonator', key: 'harm2', min: 0, max: 1 },
+  { id: 'resonator', key: 'harm3', min: 0, max: 1 },
+  { id: 'resonator', key: 'mix', min: 0, max: 1 },
   { id: 'bitreduce', key: 'rate', min: 0.02, max: 1 },
   { id: 'bitreduce', key: 'mix', min: 0, max: 1 },
   { id: 'reverb', key: 'predelay', min: 0, max: 0.25 },
@@ -1708,8 +1763,10 @@ const BACK_AUDIO_CHAIN = [
   { id: 'gen-2', title: 'Gen 2' },
   { id: 'gen-3', title: 'Gen 3' },
   { id: 'mix', title: 'Mix Bus' },
+  { id: 'grainarp', title: 'Grain Arp' },
   { id: 'delay', title: 'Delay' },
   { id: 'filter', title: 'Filter' },
+  { id: 'resonator', title: 'Resonator' },
   { id: 'bitreduce', title: 'Bit Reduce' },
   { id: 'sat', title: 'Saturation' },
   { id: 'reverb', title: 'Reverb' },
@@ -1918,6 +1975,8 @@ function getBaseFxValue(id, key, busId = activeBus) {
   if (id === 'delay' && key === 'time') return getDelayTimeSeconds(busId);
   if (id === 'beatrepeat' && key === 'interval') return getBeatRepeatIntervalSeconds(busId);
   if (id === 'beatrepeat' && key === 'grid') return getBeatRepeatGridSeconds(busId);
+  if (id === 'grainarp' && key === 'grid') return getGrainArpGridSeconds(busId);
+  if (id === 'resonator' && key === 'freq') return getResonatorFreqHz(busId);
   return fxStates[busId][id]?.[key];
 }
 
@@ -2019,6 +2078,12 @@ function refreshModulationVisuals() {
     }
     if (id === 'delay' && key === 'time' && FX.delay.sync) {
       control?.setModValue(null);
+      return;
+    }
+    if (id === 'resonator' && key === 'freq' && FX.resonator.noteMode) {
+      // Knob is in note units while modulation runs in Hz — convert the
+      // effective pitch back to MIDI so the mod ring still tracks.
+      control?.setModValue(freqHzToMidi(getEffectiveFxValue(id, key)));
       return;
     }
     control?.setModValue(getEffectiveFxValue(id, key));
@@ -2222,15 +2287,19 @@ function makeControlRow(p, initialValue, onInput, lfoTarget = null) {
   return row;
 }
 
-function buildSyncModeRow(isSync, onModeChange) {
+function buildSyncModeRow(
+  isSync,
+  onModeChange,
+  labels = [
+    ['free', 'Free'],
+    ['sync', 'Sync'],
+  ],
+) {
   const row = document.createElement('div');
   row.className = 'fx-mode-row sync-mode-row';
 
   const buttons = new Map();
-  [
-    ['free', 'Free'],
-    ['sync', 'Sync'],
-  ].forEach(([mode, label]) => {
+  labels.forEach(([mode, label]) => {
     const btn = document.createElement('button');
     btn.className = 'fx-mode-btn';
     btn.type = 'button';
@@ -2243,7 +2312,7 @@ function buildSyncModeRow(isSync, onModeChange) {
   row.setMode = (mode) => {
     buttons.forEach((btn, key) => btn.classList.toggle('active', key === mode));
   };
-  row.setMode(isSync ? 'sync' : 'free');
+  row.setMode(isSync ? labels[1][0] : labels[0][0]);
   return row;
 }
 
@@ -2762,7 +2831,7 @@ uniform vec4 uA; // x speed, y fold, z twist, w feedback decay
 uniform vec4 uB; // x glow, y spectrum-ring mix, z warp zoom, w waveform mix
 uniform float uStars;  // starfield intensity (mood × slow LFO)
 uniform float uStarT;  // integrated star fly-through phase
-uniform vec3 uShock;   // kick shockwave: x age (s), y amplitude, z light gate 0..1
+uniform vec4 uShock;   // kick shockwave: x age (s), y amplitude, z light gate, w per-kick shape seed
 uniform float uGlint;  // hat/perc star-glint boost
 uniform vec3 uNote;    // osc note flare: x pitch-class angle 0..1, y age, z amp
 
@@ -2872,6 +2941,148 @@ void main() {
 }
 `;
 
+// MINIMAL style: dark, square, geometric. Same uniform names as the psychair
+// sim but repurposed — uA: x speed, y grid scale, z rotate rate, w phosphor
+// decay; uB: x grid-line mix, y spectrum-bars mix, z cell flicker, w waveform
+// mix. Feedback uses max() (phosphor persistence) so nothing blooms white.
+const VIZ_MIN_FRAG = `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 frag;
+uniform sampler2D uPrev;
+uniform sampler2D uAudio;
+uniform vec2 uRes;
+uniform float uTime;
+uniform float uBass;
+uniform float uMid;
+uniform float uHigh;
+uniform float uLevel;
+uniform float uBeat;
+uniform float uHue;
+uniform vec2 uCam;
+uniform vec4 uA;
+uniform vec4 uB;
+uniform float uStars; // repurposed: glyph density
+uniform vec4 uShock;
+uniform float uGlint;
+uniform vec3 uNote;
+
+mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+float hash21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+void main() {
+  float asp = uRes.x / uRes.y;
+  vec2 uv = (vUv - 0.5) * vec2(asp, 1.0);
+  uv *= rot(uTime * uA.z);
+  uv += uCam * 0.02;
+  float t = uTime * uA.x;
+  vec3 accent = mix(vec3(1.0), 0.5 + 0.5 * cos(6.28318 * (uHue + vec3(0.0, 0.33, 0.67))), 0.45);
+  vec3 col = vec3(0.0);
+
+  // Grid: barely-there lines, breathing with level.
+  vec2 g = uv * uA.y;
+  vec2 cell = floor(g);
+  vec2 f = fract(g);
+  vec2 e = min(f, 1.0 - f);
+  float line = smoothstep(0.035, 0.0, min(e.x, e.y));
+  col += accent * line * uB.x * (0.035 + uLevel * 0.10);
+
+  // Sparse cell strobes on a quantized clock; half filled, half dimmer.
+  // A slow spatial wave gates them so activity travels across the frame
+  // instead of twinkling uniformly forever.
+  float clk = floor(t * (1.5 + uB.z * 5.0));
+  float hc = hash21(cell + clk * 13.71);
+  float on = step(0.982 - uB.z * 0.01, hc);
+  float inset = step(0.14, f.x) * step(f.x, 0.86) * step(0.14, f.y) * step(f.y, 0.86);
+  float fill = step(0.5, hash21(cell + clk * 7.3));
+  float waveGate = 0.55 + 0.45 * sin(cell.x * 0.9 + cell.y * 1.3 + uTime * 0.7);
+  col += accent * on * inset * mix(0.12, 0.4, fill) * (0.4 + uMid * 0.9) * waveGate;
+
+  // Glyph layer: sparse plus / bracket marks that re-roll on a slow clock.
+  float gclk = floor(uTime * 0.21);
+  float gh = hash21(cell * 3.1 + gclk * 5.77);
+  if (gh > 1.0 - 0.06 * uStars) {
+    float gt = hash21(cell * 5.9 + gclk * 3.3);
+    vec2 gp = f - 0.5;
+    float glyph;
+    if (gt < 0.5) {
+      glyph = max(step(abs(gp.x), 0.02) * step(abs(gp.y), 0.16),
+                  step(abs(gp.y), 0.02) * step(abs(gp.x), 0.16));
+    } else {
+      glyph = max(step(abs(gp.x + 0.14), 0.02) * step(abs(gp.y), 0.16),
+                  step(abs(gp.y + 0.14), 0.02) * step(abs(gp.x), 0.16));
+    }
+    col += accent * glyph * (0.25 + uHigh * 0.5);
+  }
+
+  // Rare row flash: one grid row blinks for a moment every ~13 s.
+  float rclk = floor(uTime / 13.0);
+  float rphase = fract(uTime / 13.0);
+  float rrow = floor((hash21(vec2(rclk, 7.7)) - 0.5) * uA.y * 0.9);
+  if (rphase < 0.06 && abs(cell.y - rrow) < 0.5) col += accent * 0.35;
+
+  // Hat ticks: corner dots flashing on a fast clock.
+  float th = hash21(cell * 1.7 + floor(uTime * 24.0));
+  float corner = step(e.x, 0.07) * step(e.y, 0.07);
+  col += accent * corner * step(0.96, th) * uGlint * 0.9;
+
+  // Nested frames: five concentric squares, one per band (bass innermost).
+  // Each breathes with its band's energy — spectrum data without EQ-bar
+  // literalism.
+  if (uB.y > 0.01) {
+    for (int i = 0; i < 5; i++) {
+      float fi = float(i);
+      float be = texture(uAudio, vec2(0.08 + fi * 0.2, 0.25)).r;
+      float rr = 0.12 + fi * 0.09 + be * 0.02;
+      float d = abs(max(abs(uv.x), abs(uv.y)) - rr);
+      col += accent * smoothstep(0.006, 0.002, d) * be * be * 0.55 * uB.y;
+    }
+  }
+
+  // Perimeter dashes: segments of a square ring flickering like a data bus.
+  if (uB.w > 0.01) {
+    float chebP = max(abs(uv.x), abs(uv.y));
+    float ringD = abs(chebP - 0.40);
+    float ang = atan(uv.y, uv.x) / 6.28318 + 0.5;
+    float seg = floor(ang * 32.0);
+    float segOn = step(0.55, hash21(vec2(seg, floor(uTime * 2.0))));
+    float dash = smoothstep(0.006, 0.002, ringD) * step(fract(ang * 32.0), 0.7);
+    col += accent * dash * segOn * (0.15 + uLevel * 0.5) * uB.w;
+  }
+
+  // Kick: expanding outline, shape drawn per hit from the seed — square,
+  // diamond, or corner brackets — so a 4/4 doesn't stamp the same figure.
+  vec2 su = uShock.w > 0.35 && uShock.w < 0.7 ? rot(0.7853) * uv : uv;
+  float cheb = max(abs(su.x), abs(su.y));
+  float sqBand = smoothstep(0.018, 0.004, abs(cheb - uShock.x * 1.2));
+  if (uShock.w >= 0.7) {
+    float cornerness = min(abs(su.x), abs(su.y)) / max(cheb, 1e-4);
+    sqBand *= step(0.55, cornerness);
+  }
+  float sAmp = uShock.y * exp(-uShock.x * 2.6);
+  col += accent * sqBand * sAmp * 0.7 * uShock.z;
+
+  // Scanner sweeps: slow bands that brighten what they cross — texture
+  // reveals itself in passes instead of sitting static.
+  float sx = fract(uTime * 0.045) * 2.0 - 1.0;
+  float sweep = exp(-abs(uv.x / asp * 2.0 - sx * 1.1) * 18.0);
+  float sy = fract(uTime * 0.019) * 2.0 - 1.0;
+  float sweepY = exp(-abs(uv.y * 2.0 - sy * 1.1) * 18.0);
+  col *= 1.0 + sweep * 1.4 + sweepY * 0.7;
+  col += accent * sweep * 0.02;
+
+  // Osc note: vertical hairline at its pitch-class x position.
+  if (uNote.z > 0.001) {
+    float nx = (uNote.x - 0.5) * asp * 0.9;
+    col += accent * smoothstep(0.004, 0.0, abs(uv.x - nx)) * uNote.z * exp(-uNote.y * 3.0) * 0.4;
+  }
+
+  vec3 prev = texture(uPrev, vUv).rgb;
+  col = max(col, prev * uA.w);
+  frag = vec4(col, 1.0);
+}
+`;
+
 const VIZ_POST_FRAG = `#version 300 es
 precision highp float;
 in vec2 vUv;
@@ -2881,6 +3092,7 @@ uniform vec2 uRes;
 uniform float uTime;
 uniform float uBeat;
 uniform float uLevel;
+uniform vec4 uLook; // x bloom, y aberration scale, z grain, w base exposure
 
 vec3 aces(vec3 x) {
   return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
@@ -2891,7 +3103,7 @@ void main() {
   vec2 uv = vUv;
   vec2 c = uv - 0.5;
   float r2 = dot(c, c);
-  float ca = 0.0012 + uBeat * 0.010 + uLevel * 0.0015;
+  float ca = (0.0012 + uBeat * 0.010 + uLevel * 0.0015) * uLook.y;
   vec3 col;
   col.r = texture(uTex, uv + c * ca).r;
   col.g = texture(uTex, uv).g;
@@ -2902,10 +3114,10 @@ void main() {
     texture(uTex, uv + vec2(0.0, px.y)).rgb + texture(uTex, uv - vec2(0.0, px.y)).rgb +
     texture(uTex, uv + px).rgb + texture(uTex, uv - px).rgb +
     texture(uTex, uv + vec2(px.x, -px.y)).rgb + texture(uTex, uv + vec2(-px.x, px.y)).rgb;
-  col += bl * 0.028;
-  col = aces(col * (0.55 + uBeat * 0.25 + uLevel * 0.12));
+  col += bl * uLook.x;
+  col = aces(col * (uLook.w + uBeat * 0.25 + uLevel * 0.12));
   col *= 1.0 - r2 * 1.05;
-  col += (hash(uv * uRes + fract(uTime) * 113.0) - 0.5) * 0.03;
+  col += (hash(uv * uRes + fract(uTime) * 113.0) - 0.5) * uLook.z;
   frag = vec4(col, 1.0);
 }
 `;
@@ -2920,6 +3132,17 @@ const VIZGL_SCENES = [
 ];
 const VIZGL_PARAM_KEYS = ['speed', 'fold', 'twist', 'decay', 'glow', 'ring', 'warp', 'wave', 'hueVel', 'stars'];
 
+// MINIMAL moods — same keys, remapped: fold = grid scale, twist = rotate rate,
+// decay = phosphor persistence, glow = grid lines, ring = spectrum bars,
+// warp = cell flicker, wave = oscilloscope. stars unused.
+const VIZMIN_SCENES = [
+  { label: 'GRID',   dur: [24, 40], speed: 1.0, fold: 12, twist: 0.0,   decay: 0.55, glow: 1.0,  ring: 0.0,  warp: 0.6, wave: 0.15, hueVel: 0.001,  stars: 0.6 },
+  { label: 'FRAMES', dur: [20, 36], speed: 1.0, fold: 14, twist: 0.0,   decay: 0.4,  glow: 0.25, ring: 1.0,  warp: 0.2, wave: 0.0,  hueVel: 0.0015, stars: 0.3 },
+  { label: 'SIGNAL', dur: [20, 36], speed: 1.0, fold: 8,  twist: 0.0,   decay: 0.7,  glow: 0.15, ring: 0.25, warp: 0.1, wave: 1.0,  hueVel: 0.001,  stars: 0.2 },
+  { label: 'CELLS',  dur: [16, 30], speed: 1.4, fold: 22, twist: 0.004, decay: 0.5,  glow: 0.4,  ring: 0.2,  warp: 1.4, wave: 0.0,  hueVel: 0.003,  stars: 1.0 },
+  { label: 'DRIFT',  dur: [26, 44], speed: 0.6, fold: 10, twist: 0.012, decay: 0.75, glow: 0.6,  ring: 0.4,  warp: 0.3, wave: 0.3,  hueVel: 0.0008, stars: 0.5 },
+];
+
 const VIZGL = {
   gl: null,
   failed: false,
@@ -2929,9 +3152,13 @@ const VIZGL = {
   simW: 0,
   simH: 0,
   progSim: null,
+  progMin: null,
   progPost: null,
   uniSim: null,
+  uniMin: null,
   uniPost: null,
+  style: 'psy', // 'psy' (psychair) | 'min' (minimal)
+  styleBtns: null,
   texA: null,
   texB: null,
   fbA: null,
@@ -2959,6 +3186,8 @@ const VIZGL = {
   lastEventT: -10,
   shockAge: 10,
   shockAmp: 0,
+  shockSeed: 0,
+  kickHeat: 0,
   glint: 0,
   noteAngle: 0.5,
   noteAge: 10,
@@ -3046,12 +3275,15 @@ function setupVizGLResources() {
   const gl = VIZGL.gl;
   VIZGL.floatFbo = !!gl.getExtension('EXT_color_buffer_float');
   VIZGL.progSim = vizGLProgram(gl, VIZ_SIM_FRAG);
+  VIZGL.progMin = vizGLProgram(gl, VIZ_MIN_FRAG);
   VIZGL.progPost = vizGLProgram(gl, VIZ_POST_FRAG);
-  if (!VIZGL.progSim || !VIZGL.progPost) return;
-  VIZGL.uniSim = vizGLUniforms(gl, VIZGL.progSim, [
+  if (!VIZGL.progSim || !VIZGL.progMin || !VIZGL.progPost) return;
+  const simUniformNames = [
     'uPrev', 'uAudio', 'uRes', 'uTime', 'uBass', 'uMid', 'uHigh', 'uLevel', 'uBeat', 'uHue', 'uCam', 'uA', 'uB', 'uStars', 'uStarT', 'uShock', 'uGlint', 'uNote',
-  ]);
-  VIZGL.uniPost = vizGLUniforms(gl, VIZGL.progPost, ['uTex', 'uRes', 'uTime', 'uBeat', 'uLevel']);
+  ];
+  VIZGL.uniSim = vizGLUniforms(gl, VIZGL.progSim, simUniformNames);
+  VIZGL.uniMin = vizGLUniforms(gl, VIZGL.progMin, simUniformNames);
+  VIZGL.uniPost = vizGLUniforms(gl, VIZGL.progPost, ['uTex', 'uRes', 'uTime', 'uBeat', 'uLevel', 'uLook']);
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
   const buf = gl.createBuffer();
@@ -3093,7 +3325,7 @@ function initVizGL() {
   });
   VIZGL.gl = gl;
   setupVizGLResources();
-  if (!VIZGL.progSim || !VIZGL.progPost) {
+  if (!VIZGL.progSim || !VIZGL.progMin || !VIZGL.progPost) {
     // Shaders refused to build; the canvas is stuck bound to WebGL, so the 2D
     // fallback can't claim it — keep the GL loop alive but render nothing.
     VIZGL.failed = true;
@@ -3115,11 +3347,18 @@ function applyVizEvent(ev) {
   VIZGL.lastEventT = VIZGL.t;
   const vel = Number.isFinite(ev.vel) ? ev.vel : 1;
   switch (ev.id) {
-    case 'kick':
+    case 'kick': {
       VIZGL.shockAge = 0;
-      VIZGL.shockAmp = 0.45 + vel * 0.75;
+      VIZGL.shockSeed = Math.random();
+      // Habituation (minimal style): steady four-on-the-floor fades toward a
+      // third of full amplitude; a break lets the heat drain so the first
+      // kick back slams. Psychair keeps full-force warps.
+      const heatScale = VIZGL.style === 'min' ? 1 / (1 + VIZGL.kickHeat * 0.8) : 1;
+      VIZGL.kickHeat = Math.min(3, VIZGL.kickHeat + 1);
+      VIZGL.shockAmp = (0.45 + vel * 0.75) * heatScale;
       VIZGL.beat = 1;
       break;
+    }
     case 'snare': {
       const a = Math.random() * Math.PI * 2;
       VIZGL.kickX += Math.cos(a) * 0.3 * vel;
@@ -3169,13 +3408,42 @@ function vizShowLabel(text, ms = 3000) {
   VIZGL.labelTimer = setTimeout(() => el.classList.remove('show'), ms);
 }
 
+function vizSceneList() {
+  return VIZGL.style === 'min' ? VIZMIN_SCENES : VIZGL_SCENES;
+}
+
 function advanceVizScene() {
-  const jump = 1 + Math.floor(Math.random() * (VIZGL_SCENES.length - 1));
-  VIZGL.sceneIdx = (VIZGL.sceneIdx + jump) % VIZGL_SCENES.length;
+  const list = vizSceneList();
+  const jump = 1 + Math.floor(Math.random() * (list.length - 1));
+  VIZGL.sceneIdx = (VIZGL.sceneIdx + jump) % list.length;
   VIZGL.sceneTimer = 0;
-  const d = VIZGL_SCENES[VIZGL.sceneIdx].dur;
+  const d = list[VIZGL.sceneIdx].dur;
   VIZGL.sceneDur = d[0] + Math.random() * (d[1] - d[0]);
-  vizShowLabel(VIZGL_SCENES[VIZGL.sceneIdx].label);
+  vizShowLabel(list[VIZGL.sceneIdx].label);
+}
+
+function setVizStyle(style) {
+  VIZGL.style = style;
+  try {
+    localStorage.setItem('grnshVizStyle', style);
+  } catch (e) {}
+  const list = vizSceneList();
+  VIZGL.sceneIdx = 0;
+  VIZGL.sceneTimer = 0;
+  VIZGL.sceneDur = list[0].dur[0];
+  // Hard-cut params to the new style's first mood — cross-lerping remapped
+  // params (grid scale vs fold amount) produces nonsense frames.
+  VIZGL_PARAM_KEYS.forEach((k) => (VIZGL.p[k] = list[0][k]));
+  const gl = VIZGL.gl;
+  if (gl && VIZGL.fbA) {
+    gl.clearColor(0, 0, 0, 1);
+    [VIZGL.fbA, VIZGL.fbB].forEach((fb) => {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    });
+  }
+  VIZGL.styleBtns?.forEach((btn, id) => btn.classList.toggle('active', id === style));
+  vizShowLabel(style === 'min' ? 'MINIMAL' : 'PSYCHAIR');
 }
 
 function renderVizGL() {
@@ -3242,6 +3510,7 @@ function renderVizGL() {
   VIZGL.shockAge += dt;
   VIZGL.noteAge += dt;
   VIZGL.glint *= Math.exp(-dt * 6);
+  VIZGL.kickHeat *= Math.exp(-dt / 3.5);
   const eventDriven = VIZGL.t - VIZGL.lastEventT < 2;
 
   VIZGL.beatAvg = VIZGL.beatAvg * 0.94 + bassE * 0.06;
@@ -3258,7 +3527,8 @@ function renderVizGL() {
   // ── Scene machine ─────────────────────────────────────────────
   VIZGL.sceneTimer += dt;
   if (VIZGL.sceneTimer >= VIZGL.sceneDur) advanceVizScene();
-  const sc = VIZGL_SCENES[VIZGL.sceneIdx];
+  const styleMin = VIZGL.style === 'min';
+  const sc = vizSceneList()[VIZGL.sceneIdx];
   const pk = 1 - Math.exp(-dt * 0.9);
   const p = VIZGL.p;
   VIZGL_PARAM_KEYS.forEach((key) => (p[key] += (sc[key] - p[key]) * pk));
@@ -3297,8 +3567,8 @@ function renderVizGL() {
   // ── Sim pass: accumulate into the back buffer ─────────────────
   gl.bindFramebuffer(gl.FRAMEBUFFER, VIZGL.fbB);
   gl.viewport(0, 0, VIZGL.simW, VIZGL.simH);
-  gl.useProgram(VIZGL.progSim);
-  const us = VIZGL.uniSim;
+  gl.useProgram(styleMin ? VIZGL.progMin : VIZGL.progSim);
+  const us = styleMin ? VIZGL.uniMin : VIZGL.uniSim;
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, VIZGL.texA);
   gl.uniform1i(us.uPrev, 0);
@@ -3324,7 +3594,7 @@ function renderVizGL() {
   // off, few-second crossfade); the trail-warping refraction stays constant.
   const gateWave = Math.sin(VIZGL.t * 0.052) + 0.35 * Math.sin(VIZGL.t * 0.0137);
   const shockLight = Math.min(1, Math.max(0, 0.5 + gateWave * 6));
-  gl.uniform3f(us.uShock, VIZGL.shockAge, VIZGL.shockAmp, shockLight);
+  gl.uniform4f(us.uShock, VIZGL.shockAge, VIZGL.shockAmp, shockLight, VIZGL.shockSeed);
   gl.uniform1f(us.uGlint, VIZGL.glint);
   gl.uniform3f(us.uNote, VIZGL.noteAngle, VIZGL.noteAge, VIZGL.noteAmp);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -3341,6 +3611,10 @@ function renderVizGL() {
   gl.uniform1f(up.uTime, VIZGL.t);
   gl.uniform1f(up.uBeat, VIZGL.beat);
   gl.uniform1f(up.uLevel, VIZGL.level);
+  // Look grade per style: psychair blooms and smears, minimal stays clean,
+  // grainy and slightly darker-of-heart.
+  if (styleMin) gl.uniform4f(up.uLook, 0.008, 0.3, 0.05, 0.8);
+  else gl.uniform4f(up.uLook, 0.028, 1.0, 0.03, 0.55);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
   const swapT = VIZGL.texA;
@@ -3374,6 +3648,28 @@ function buildVisualPanel() {
   label.className = 'viz-scene-label';
   panel.appendChild(label);
   VIZGL.labelEl = label;
+
+  const styleBar = document.createElement('div');
+  styleBar.className = 'viz-style-bar';
+  VIZGL.styleBtns = new Map();
+  [
+    ['psy', 'PSYCHAIR'],
+    ['min', 'MINIMAL'],
+  ].forEach(([id, name]) => {
+    const btn = document.createElement('button');
+    btn.className = 'viz-style-btn';
+    btn.textContent = name;
+    btn.title = `${name.toLowerCase()} visual style`;
+    btn.addEventListener('click', () => setVizStyle(id));
+    VIZGL.styleBtns.set(id, btn);
+    styleBar.appendChild(btn);
+  });
+  panel.appendChild(styleBar);
+  let savedStyle = 'psy';
+  try {
+    savedStyle = localStorage.getItem('grnshVizStyle') || 'psy';
+  } catch (e) {}
+  setVizStyle(savedStyle === 'min' ? 'min' : 'psy');
 
   canvas.addEventListener('pointerdown', () => {
     VIZGL.beat = 1;
@@ -7245,6 +7541,17 @@ const FX_DEFS = [
     ],
   },
   {
+    id: 'grainarp',
+    label: 'Grain Arp',
+    params: [
+      { key: 'grid', label: 'Grid', min: 10, max: 500, step: 1, value: 250, unit: 'ms' },
+      { key: 'chance', label: 'Activity', min: 0, max: 1, step: 0.01, value: 1, unit: '' },
+      { key: 'shape', label: 'Shape', min: 0, max: 1, step: 0.01, value: 0.3, unit: '' },
+      { key: 'feedback', label: 'Repeats', min: 0, max: 0.85, step: 0.01, value: 0.25, unit: '' },
+      { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
+    ],
+  },
+  {
     id: 'delay',
     label: 'Delay',
     params: [
@@ -7261,6 +7568,20 @@ const FX_DEFS = [
       { key: 'cutoff', label: 'Cutoff', min: 80, max: 14000, step: 10, unit: 'Hz' },
       { key: 'q', label: 'Resonance', min: 0.1, max: 20, step: 0.1, unit: '' },
       { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, unit: '' },
+    ],
+  },
+  {
+    id: 'resonator',
+    label: 'Resonator',
+    params: [
+      { key: 'freq', label: 'Freq', min: 40, max: 2000, step: 1, value: 220, unit: 'Hz' },
+      { key: 'decay', label: 'Decay', min: 0, max: 0.98, step: 0.01, value: 0.85, unit: '' },
+      { key: 'damp', label: 'Damp', min: 200, max: 12000, step: 10, value: 4200, unit: 'Hz' },
+      { key: 'int2', label: 'Note 2', min: -24, max: 24, step: 1, value: 12, unit: 'st' },
+      { key: 'harm2', label: 'Level 2', min: 0, max: 1, step: 0.01, value: 0.5, unit: '' },
+      { key: 'int3', label: 'Note 3', min: -24, max: 24, step: 1, value: 7, unit: 'st' },
+      { key: 'harm3', label: 'Level 3', min: 0, max: 1, step: 0.01, value: 0.3, unit: '' },
+      { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
     ],
   },
   {
@@ -7380,6 +7701,73 @@ const FX_PRESETS = {
       },
     },
   ],
+  grainarp: [
+    {
+      name: 'Off',
+      values: {
+        grid: 250,
+        gridSync: true,
+        gridSyncIndex: 4,
+        pattern: 'oct',
+        chance: 1,
+        shape: 0.3,
+        feedback: 0.25,
+        mix: 0,
+      },
+    },
+    {
+      name: 'Octave Bloom',
+      values: {
+        grid: 250,
+        gridSync: true,
+        gridSyncIndex: 4, // 1/8
+        pattern: 'oct',
+        chance: 0.85,
+        shape: 0.25,
+        feedback: 0.45,
+        mix: 0.5,
+      },
+    },
+    {
+      name: 'Rising Sparkle',
+      values: {
+        grid: 125,
+        gridSync: true,
+        gridSyncIndex: 2, // 1/16
+        pattern: 'up',
+        chance: 0.7,
+        shape: 0.15,
+        feedback: 0.3,
+        mix: 0.45,
+      },
+    },
+    {
+      name: 'Falling Ghost',
+      values: {
+        grid: 250,
+        gridSync: true,
+        gridSyncIndex: 5, // 1/4T
+        pattern: 'down',
+        chance: 0.6,
+        shape: 0.6,
+        feedback: 0.55,
+        mix: 0.5,
+      },
+    },
+    {
+      name: 'Scatter',
+      values: {
+        grid: 125,
+        gridSync: true,
+        gridSyncIndex: 2, // 1/16
+        pattern: 'rand',
+        chance: 0.5,
+        shape: 0.4,
+        feedback: 0.35,
+        mix: 0.45,
+      },
+    },
+  ],
   delay: [
     {
       name: 'Off',
@@ -7403,6 +7791,98 @@ const FX_PRESETS = {
     { name: 'Warm Low-pass', values: { mode: 'lowpass', cutoff: 1600, q: 0.9, mix: 1 } },
     { name: 'Telephone', values: { mode: 'bandpass', cutoff: 1400, q: 1.4, mix: 0.9 } },
     { name: 'Resonant High-pass', values: { mode: 'highpass', cutoff: 480, q: 7, mix: 0.8 } },
+  ],
+  resonator: [
+    {
+      name: 'Off',
+      values: {
+        freq: 220,
+        noteMode: false,
+        note: 57,
+        decay: 0.85,
+        damp: 4200,
+        int2: 12,
+        int3: 7,
+        harm2: 0.5,
+        harm3: 0.3,
+        mix: 0,
+      },
+    },
+    {
+      name: 'Sub Drone',
+      values: {
+        freq: 55,
+        noteMode: true,
+        note: 33, // A1 = 55Hz
+        decay: 0.94,
+        damp: 2200,
+        int2: 12, // octave
+        int3: 19, // octave + fifth
+        harm2: 0.6,
+        harm3: 0.25,
+        mix: 0.5,
+      },
+    },
+    {
+      name: 'Major Triad',
+      values: {
+        freq: 220,
+        noteMode: true,
+        note: 57, // A3
+        decay: 0.9,
+        damp: 5200,
+        int2: 4, // major third
+        int3: 7, // fifth
+        harm2: 0.7,
+        harm3: 0.7,
+        mix: 0.45,
+      },
+    },
+    {
+      name: 'Minor Triad',
+      values: {
+        freq: 220,
+        noteMode: true,
+        note: 57, // A3
+        decay: 0.9,
+        damp: 5200,
+        int2: 3, // minor third
+        int3: 7, // fifth
+        harm2: 0.7,
+        harm3: 0.7,
+        mix: 0.45,
+      },
+    },
+    {
+      name: 'Metallic',
+      values: {
+        freq: 440,
+        noteMode: true,
+        note: 69, // A4 = 440Hz
+        decay: 0.9,
+        damp: 9000,
+        int2: 12,
+        int3: 19,
+        harm2: 0.8,
+        harm3: 0.7,
+        mix: 0.55,
+      },
+    },
+    {
+      name: 'Glass Bell',
+      values: {
+        freq: 880,
+        noteMode: true,
+        note: 81, // A5 = 880Hz
+        decay: 0.82,
+        damp: 6500,
+        int2: 19, // octave + fifth
+        int3: 24, // two octaves
+        harm2: 0.45,
+        harm3: 0.6,
+        mix: 0.4,
+      },
+    },
   ],
   bitreduce: [
     { name: 'Off', values: { bits: 8, rate: 1, mix: 0 } },
@@ -7480,6 +7960,8 @@ function applyInstrumentMixState() {
     const audible = !mix.muted && (!hasSolo || mix.solo);
     const output = fxBuses[busId]?.output;
     if (output && audioCtx) {
+      // Drop any ramp frozen by a suspended context before targeting anew.
+      output.gain.cancelScheduledValues(audioCtx.currentTime);
       output.gain.setTargetAtTime(audible ? 1 : 0, audioCtx.currentTime, 0.01);
     }
   });
@@ -7499,7 +7981,11 @@ function buildInstrumentMixControls(busId) {
   solo.setAttribute('aria-pressed', 'false');
   solo.addEventListener('click', (event) => {
     event.stopPropagation();
-    INSTRUMENT_MIX[busId].solo = !INSTRUMENT_MIX[busId].solo;
+    const next = !INSTRUMENT_MIX[busId].solo;
+    if (next && !SOLO_MODE.additive) {
+      FX_BUS_IDS.forEach((id) => (INSTRUMENT_MIX[id].solo = false));
+    }
+    INSTRUMENT_MIX[busId].solo = next;
     applyInstrumentMixState();
   });
 
@@ -7523,8 +8009,11 @@ function buildInstrumentMixControls(busId) {
 
 // Default per-bus effect state (the limiter is global, not per-bus).
 function makeDefaultFxState() {
+  // enabled:false unplugs the unit from the bus chain entirely (zero CPU) —
+  // unlike mix:0, which keeps every processor rendering behind the dry path.
   return {
     beatrepeat: {
+      enabled: true,
       interval: 0.5,
       sync: true,
       syncIndex: 4,
@@ -7537,11 +8026,44 @@ function makeDefaultFxState() {
       chance: 1,
       mix: 0,
     },
-    delay: { time: 0.3, feedback: 0.35, mix: 0, sync: false, syncIndex: 4, hp: 20, mode: 'stereo' },
-    filter: { mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 0 },
-    bitreduce: { bits: 8, rate: 1, mix: 0 },
-    sat: { drive: 0.3, mix: 0 },
-    reverb: { size: 2, decay: 3, predelay: 0.018, damping: 0.42, mix: 0 },
+    grainarp: {
+      enabled: true,
+      grid: 250, // free value in ms, like beatrepeat's grid
+      gridSync: true,
+      gridSyncIndex: 4, // 1/8
+      pattern: 'oct',
+      chance: 1,
+      shape: 0.3,
+      feedback: 0.25,
+      mix: 0,
+    },
+    delay: {
+      enabled: true,
+      time: 0.3,
+      feedback: 0.35,
+      mix: 0,
+      sync: false,
+      syncIndex: 4,
+      hp: 20,
+      mode: 'stereo',
+    },
+    filter: { enabled: true, mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 0 },
+    resonator: {
+      enabled: true,
+      freq: 220,
+      noteMode: false,
+      note: 57, // MIDI A3 = 220Hz
+      decay: 0.85,
+      damp: 4200,
+      int2: 12, // chord voice 2, semitones from root (octave)
+      int3: 7, // chord voice 3, semitones from root (fifth)
+      harm2: 0.5,
+      harm3: 0.3,
+      mix: 0,
+    },
+    bitreduce: { enabled: true, bits: 8, rate: 1, mix: 0 },
+    sat: { enabled: true, drive: 0.3, mix: 0 },
+    reverb: { enabled: true, size: 2, decay: 3, predelay: 0.018, damping: 0.42, mix: 0 },
   };
 }
 
@@ -7558,7 +8080,16 @@ const LIMITER = { threshold: -8, attack: 0.003, release: 0.12, ratio: 20, knee: 
 
 // Order of the reorderable effects between each bus input and bus output.
 // Mutated per-bus by drag-to-reorder; persisted in presets.
-const DEFAULT_FX_ORDER = ['beatrepeat', 'delay', 'filter', 'bitreduce', 'sat', 'reverb'];
+const DEFAULT_FX_ORDER = [
+  'beatrepeat',
+  'grainarp',
+  'delay',
+  'filter',
+  'resonator',
+  'bitreduce',
+  'sat',
+  'reverb',
+];
 const fxOrders = {
   gen0: [...DEFAULT_FX_ORDER],
   gen1: [...DEFAULT_FX_ORDER],
@@ -7644,6 +8175,20 @@ const BEATREPEAT_INTERVAL_SYNC_CONTROL = {
   step: 1,
   unit: '',
 };
+const RESONATOR_FREQ_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'resonator').params.find(
+  (param) => param.key === 'freq',
+);
+// MIDI range whose frequencies stay inside the worklet's 40–2000Hz clamp.
+const RESONATOR_NOTE_MIN = 28; // E1 ≈ 41.2Hz
+const RESONATOR_NOTE_MAX = 95; // B6 ≈ 1975.5Hz
+const RESONATOR_FREQ_NOTE_CONTROL = {
+  key: 'freq',
+  label: 'Note',
+  min: RESONATOR_NOTE_MIN,
+  max: RESONATOR_NOTE_MAX,
+  step: 1,
+  unit: '',
+};
 const BEATREPEAT_GRID_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'beatrepeat').params.find(
   (param) => param.key === 'grid',
 );
@@ -7655,6 +8200,23 @@ const BEATREPEAT_GRID_SYNC_CONTROL = {
   step: 1,
   unit: '',
 };
+const GRAINARP_GRID_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'grainarp').params.find(
+  (param) => param.key === 'grid',
+);
+const GRAINARP_GRID_SYNC_CONTROL = {
+  key: 'grid',
+  label: 'Grid',
+  min: 0,
+  max: GRAIN_SYNC_STEPS.length - 1,
+  step: 1,
+  unit: '',
+};
+const GRAINARP_PATTERNS = [
+  ['oct', 'OCT'],
+  ['up', 'UP'],
+  ['down', 'DOWN'],
+  ['rand', 'RND'],
+];
 const STEP_SEQ_STEP_BEAT_OPTIONS = [
   { label: '1/4', beats: 0.25 },
   { label: '1/2', beats: 0.5 },
@@ -8517,6 +9079,16 @@ function setBounceRenderStems(on) {
   localStorage.setItem(BOUNCE_RENDER_STORAGE_KEY, on ? 'on' : 'off');
 }
 
+// ── Solo mode ── additive (default): solos stack. Exclusive: soloing an
+// instrument clears every other solo so it sounds alone.
+const SOLO_MODE_STORAGE_KEY = 'grnsh-solo-additive-v1';
+const SOLO_MODE = { additive: localStorage.getItem(SOLO_MODE_STORAGE_KEY) !== 'off' };
+
+function setSoloAdditive(on) {
+  SOLO_MODE.additive = on;
+  localStorage.setItem(SOLO_MODE_STORAGE_KEY, on ? 'on' : 'off');
+}
+
 function stripTooltipTitle(el) {
   const t = el.getAttribute?.('title');
   if (!t) return;
@@ -8575,6 +9147,13 @@ function initSettingsMenu() {
     bounceModeSelect.value = BOUNCE_RENDER.stems ? 'stems' : 'master';
     bounceModeSelect.addEventListener('change', () =>
       setBounceRenderStems(bounceModeSelect.value === 'stems'),
+    );
+  }
+  const soloAdditiveEnable = document.getElementById('soloAdditiveEnable');
+  if (soloAdditiveEnable) {
+    soloAdditiveEnable.checked = SOLO_MODE.additive;
+    soloAdditiveEnable.addEventListener('change', () =>
+      setSoloAdditive(soloAdditiveEnable.checked),
     );
   }
   // A stored "off" must strip the titles the UI build just created.
@@ -9425,6 +10004,62 @@ function refreshBeatRepeatGridUI() {
   beatRepeatGridSyncModeControl?.setMode(isSync ? 'sync' : 'free');
 }
 
+function refreshGrainArpGridUI() {
+  const control = fxControlBindings.get('grainarp:grid');
+  if (!control) return;
+  const isSync = !!FX.grainarp.gridSync;
+  control.setConfig(
+    isSync
+      ? { ...GRAINARP_GRID_SYNC_CONTROL, resetValue: FX.grainarp.gridSyncIndex }
+      : { ...GRAINARP_GRID_FREE_CONTROL, resetValue: FX.grainarp.grid },
+  );
+  control.setFormatter(isSync ? (v) => getGrainSyncStep(Math.round(v)).label : null);
+  control.setValue(isSync ? FX.grainarp.gridSyncIndex : FX.grainarp.grid);
+  grainArpGridSyncModeControl?.setMode(isSync ? 'sync' : 'free');
+}
+
+function refreshGrainArpPatternUI() {
+  grainArpPatternButtons.forEach((btn, mode) =>
+    btn.classList.toggle('active', FX.grainarp.pattern === mode),
+  );
+}
+
+function refreshResonatorFreqUI() {
+  const control = fxControlBindings.get('resonator:freq');
+  if (!control) return;
+  const isNote = !!FX.resonator.noteMode;
+  control.setConfig(
+    isNote
+      ? { ...RESONATOR_FREQ_NOTE_CONTROL, resetValue: FX.resonator.note }
+      : { ...RESONATOR_FREQ_FREE_CONTROL, resetValue: FX.resonator.freq },
+  );
+  control.setFormatter(
+    isNote
+      ? (v) =>
+          `${formatResonatorNote(v)} • ${formatNumericValue(midiToFreqHz(Math.round(v)), 0)}Hz`
+      : null,
+  );
+  control.setValue(isNote ? FX.resonator.note : FX.resonator.freq);
+  resonatorNoteModeControl?.setMode(isNote ? 'note' : 'free');
+  refreshResonatorIntervalUI();
+}
+
+// The chord-voice readouts resolve against the current root: note names in
+// note mode, absolute Hz in free mode. Re-set the formatter to re-render
+// whenever the root or the mode moves.
+function formatResonatorInterval(v) {
+  const st = Math.round(v);
+  const sign = st >= 0 ? '+' : '';
+  if (FX.resonator.noteMode) return `${sign}${st} • ${formatResonatorNote(FX.resonator.note + st)}`;
+  return `${sign}${st} • ${formatNumericValue(getResonatorFreqHz() * Math.pow(2, st / 12), 0)}Hz`;
+}
+
+function refreshResonatorIntervalUI() {
+  ['int2', 'int3'].forEach((key) =>
+    fxControlBindings.get(`resonator:${key}`)?.setFormatter(formatResonatorInterval),
+  );
+}
+
 function refreshDelayModeUI() {
   delayModeButtons.forEach((btn, mode) => btn.classList.toggle('active', FX.delay.mode === mode));
 }
@@ -9469,10 +10104,13 @@ function setTransportBpm(value, { refresh = true, updateField = true } = {}) {
       applyFx('beatrepeat', 'interval', getBaseFxValue('beatrepeat', 'interval', busId), busId);
     if (st.beatrepeat.gridSync)
       applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid', busId), busId);
+    if (st.grainarp.gridSync)
+      applyFx('grainarp', 'grid', getBaseFxValue('grainarp', 'grid', busId), busId);
   });
   refreshDelayTimeUI();
   refreshBeatRepeatIntervalUI();
   refreshBeatRepeatGridUI();
+  refreshGrainArpGridUI();
   refreshLFOUI();
   for (let gi = 0; gi < 2; gi++) {
     if (state[gi].grainSizeSync) refreshGenGrainSizeSyncUI(gi);
@@ -10282,6 +10920,12 @@ function refreshBackPanelState() {
       module.subtitleEl.textContent = `${started ? 'front bus live' : 'standby'} • ${lfoMappings.size} mod route${lfoMappings.size === 1 ? '' : 's'}`;
       module.el.classList.toggle('active', started || GEN3.activeNotes.size > 0);
     })();
+  BACK_PANEL.audioModules.get('grainarp') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('grainarp');
+      module.subtitleEl.textContent = `${FX.grainarp.pattern.toUpperCase()} • ${formatBackValue(getFxParamDef('grainarp', 'mix'), FX.grainarp.mix)} wet`;
+      module.el.classList.toggle('active', FX.grainarp.mix > 0.001);
+    })();
   BACK_PANEL.audioModules.get('delay') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('delay');
@@ -10293,6 +10937,12 @@ function refreshBackPanelState() {
       const module = BACK_PANEL.audioModules.get('filter');
       module.subtitleEl.textContent = `${FX.filter.mode.toUpperCase()} • ${formatNumericValue(FX.filter.cutoff, 0)}Hz`;
       module.el.classList.toggle('active', FX.filter.mix > 0.001);
+    })();
+  BACK_PANEL.audioModules.get('resonator') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('resonator');
+      module.subtitleEl.textContent = `${FX.resonator.noteMode ? formatResonatorNote(FX.resonator.note) : `${formatNumericValue(FX.resonator.freq, 0)}Hz`} • ${formatBackValue(getFxParamDef('resonator', 'mix'), FX.resonator.mix)} wet`;
+      module.el.classList.toggle('active', FX.resonator.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('bitreduce') &&
     (() => {
@@ -12640,6 +13290,15 @@ function buildMasterPanel() {
   bounceBtn.title = 'Bounce song → here — silent one-pass render of the arrangement, fed straight into mastering';
   bounceBtn.addEventListener('click', (e) => bounceSong({ invert: e.shiftKey }));
 
+  const bounceProgressWrap = document.createElement('div');
+  bounceProgressWrap.className = 'bounce-progress';
+  bounceProgressWrap.setAttribute('role', 'progressbar');
+  bounceProgressWrap.setAttribute('aria-label', 'Bounce progress');
+  bounceProgressWrap.hidden = true;
+  bounceProgressWrap.innerHTML =
+    '<span class="bounce-progress-fill"></span><span class="bounce-progress-label">0%</span>';
+  MASTERING.els.bounceProgress = bounceProgressWrap;
+
   const loadInput = document.createElement('input');
   loadInput.type = 'file';
   loadInput.accept = 'audio/*';
@@ -12740,6 +13399,7 @@ function buildMasterPanel() {
   toolbar.append(
     sourceInfo,
     bounceBtn,
+    bounceProgressWrap,
     loadBtn,
     loadInput,
     previewBtn,
@@ -13010,6 +13670,13 @@ function setPanelView(mode) {
     .forEach((btn) => btn.classList.toggle('active', btn.dataset.view === mode));
   if (mode === 'master') enterMasteringView();
   else leaveMasteringView();
+  // Self-heal the audible state: entering mastering suspends the main
+  // context, which can freeze bus/channel gain ramps mid-flight — re-assert
+  // the mix on every view change so nothing stays stuck half-silent.
+  if (audioCtx) {
+    applyInstrumentMixState();
+    GEN4.channels.forEach((ch, ci) => gen4SetChannelMuted(ci, ch.muted));
+  }
   if (mode === 'back') {
     refreshBackPanelState();
     rebuildBackWireSVG();
@@ -13356,6 +14023,15 @@ function applyFilterMode(busId = activeBus) {
   bus.filter.biquad.type = fxStates[busId].filter.mode;
 }
 
+function applyGrainArpPattern(busId = activeBus) {
+  const bus = fxBuses[busId];
+  if (!bus?.grainarp?.node) return;
+  const idx = GRAINARP_PATTERNS.findIndex(([id]) => id === fxStates[busId].grainarp.pattern);
+  bus.grainarp.node.parameters
+    .get('pattern')
+    ?.setValueAtTime(Math.max(0, idx), audioCtx.currentTime);
+}
+
 // Build the global master tail once: every bus output sums into master.sum,
 // which feeds the single limiter and the master output gain → destination.
 function buildMaster() {
@@ -13411,6 +14087,33 @@ function buildBusFx(busId) {
   brNode.connect(brWet);
   brDry.connect(brOut);
   brWet.connect(brOut);
+
+  // ─ Grain Arp (Microcosm-style pitched slice arpeggiator) ─
+  const arpIn = ac.createGain();
+  const arpDry = ac.createGain();
+  const arpWet = ac.createGain();
+  const arpNode = new AudioWorkletNode(ac, 'grain-arp-processor', {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [2],
+    parameterData: {
+      grid: getGrainArpGridSeconds(busId),
+      pattern: Math.max(
+        0,
+        GRAINARP_PATTERNS.findIndex(([id]) => id === st.grainarp.pattern),
+      ),
+      chance: st.grainarp.chance,
+      shape: st.grainarp.shape,
+      feedback: st.grainarp.feedback,
+    },
+  });
+  const arpOut = ac.createGain();
+
+  arpIn.connect(arpDry);
+  arpIn.connect(arpNode);
+  arpNode.connect(arpWet);
+  arpDry.connect(arpOut);
+  arpWet.connect(arpOut);
 
   // ─ Delay (feedback loop) ─
   const dlyIn = ac.createGain();
@@ -13492,6 +14195,32 @@ function buildBusFx(busId) {
   fltDry.connect(fltOut);
   fltWet.connect(fltOut);
 
+  // ─ Resonator (comb + 2 harmonic partials, tuned in the worklet) ─
+  const resIn = ac.createGain();
+  const resDry = ac.createGain();
+  const resWet = ac.createGain();
+  const resNode = new AudioWorkletNode(ac, 'resonator-processor', {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [2],
+    parameterData: {
+      freq: getResonatorFreqHz(busId),
+      decay: st.resonator.decay,
+      damp: st.resonator.damp,
+      int2: st.resonator.int2,
+      int3: st.resonator.int3,
+      harm2: st.resonator.harm2,
+      harm3: st.resonator.harm3,
+    },
+  });
+  const resOut = ac.createGain();
+
+  resIn.connect(resDry);
+  resIn.connect(resNode);
+  resNode.connect(resWet);
+  resDry.connect(resOut);
+  resWet.connect(resOut);
+
   // ─ Bit reducer ─
   const bitIn = ac.createGain();
   const bitDry = ac.createGain();
@@ -13554,6 +14283,7 @@ function buildBusFx(busId) {
     input: chainIn,
     output: busOut,
     beatrepeat: { node: brNode, dry: brDry, wet: brWet, in: brIn, out: brOut },
+    grainarp: { node: arpNode, dry: arpDry, wet: arpWet, in: arpIn, out: arpOut },
     delay: {
       tap: dlyTap,
       fb: dlyFb,
@@ -13577,6 +14307,7 @@ function buildBusFx(busId) {
       out: dlyOut,
     },
     filter: { biquad: fltBiquad, dry: fltDry, wet: fltWet, in: fltIn, out: fltOut },
+    resonator: { node: resNode, dry: resDry, wet: resWet, in: resIn, out: resOut },
     bitreduce: { node: bitNode, dry: bitDry, wet: bitWet, in: bitIn, out: bitOut },
     sat: { shaper: satShaper, dry: satDry, wet: satWet, in: satIn, out: satOut },
     reverb: {
@@ -13608,7 +14339,9 @@ function buildFxNodes() {
 
 // Rewire one bus's reorderable effects between its input and its output to match
 // fxOrders[busId]. Safe to call live — each effect is a self-contained in→out
-// pair, so we fully disconnect the movable links and rebuild them.
+// pair, so we fully disconnect the movable links and rebuild them. Disabled
+// units are left out of the chain: with no path to the destination the browser
+// skips their whole subgraph (worklets, convolver, oversampled shaper).
 function reconnectFxChain(busId = activeBus) {
   const bus = fxBuses[busId];
   if (!bus) return;
@@ -13617,7 +14350,7 @@ function reconnectFxChain(busId = activeBus) {
   let prev = bus.input;
   fxOrders[busId].forEach((id) => {
     const eff = bus[id];
-    if (!eff) return;
+    if (!eff || fxStates[busId][id]?.enabled === false) return;
     prev.connect(eff.in);
     prev = eff.out;
   });
@@ -13639,6 +14372,17 @@ function applyFx(id, key, val, busId = activeBus) {
     if (key === 'mix') {
       fx.beatrepeat.wet.gain.value = val;
       fx.beatrepeat.dry.gain.value = 1 - val;
+    }
+  } else if (id === 'grainarp') {
+    const setParam = (name, value) =>
+      fx.grainarp.node.parameters.get(name)?.setValueAtTime(value, audioCtx.currentTime);
+    if (key === 'grid') setParam('grid', clamp(val, 0.005, 1));
+    if (key === 'chance') setParam('chance', clamp(val, 0, 1));
+    if (key === 'shape') setParam('shape', clamp(val, 0, 1));
+    if (key === 'feedback') setParam('feedback', clamp(val, 0, 0.85));
+    if (key === 'mix') {
+      fx.grainarp.wet.gain.value = val;
+      fx.grainarp.dry.gain.value = 1 - val;
     }
   } else if (id === 'delay') {
     if (key === 'time')
@@ -13664,6 +14408,20 @@ function applyFx(id, key, val, busId = activeBus) {
     if (key === 'mix') {
       fx.filter.wet.gain.value = val;
       fx.filter.dry.gain.value = 1 - val;
+    }
+  } else if (id === 'resonator') {
+    const setParam = (name, value) =>
+      fx.resonator.node.parameters.get(name)?.setTargetAtTime(value, audioCtx.currentTime, 0.02);
+    if (key === 'freq') setParam('freq', clamp(val, 40, 2000));
+    if (key === 'decay') setParam('decay', clamp(val, 0, 0.98));
+    if (key === 'damp') setParam('damp', clamp(val, 200, 12000));
+    if (key === 'int2') setParam('int2', clamp(val, -24, 24));
+    if (key === 'int3') setParam('int3', clamp(val, -24, 24));
+    if (key === 'harm2') setParam('harm2', clamp(val, 0, 1));
+    if (key === 'harm3') setParam('harm3', clamp(val, 0, 1));
+    if (key === 'mix') {
+      fx.resonator.wet.gain.value = val;
+      fx.resonator.dry.gain.value = 1 - val;
     }
   } else if (id === 'bitreduce') {
     if (key === 'bits')
@@ -13722,6 +14480,7 @@ function applyAllFx(busId = activeBus) {
   });
   applyDelayMode(busId);
   applyFilterMode(busId);
+  applyGrainArpPattern(busId);
 }
 
 function refreshGen3UI() {
@@ -13798,6 +14557,7 @@ function capturePreset() {
       })),
     },
     kickSc: { release: KICK_SC.release, amount: KICK_SC.amount },
+    scale: { root: GEN4_SCALE.root, scale: GEN4_SCALE.scale },
     mastering: JSON.parse(JSON.stringify(MASTERING.params)),
     mappings: [...lfoMappings.values()].map(({ genIdx, key, sourceIdx }) => ({
       genIdx,
@@ -13860,6 +14620,9 @@ function applyPreset(preset, { resetSources = true } = {}) {
       const saved = preset.fxByBus[busId];
       if (!saved) return;
       Object.keys(fxStates[busId]).forEach((id) => {
+        // Legacy saves predate the power switch — default back to on so a
+        // stale flag from the previous project can't linger.
+        fxStates[busId][id].enabled = true;
         if (saved[id]) Object.assign(fxStates[busId][id], saved[id]);
       });
     });
@@ -13870,6 +14633,8 @@ function applyPreset(preset, { resetSources = true } = {}) {
     }
     // Push every bus's loaded state to its audio nodes, then reapply modulation.
     FX_BUS_IDS.forEach((busId) => applyAllFx(busId));
+    // Re-splice each chain so loaded power switches take effect.
+    FX_BUS_IDS.forEach((busId) => reconnectFxChain(busId));
     applyFxModulation();
   }
 
@@ -13977,6 +14742,14 @@ function applyPreset(preset, { resetSources = true } = {}) {
       }
     });
   }
+
+  // Shared musical scale (drum roll + gen3 keys). Legacy saves lack it → reset
+  // to "no scale" so the previous project's choice can't bleed through.
+  GEN4_SCALE.root = clamp(Math.round(preset.scale?.root) || 0, 0, 11);
+  GEN4_SCALE.scale = GEN4_SCALES.some(([id]) => id === preset.scale?.scale)
+    ? preset.scale.scale
+    : 'off';
+  onGlobalScaleChanged();
 
   lfoMappings.clear();
   preset.mappings?.forEach(({ genIdx, key, lfoIdx, sourceIdx }) => {
@@ -14465,6 +15238,7 @@ function renderActiveBusFx() {
   fxSectionEls.clear();
   filterModeButtons.clear();
   delayModeButtons.clear();
+  grainArpPatternButtons.clear();
   DEFAULT_FX_ORDER.forEach((effectId) => fxPresetSelects.delete(effectId));
 
   const fxDefById = new Map(FX_DEFS.map((def) => [def.id, def]));
@@ -14474,6 +15248,26 @@ function renderActiveBusFx() {
     const { section, header, content, toggle } = createFxSection(def.label);
     const presetSelect = buildFxPresetSelect(def.id);
     if (presetSelect) header.insertBefore(presetSelect, toggle);
+
+    // Power switch: off unplugs the unit from this bus's chain (zero CPU).
+    const powerBtn = document.createElement('button');
+    powerBtn.type = 'button';
+    powerBtn.className = 'fx-power';
+    powerBtn.title = 'On/off — off unplugs the unit from the chain (saves CPU)';
+    const syncPower = () => {
+      const on = FX[def.id].enabled !== false;
+      powerBtn.classList.toggle('active', on);
+      section.classList.toggle('fx-off', !on);
+      powerBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    };
+    powerBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      FX[def.id].enabled = FX[def.id].enabled === false;
+      syncPower();
+      reconnectFxChain(activeBus);
+    });
+    header.insertBefore(powerBtn, header.firstChild);
+    syncPower();
 
     if (def.id === 'filter') {
       const modeRow = document.createElement('div');
@@ -14523,6 +15317,27 @@ function renderActiveBusFx() {
       content.appendChild(modeRow);
     }
 
+    if (def.id === 'grainarp') {
+      const modeRow = document.createElement('div');
+      modeRow.className = 'fx-mode-row';
+      GRAINARP_PATTERNS.forEach(([mode, label]) => {
+        const btn = document.createElement('button');
+        btn.className = 'fx-mode-btn' + (FX.grainarp.pattern === mode ? ' active' : '');
+        btn.type = 'button';
+        btn.textContent = label;
+        btn.addEventListener('click', () => {
+          markFxPresetCustom(def.id);
+          FX.grainarp.pattern = mode;
+          applyGrainArpPattern();
+          refreshGrainArpPatternUI();
+          refreshBackPanelState();
+        });
+        grainArpPatternButtons.set(mode, btn);
+        modeRow.appendChild(btn);
+      });
+      content.appendChild(modeRow);
+    }
+
     def.params.forEach((p) => {
       const isMappable = !!getFxParamBounds(def.id, p.key);
       const control = makeControlRow(
@@ -14560,6 +15375,30 @@ function renderActiveBusFx() {
               FX.beatrepeat.grid = v;
             }
             applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
+            refreshModulationVisuals();
+            refreshBackPanelState();
+            return;
+          }
+          if (def.id === 'grainarp' && p.key === 'grid') {
+            if (FX.grainarp.gridSync) {
+              FX.grainarp.gridSyncIndex = Math.round(v);
+            } else {
+              FX.grainarp.grid = v;
+            }
+            applyFx('grainarp', 'grid', getBaseFxValue('grainarp', 'grid'));
+            refreshModulationVisuals();
+            refreshBackPanelState();
+            return;
+          }
+          if (def.id === 'resonator' && p.key === 'freq') {
+            if (FX.resonator.noteMode) {
+              FX.resonator.note = Math.round(v);
+            } else {
+              FX.resonator.freq = v;
+            }
+            if (isMappable) applyFxModulation();
+            else applyFx('resonator', 'freq', getBaseFxValue('resonator', 'freq'));
+            refreshResonatorIntervalUI();
             refreshModulationVisuals();
             refreshBackPanelState();
             return;
@@ -14611,6 +15450,38 @@ function renderActiveBusFx() {
         });
         content.appendChild(beatRepeatGridSyncModeControl);
       }
+
+      if (def.id === 'grainarp' && p.key === 'grid') {
+        grainArpGridSyncModeControl = buildSyncModeRow(FX.grainarp.gridSync, (mode) => {
+          markFxPresetCustom(def.id);
+          FX.grainarp.gridSync = mode === 'sync';
+          refreshGrainArpGridUI();
+          applyFx('grainarp', 'grid', getBaseFxValue('grainarp', 'grid'));
+          refreshModulationVisuals();
+          refreshBackPanelState();
+        });
+        content.appendChild(grainArpGridSyncModeControl);
+      }
+
+      if (def.id === 'resonator' && p.key === 'freq') {
+        resonatorNoteModeControl = buildSyncModeRow(
+          FX.resonator.noteMode,
+          (mode) => {
+            markFxPresetCustom(def.id);
+            FX.resonator.noteMode = mode === 'note';
+            refreshResonatorFreqUI();
+            if (isMappable) applyFxModulation();
+            else applyFx('resonator', 'freq', getBaseFxValue('resonator', 'freq'));
+            refreshModulationVisuals();
+            refreshBackPanelState();
+          },
+          [
+            ['free', 'Free'],
+            ['note', 'Note'],
+          ],
+        );
+        content.appendChild(resonatorNoteModeControl);
+      }
     });
 
     section.classList.add('fx-reorderable');
@@ -14624,7 +15495,12 @@ function renderActiveBusFx() {
   refreshDelayModeUI();
   refreshBeatRepeatIntervalUI();
   refreshBeatRepeatGridUI();
-  refreshModulationVisuals();
+  refreshGrainArpGridUI();
+  refreshGrainArpPatternUI();
+  refreshResonatorFreqUI();
+  // Freshly built controls start with unlit map LEDs — re-apply the active
+  // mappings so a bus switch/reorder/preset never hides live modulation.
+  refreshLFOMappingUI();
 }
 
 function updateFxActiveLabel() {
@@ -14980,6 +15856,8 @@ function stop() {
   granularModulePromise = null;
   bitReducerModulePromise = null;
   beatRepeatModulePromise = null;
+  resonatorModulePromise = null;
+  grainArpModulePromise = null;
   started = false;
 
   // Reset freeze state for both generators.
