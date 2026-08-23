@@ -596,6 +596,8 @@ async function restoreAudioForScope(scope) {
     // A scope without master audio must not inherit the previous project's wav.
     clearMasteringSource();
   }
+  // A restore that leaves no generator on the mic releases the input stream.
+  if (!anyMicSourceSelected()) disconnectGranularInput({ stopTracks: true });
   // Mirror what is now loaded into the autosave scope (also clears stale clips).
   queueAutosaveAudio();
 }
@@ -860,6 +862,70 @@ function stopRecording() {
   setStatus(started ? getGranularStatusText() : audioCtx ? 'gen3 ready' : 'idle');
 }
 
+// ── Stem taps ── during a stems bounce each instrument bus gets its own
+// capture tap on its post-FX output (pre master limiter/mastering), so one
+// realtime pass yields a wav per bus alongside the master.
+const STEM_TAPS = { active: false, taps: [] };
+
+function startStemTaps() {
+  stopStemTaps({ save: false });
+  STEM_TAPS.taps = FX_BUS_IDS.map((busId) => {
+    const bus = fxBuses[busId];
+    if (!bus) return null;
+    const processor = audioCtx.createScriptProcessor(4096, 2, 2);
+    const sink = audioCtx.createGain();
+    sink.gain.value = 0;
+    const tap = { busId, processor, sink, left: [], right: [], sampleCount: 0, peak: 0 };
+    processor.onaudioprocess = (e) => {
+      const input = e.inputBuffer;
+      const inL = input.getChannelData(0);
+      const inR = input.numberOfChannels > 1 ? input.getChannelData(1) : inL;
+      tap.left.push(new Float32Array(inL));
+      tap.right.push(new Float32Array(inR));
+      tap.sampleCount += inL.length;
+      for (let i = 0; i < inL.length; i += 64) {
+        const a = Math.abs(inL[i]);
+        if (a > tap.peak) tap.peak = a;
+      }
+    };
+    bus.output.connect(processor);
+    processor.connect(sink);
+    sink.connect(audioCtx.destination);
+    return tap;
+  }).filter(Boolean);
+  STEM_TAPS.active = STEM_TAPS.taps.length > 0;
+}
+
+function stopStemTaps({ save = false, baseName = 'grnsh' } = {}) {
+  const taps = STEM_TAPS.taps;
+  STEM_TAPS.taps = [];
+  STEM_TAPS.active = false;
+  let written = 0;
+  taps.forEach((tap) => {
+    try {
+      fxBuses[tap.busId]?.output.disconnect(tap.processor);
+    } catch (e) {}
+    try {
+      tap.processor.disconnect();
+    } catch (e) {}
+    tap.processor.onaudioprocess = null;
+    try {
+      tap.sink.disconnect();
+    } catch (e) {}
+    // Skip silent stems — an unused instrument shouldn't cost a download.
+    if (save && tap.sampleCount > 0 && tap.peak > 1e-5 && audioCtx) {
+      const left = mergeFloat32(tap.left, tap.sampleCount);
+      const right = mergeFloat32(tap.right, tap.sampleCount);
+      REC.downloadName = `${baseName}-stem-${tap.busId}.wav`;
+      downloadRecording(encodeWav(left, right, audioCtx.sampleRate));
+      written += 1;
+    }
+    tap.left = [];
+    tap.right = [];
+  });
+  return written;
+}
+
 // ── Song bounce ── renders the arrangement to a WAV: master is unhooked from
 // the speakers, the song plays once from the top through the real graph while
 // the record tap captures it, and capture stops after the song ends plus an
@@ -924,7 +990,9 @@ function refreshBounceProgress() {
   setBounceProgress(clamp(renderedSeconds / Math.max(0.001, BOUNCE.songSeconds), 0, 1) * songShare);
 }
 
-async function bounceSong() {
+async function bounceSong(opts = {}) {
+  // The settings menu picks the default; ⇧-click on the bounce button inverts it.
+  const stems = opts?.invert === true ? !BOUNCE_RENDER.stems : BOUNCE_RENDER.stems;
   if (BOUNCE.active) {
     finishBounce('bounce cancelled', { save: false });
     return;
@@ -951,6 +1019,7 @@ async function bounceSong() {
     await ensureTransportEngine();
     if (!started) await start();
     await startRecording();
+    if (stems) startStemTaps();
     // Silent render: the record tap keeps feeding, the speakers get nothing.
     try {
       master.output.disconnect(audioCtx.destination);
@@ -992,6 +1061,13 @@ function finishBounce(statusText, { save = true } = {}) {
   BOUNCE.active = false;
   BOUNCE.phase = 'idle';
   if (GEN4.playing) stopGen4Sequencer();
+  let stemCount = 0;
+  if (STEM_TAPS.active) {
+    stemCount = stopStemTaps({
+      save,
+      baseName: (currentProjectName || 'grnsh').replace(/[^\w.-]+/g, '_'),
+    });
+  }
   if (REC.isRecording) {
     if (save) {
       REC.downloadName = `${(currentProjectName || 'grnsh').replace(/[^\w.-]+/g, '_')}-song.wav`;
@@ -1012,7 +1088,7 @@ function finishBounce(statusText, { save = true } = {}) {
   SONG.loop = BOUNCE.prevSongLoop;
   setPlayMode(BOUNCE.prevMode);
   refreshBounceUI();
-  setStatus(statusText || 'song bounced');
+  setStatus(statusText || (stemCount ? `song bounced + ${stemCount} stems` : 'song bounced'));
 }
 
 function refreshBounceUI() {
@@ -1021,7 +1097,7 @@ function refreshBounceUI() {
   btn.classList.toggle('active', BOUNCE.active);
   btn.title = BOUNCE.active
     ? 'Cancel bounce'
-    : 'Bounce song to WAV — silent one-pass render of the arrangement';
+    : `Bounce song to WAV — ${BOUNCE_RENDER.stems ? 'master + per-instrument stems' : 'master only'} (set in ⚙ options; ⇧-click for the other mode)`;
   refreshBounceProgress();
 }
 
@@ -1609,6 +1685,11 @@ const GEN3_LFO_PARAMS = [
   { key: 'sustain', min: 0, max: 1, step: 0.01, unit: '' },
 ];
 const FX_LFO_PARAMS = [
+  { id: 'beatrepeat', key: 'gate', min: 1, max: 32 },
+  { id: 'beatrepeat', key: 'pitch', min: -24, max: 24, unit: 'st' },
+  { id: 'beatrepeat', key: 'decay', min: 0, max: 1 },
+  { id: 'beatrepeat', key: 'chance', min: 0, max: 1 },
+  { id: 'beatrepeat', key: 'mix', min: 0, max: 1 },
   { id: 'delay', key: 'time', min: 0, max: MAX_DELAY_SECONDS },
   { id: 'delay', key: 'feedback', min: 0, max: 0.95 },
   { id: 'delay', key: 'mix', min: 0, max: 1 },
@@ -1771,10 +1852,9 @@ function getEffectiveGeneratorParams(genIdx, base = state[genIdx]) {
       const paramDef = getParamBounds(genIdx, key);
       const scaled = getModSourceScaledValue(sourceIdx);
       if (!paramDef || scaled === null) return;
-      const half = (paramDef.max - paramDef.min) * 0.5;
       effective[key] = Math.max(
         paramDef.min,
-        Math.min(paramDef.max, effective[key] + scaled * half),
+        Math.min(paramDef.max, effective[key] + getModOffset(sourceIdx, scaled, paramDef)),
       );
     });
   }
@@ -1803,14 +1883,21 @@ function getEffectiveGen3Params() {
       const paramDef = getGen3ParamBounds(key);
       const scaled = getModSourceScaledValue(sourceIdx);
       if (!paramDef || scaled === null) return;
-      const half = (paramDef.max - paramDef.min) * 0.5;
       effective[key] = Math.max(
         paramDef.min,
-        Math.min(paramDef.max, effective[key] + scaled * half),
+        Math.min(paramDef.max, effective[key] + getModOffset(sourceIdx, scaled, paramDef)),
       );
     });
   }
   return effective;
+}
+
+// Offset a mapping contributes: sources are bipolar −1..1 over half the param
+// range — except SEQ 1 into a semitone param, where the seq's 1/12 levels map
+// one-to-one to semitones (a +7 step moves the pitch a fifth).
+function getModOffset(sourceIdx, scaled, paramDef) {
+  if (sourceIdx === 2 && paramDef?.unit === 'st') return Math.round(scaled * 12);
+  return scaled * ((paramDef.max - paramDef.min) * 0.5);
 }
 
 function getModSourceScaledValue(sourceIdx) {
@@ -1843,8 +1930,10 @@ function getEffectiveFxValue(id, key, busId = activeBus) {
   if (!mapping || !paramDef) return base;
   const scaled = getModSourceScaledValue(mapping.sourceIdx);
   if (scaled === null) return base;
-  const half = (paramDef.max - paramDef.min) * 0.5;
-  return Math.max(paramDef.min, Math.min(paramDef.max, base + scaled * half));
+  return Math.max(
+    paramDef.min,
+    Math.min(paramDef.max, base + getModOffset(mapping.sourceIdx, scaled, paramDef)),
+  );
 }
 
 let modVisualsActive = false; // were modulation visuals showing last frame?
@@ -2553,6 +2642,8 @@ function buildGeneratorPanel(genIdx) {
     genControlBindings[genIdx].set(p.key, control);
     genMapBindings[genIdx].set(p.key, control);
     rows.appendChild(control);
+    // The FREE/SYNC toggle lives inside its param's control card — as a
+    // sibling it would claim its own grid cell next to the card.
     if (p.key === 'grainSizeMs') {
       const btn = buildGenSyncToggle(() => {
         state[genIdx].grainSizeSync = !state[genIdx].grainSizeSync;
@@ -2560,7 +2651,7 @@ function buildGeneratorPanel(genIdx) {
         sendParams(genIdx);
       });
       genGrainSyncModeControls[genIdx] = btn;
-      rows.appendChild(btn);
+      control.appendChild(btn);
     }
     if (p.key === 'density') {
       const btn = buildGenSyncToggle(() => {
@@ -2569,7 +2660,7 @@ function buildGeneratorPanel(genIdx) {
         sendParams(genIdx);
       });
       genDensitySyncModeControls[genIdx] = btn;
-      rows.appendChild(btn);
+      control.appendChild(btn);
     }
   });
   rows.appendChild(buildGeneratorReverseControl(genIdx));
@@ -2636,6 +2727,630 @@ function ensureVizAnalyser() {
   VIZ.timeBuf = new Uint8Array(vizAnalyser.fftSize);
 }
 
+// ─── WebGL2 shader engine ────────────────────────────────────────────────────
+// Raymarched kaleidoscopic neon tunnel with HDR feedback trails, plus polar
+// spectrum/waveform rings sampled from an audio texture. A post pass adds
+// bloom, beat-driven chromatic aberration, tone mapping, vignette and grain.
+// The 2D particle renderer above stays as the fallback when WebGL2 (or shader
+// compilation) is unavailable.
+
+const VIZ_VERT_SRC = `#version 300 es
+layout(location = 0) in vec2 aPos;
+out vec2 vUv;
+void main() {
+  vUv = aPos * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}
+`;
+
+const VIZ_SIM_FRAG = `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 frag;
+uniform sampler2D uPrev;
+uniform sampler2D uAudio; // 512x2 R8: row 0 = spectrum, row 1 = waveform
+uniform vec2 uRes;
+uniform float uTime;
+uniform float uBass;
+uniform float uMid;
+uniform float uHigh;
+uniform float uLevel;
+uniform float uBeat;
+uniform float uHue;
+uniform vec2 uCam;
+uniform vec4 uA; // x speed, y fold, z twist, w feedback decay
+uniform vec4 uB; // x glow, y spectrum-ring mix, z warp zoom, w waveform mix
+uniform float uStars;  // starfield intensity (mood × slow LFO)
+uniform float uStarT;  // integrated star fly-through phase
+uniform vec3 uShock;   // kick shockwave: x age (s), y amplitude, z light gate 0..1
+uniform float uGlint;  // hat/perc star-glint boost
+uniform vec3 uNote;    // osc note flare: x pitch-class angle 0..1, y age, z amp
+
+mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+vec3 pal(float t) { return 0.5 + 0.5 * cos(6.28318 * (t + vec3(0.0, 0.33, 0.67))); }
+float hash21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+// Parallax star dust: four depth layers cycling toward the camera. Each layer
+// is a sparse hash grid; ph drives scale (far→near) and fades at both ends so
+// layers recycle invisibly. Highs push twinkle and brightness.
+vec3 stars(vec2 uv) {
+  vec3 col = vec3(0.0);
+  for (int l = 0; l < 4; l++) {
+    float ph = fract(uStarT + float(l) * 0.25);
+    float scale = mix(9.0, 0.9, ph);
+    float fade = ph * (1.0 - ph) * 4.0;
+    vec2 guv = (uv + uCam * (0.05 + ph * 0.25)) * scale + float(l) * 7.31;
+    vec2 cell = floor(guv);
+    vec2 f = fract(guv) - 0.5;
+    float h = hash21(cell);
+    if (h < 0.82) continue;
+    vec2 off = vec2(hash21(cell + 1.3), hash21(cell + 2.7)) - 0.5;
+    float d = length(f - off * 0.8);
+    float tw = 0.55 + 0.45 * sin(uTime * (4.0 + h * 14.0) + h * 40.0);
+    // Radius scales with the layer so screen size stays pin-point; hard inner
+    // edge keeps them crisp instead of glow blobs.
+    float r = (0.0028 + ph * 0.0022) * scale;
+    float star = smoothstep(r, r * 0.25, d);
+    vec3 scol = mix(vec3(1.0), pal(uHue + 0.5 + h * 0.3), 0.4);
+    col += scol * star * fade * tw * (0.6 + uHigh * 1.3 + uGlint * 1.6);
+  }
+  return col * uStars;
+}
+
+vec3 tunnel(vec2 uv) {
+  vec3 ro = vec3(uCam * 0.5, uTime * uA.x);
+  vec3 rd = normalize(vec3(uv - uCam * 0.18, 1.0));
+  rd.xy *= rot(uTime * 0.06 + uBass * 0.25);
+  vec3 acc = vec3(0.0);
+  float t = 0.15;
+  for (int i = 0; i < 54; i++) {
+    vec3 p = ro + rd * t;
+    vec2 q = p.xy;
+    q *= rot(p.z * uA.z);
+    float wob = 0.55 + 0.12 * sin(p.z * 0.31 + uTime * 0.4);
+    for (int f = 0; f < 4; f++) {
+      q = abs(q) - uA.y * wob;
+      q *= rot(uTime * 0.11 + float(f) * 0.77 + uMid * 0.3);
+    }
+    float d1 = abs(length(q) - 0.14 - 0.10 * uBass) + 0.004;
+    vec2 b = abs(q) - vec2(0.04 + uMid * 0.30, 0.015);
+    float d2 = length(max(b, 0.0)) + 0.004;
+    float ht = uHue + p.z * 0.015 + float(i) * 0.003;
+    acc += pal(ht) * (uB.x * 0.0009) / (0.004 + d1 * d1 * 34.0);
+    acc += pal(ht + 0.45) * (uB.x * 0.0006) / (0.004 + d2 * d2 * 52.0);
+    t += 0.11 + t * 0.028;
+  }
+  return acc;
+}
+
+vec3 rings(vec2 uv) {
+  float r = length(uv);
+  float a = atan(uv.y, uv.x);
+  float f = abs(fract(a / 6.28318 + 0.5) * 2.0 - 1.0); // mirrored for symmetry
+  float s = texture(uAudio, vec2(f, 0.25)).r;
+  float w = texture(uAudio, vec2(f, 0.75)).r - 0.5;
+  vec3 col = vec3(0.0);
+  float rs = 0.30 + s * 0.24 + uBass * 0.06;
+  float ds = abs(r - rs);
+  col += pal(uHue + 0.12 + s * 0.25) * (s * s) * uB.y * 0.0019 / (0.0012 + ds * ds * 9.0);
+  float rw = 0.58 + w * 0.42;
+  float dw = abs(r - rw);
+  col += pal(uHue + 0.62) * (0.25 + uLevel) * uB.w * 0.0011 / (0.0012 + dw * dw * 16.0);
+  return col;
+}
+
+void main() {
+  vec2 uv = (vUv - 0.5) * vec2(uRes.x / uRes.y, 1.0);
+  vec3 col = stars(uv) + tunnel(uv) + rings(uv);
+
+  // Kick shockwave: ring expanding from centre at the scheduled hit time.
+  float shockR = uShock.x * 1.5;
+  float shockBand = exp(-abs(length(uv) - shockR) * 22.0);
+  float shockAmp = uShock.y * exp(-uShock.x * 3.0);
+  col += pal(uHue + 0.05) * shockBand * shockAmp * 0.9 * uShock.z;
+
+  // Osc note flare: arc at the note's pitch-class angle, drifting outward.
+  if (uNote.z > 0.001) {
+    float na = uNote.x * 6.28318 - 3.14159;
+    float a = atan(uv.y, uv.x);
+    float ad = abs(mod(a - na + 3.14159, 6.28318) - 3.14159);
+    float flare = exp(-ad * 5.0) * exp(-abs(length(uv) - (0.42 + uNote.y * 0.25)) * 14.0);
+    col += pal(uHue + 0.25 + uNote.x * 0.4) * flare * uNote.z * exp(-uNote.y * 3.5) * 1.2;
+  }
+
+  // Feedback: sample last frame slightly zoomed + rotated so trails rush
+  // outward with the tunnel; tiny channel rotation drifts trail hues. The
+  // shockwave also refracts the trail buffer so kicks ripple through history.
+  vec2 fuv = vUv - 0.5;
+  fuv *= 1.0 - (0.004 + uBeat * 0.018 + uB.z * 0.003 + uBass * 0.004);
+  fuv *= rot(0.0035 * sin(uTime * 0.12) + (uMid - 0.25) * 0.005);
+  fuv += normalize(fuv + 1e-4) * shockBand * shockAmp * 0.012;
+  vec3 prev = texture(uPrev, fuv + 0.5).rgb;
+  prev = mix(prev, prev.gbr, 0.012 + uBeat * 0.05);
+  col += prev * uA.w;
+  frag = vec4(min(col, vec3(60.0)), 1.0);
+}
+`;
+
+const VIZ_POST_FRAG = `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 frag;
+uniform sampler2D uTex;
+uniform vec2 uRes;
+uniform float uTime;
+uniform float uBeat;
+uniform float uLevel;
+
+vec3 aces(vec3 x) {
+  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+void main() {
+  vec2 uv = vUv;
+  vec2 c = uv - 0.5;
+  float r2 = dot(c, c);
+  float ca = 0.0012 + uBeat * 0.010 + uLevel * 0.0015;
+  vec3 col;
+  col.r = texture(uTex, uv + c * ca).r;
+  col.g = texture(uTex, uv).g;
+  col.b = texture(uTex, uv - c * ca).b;
+  vec2 px = 2.0 / uRes;
+  vec3 bl =
+    texture(uTex, uv + vec2(px.x, 0.0)).rgb + texture(uTex, uv - vec2(px.x, 0.0)).rgb +
+    texture(uTex, uv + vec2(0.0, px.y)).rgb + texture(uTex, uv - vec2(0.0, px.y)).rgb +
+    texture(uTex, uv + px).rgb + texture(uTex, uv - px).rgb +
+    texture(uTex, uv + vec2(px.x, -px.y)).rgb + texture(uTex, uv + vec2(-px.x, px.y)).rgb;
+  col += bl * 0.028;
+  col = aces(col * (0.55 + uBeat * 0.25 + uLevel * 0.12));
+  col *= 1.0 - r2 * 1.05;
+  col += (hash(uv * uRes + fract(uTime) * 113.0) - 0.5) * 0.03;
+  frag = vec4(col, 1.0);
+}
+`;
+
+// Visual moods: targets the running params lerp toward. dur in seconds.
+const VIZGL_SCENES = [
+  { label: 'NEON TUNNEL', dur: [24, 40], speed: 1.5, fold: 0.92, twist: 0.16, decay: 0.84, glow: 1.0, ring: 0.8, warp: 1.0, wave: 0.7, hueVel: 0.012, stars: 0.5 },
+  { label: 'HYPER RUSH',  dur: [16, 28], speed: 3.4, fold: 0.72, twist: 0.34, decay: 0.885, glow: 0.85, ring: 0.45, warp: 2.4, wave: 0.4, hueVel: 0.05, stars: 0.9 },
+  { label: 'CATHEDRAL',   dur: [26, 44], speed: 0.65, fold: 1.28, twist: 0.045, decay: 0.82, glow: 1.3, ring: 1.0, warp: 0.4, wave: 0.9, hueVel: 0.004, stars: 0.3 },
+  { label: 'PRISM STORM', dur: [14, 26], speed: 2.3, fold: 0.55, twist: 0.6, decay: 0.85, glow: 0.95, ring: 1.3, warp: 1.6, wave: 0.5, hueVel: 0.09, stars: 0.35 },
+  { label: 'DEEP FIELD',  dur: [28, 48], speed: 0.4, fold: 1.55, twist: 0.02, decay: 0.88, glow: 0.55, ring: 1.5, warp: 0.25, wave: 1.2, hueVel: 0.002, stars: 1.3 },
+];
+const VIZGL_PARAM_KEYS = ['speed', 'fold', 'twist', 'decay', 'glow', 'ring', 'warp', 'wave', 'hueVel', 'stars'];
+
+const VIZGL = {
+  gl: null,
+  failed: false,
+  lost: false,
+  cssW: 0,
+  cssH: 0,
+  simW: 0,
+  simH: 0,
+  progSim: null,
+  progPost: null,
+  uniSim: null,
+  uniPost: null,
+  texA: null,
+  texB: null,
+  fbA: null,
+  fbB: null,
+  audioTex: null,
+  audioBytes: new Uint8Array(512 * 2),
+  floatFbo: false,
+  labelEl: null,
+  labelTimer: 0,
+  t: 0,
+  lastNow: 0,
+  hue: 0.58,
+  bass: 0,
+  mid: 0,
+  high: 0,
+  level: 0,
+  beat: 0,
+  beatAvg: 0,
+  beatCooldown: 0,
+  wanderT: 0,
+  starT: 0,
+  kickX: 0,
+  kickY: 0,
+  events: [],
+  lastEventT: -10,
+  shockAge: 10,
+  shockAmp: 0,
+  glint: 0,
+  noteAngle: 0.5,
+  noteAge: 10,
+  noteAmp: 0,
+  camX: 0,
+  camY: 0,
+  sceneIdx: 0,
+  sceneTimer: 0,
+  sceneDur: 30,
+  p: { speed: 1.5, fold: 0.92, twist: 0.16, decay: 0.84, glow: 1.0, ring: 0.8, warp: 1.0, wave: 0.7, hueVel: 0.012, stars: 0.5 },
+};
+
+function vizGLCompile(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    console.warn('viz shader:', gl.getShaderInfoLog(sh));
+    gl.deleteShader(sh);
+    return null;
+  }
+  return sh;
+}
+
+function vizGLProgram(gl, fragSrc) {
+  const vs = vizGLCompile(gl, gl.VERTEX_SHADER, VIZ_VERT_SRC);
+  const fs = vizGLCompile(gl, gl.FRAGMENT_SHADER, fragSrc);
+  if (!vs || !fs) return null;
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.warn('viz link:', gl.getProgramInfoLog(prog));
+    return null;
+  }
+  return prog;
+}
+
+function vizGLUniforms(gl, prog, names) {
+  const out = {};
+  names.forEach((n) => (out[n] = gl.getUniformLocation(prog, n)));
+  return out;
+}
+
+function resizeVizGLTargets(w, h) {
+  const gl = VIZGL.gl;
+  [VIZGL.texA, VIZGL.texB].forEach((t) => t && gl.deleteTexture(t));
+  [VIZGL.fbA, VIZGL.fbB].forEach((f) => f && gl.deleteFramebuffer(f));
+  const make = () => {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const internal = VIZGL.floatFbo ? gl.RGBA16F : gl.RGBA8;
+    const type = VIZGL.floatFbo ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+    gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, gl.RGBA, type, null);
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    return { tex, fb };
+  };
+  let a = make();
+  let b = make();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, a.fb);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE && VIZGL.floatFbo) {
+    // Half-float rendering unsupported after all — rebuild the pair as RGBA8.
+    VIZGL.floatFbo = false;
+    [a.tex, b.tex].forEach((t) => gl.deleteTexture(t));
+    [a.fb, b.fb].forEach((f) => gl.deleteFramebuffer(f));
+    a = make();
+    b = make();
+  }
+  VIZGL.texA = a.tex;
+  VIZGL.fbA = a.fb;
+  VIZGL.texB = b.tex;
+  VIZGL.fbB = b.fb;
+  VIZGL.simW = w;
+  VIZGL.simH = h;
+}
+
+function setupVizGLResources() {
+  const gl = VIZGL.gl;
+  VIZGL.floatFbo = !!gl.getExtension('EXT_color_buffer_float');
+  VIZGL.progSim = vizGLProgram(gl, VIZ_SIM_FRAG);
+  VIZGL.progPost = vizGLProgram(gl, VIZ_POST_FRAG);
+  if (!VIZGL.progSim || !VIZGL.progPost) return;
+  VIZGL.uniSim = vizGLUniforms(gl, VIZGL.progSim, [
+    'uPrev', 'uAudio', 'uRes', 'uTime', 'uBass', 'uMid', 'uHigh', 'uLevel', 'uBeat', 'uHue', 'uCam', 'uA', 'uB', 'uStars', 'uStarT', 'uShock', 'uGlint', 'uNote',
+  ]);
+  VIZGL.uniPost = vizGLUniforms(gl, VIZGL.progPost, ['uTex', 'uRes', 'uTime', 'uBeat', 'uLevel']);
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  VIZGL.audioTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, VIZGL.audioTex);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 512, 2, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+  VIZGL.simW = 0; // force render-target rebuild on the next frame
+}
+
+function initVizGL() {
+  const canvas = VIZ.canvas;
+  if (!canvas || VIZGL.failed || VIZGL.gl) return;
+  const gl = canvas.getContext('webgl2', {
+    antialias: false,
+    alpha: false,
+    depth: false,
+    powerPreference: 'high-performance',
+  });
+  if (!gl) {
+    VIZGL.failed = true;
+    return;
+  }
+  canvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();
+    VIZGL.lost = true;
+  });
+  canvas.addEventListener('webglcontextrestored', () => {
+    VIZGL.lost = false;
+    setupVizGLResources();
+  });
+  VIZGL.gl = gl;
+  setupVizGLResources();
+  if (!VIZGL.progSim || !VIZGL.progPost) {
+    // Shaders refused to build; the canvas is stuck bound to WebGL, so the 2D
+    // fallback can't claim it — keep the GL loop alive but render nothing.
+    VIZGL.failed = true;
+    VIZGL.lost = true;
+  }
+}
+
+// ── Transport-locked events ──────────────────────────────────────
+// The gen4 scheduler queues each hit with its scheduled audio time; the viz
+// loop fires the visual when audioCtx.currentTime reaches it — beat-perfect,
+// no energy-threshold guessing.
+function queueVizEvent(id, t, vel, midi = null) {
+  if (UI_VIEW.mode !== 'visual' || !VIZGL.gl || !VIZ.animId) return;
+  if (VIZGL.events.length > 128) VIZGL.events.length = 0; // runaway guard
+  VIZGL.events.push({ id, t, vel, midi });
+}
+
+function applyVizEvent(ev) {
+  VIZGL.lastEventT = VIZGL.t;
+  const vel = Number.isFinite(ev.vel) ? ev.vel : 1;
+  switch (ev.id) {
+    case 'kick':
+      VIZGL.shockAge = 0;
+      VIZGL.shockAmp = 0.45 + vel * 0.75;
+      VIZGL.beat = 1;
+      break;
+    case 'snare': {
+      const a = Math.random() * Math.PI * 2;
+      VIZGL.kickX += Math.cos(a) * 0.3 * vel;
+      VIZGL.kickY += Math.sin(a) * 0.22 * vel;
+      VIZGL.beat = Math.max(VIZGL.beat, 0.75 * vel);
+      break;
+    }
+    case 'hat':
+      VIZGL.glint = Math.min(1.5, VIZGL.glint + 0.7 * vel);
+      break;
+    case 'osc': {
+      const midi = Number.isFinite(ev.midi) ? ev.midi : 60;
+      VIZGL.noteAngle = (midi % 12) / 12;
+      VIZGL.noteAge = 0;
+      VIZGL.noteAmp = 0.5 + vel * 0.5;
+      break;
+    }
+    default: // perc / fm / smp
+      VIZGL.glint = Math.min(1.5, VIZGL.glint + 0.3 * vel);
+      VIZGL.hue = (VIZGL.hue + 0.012) % 1;
+      break;
+  }
+}
+
+function processVizEvents() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const evs = VIZGL.events;
+  let i = 0;
+  while (i < evs.length) {
+    const ev = evs[i];
+    if (ev.t > now + 0.001) {
+      i += 1;
+      continue;
+    }
+    evs.splice(i, 1);
+    if (ev.t >= now - 0.5) applyVizEvent(ev); // drop stale leftovers silently
+  }
+}
+
+function vizShowLabel(text, ms = 3000) {
+  const el = VIZGL.labelEl;
+  if (!el) return;
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(VIZGL.labelTimer);
+  VIZGL.labelTimer = setTimeout(() => el.classList.remove('show'), ms);
+}
+
+function advanceVizScene() {
+  const jump = 1 + Math.floor(Math.random() * (VIZGL_SCENES.length - 1));
+  VIZGL.sceneIdx = (VIZGL.sceneIdx + jump) % VIZGL_SCENES.length;
+  VIZGL.sceneTimer = 0;
+  const d = VIZGL_SCENES[VIZGL.sceneIdx].dur;
+  VIZGL.sceneDur = d[0] + Math.random() * (d[1] - d[0]);
+  vizShowLabel(VIZGL_SCENES[VIZGL.sceneIdx].label);
+}
+
+function renderVizGL() {
+  const gl = VIZGL.gl;
+  const canvas = VIZ.canvas;
+  if (!gl || !canvas) return;
+
+  // Backing store: dpr-aware, capped so the raymarch stays cheap on 4K/retina.
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.75);
+  let bw = Math.max(2, Math.round((VIZGL.cssW || canvas.offsetWidth) * dpr));
+  let bh = Math.max(2, Math.round((VIZGL.cssH || canvas.offsetHeight) * dpr));
+  if (bw > 2048) {
+    bh = Math.round((bh * 2048) / bw);
+    bw = 2048;
+  }
+  if (canvas.width !== bw || canvas.height !== bh) {
+    canvas.width = bw;
+    canvas.height = bh;
+  }
+  const sw = Math.max(2, Math.round(bw * 0.55));
+  const sh = Math.max(2, Math.round(bh * 0.55));
+  if (sw !== VIZGL.simW || sh !== VIZGL.simH) resizeVizGLTargets(sw, sh);
+
+  const now = performance.now();
+  const dt = VIZGL.lastNow ? Math.min(0.05, (now - VIZGL.lastNow) / 1000) : 1 / 60;
+  VIZGL.lastNow = now;
+  VIZGL.t += dt;
+
+  // ── Audio analysis ────────────────────────────────────────────
+  ensureVizAnalyser();
+  const freq = VIZ.freqBuf;
+  const wave = VIZ.timeBuf;
+  if (vizAnalyser && freq) {
+    vizAnalyser.getByteFrequencyData(freq);
+    vizAnalyser.getByteTimeDomainData(wave);
+  }
+  const fLen = freq ? freq.length : 1024;
+  const bandE = (s, e) => {
+    if (!freq) return 0;
+    let sum = 0;
+    for (let i = s; i < e && i < fLen; i++) sum += freq[i];
+    return sum / ((e - s) * 255);
+  };
+  let bassE = bandE(0, 5);
+  let midE = bandE(5, 40);
+  let highE = bandE(40, 120);
+  let allE = bandE(0, 100);
+  if (!vizAnalyser) {
+    // No audio yet — breathe gently so the view never sits static.
+    bassE = (0.5 + 0.5 * Math.sin(VIZGL.t * 1.7)) * 0.3;
+    midE = 0.15 + 0.15 * Math.sin(VIZGL.t * 0.9);
+    highE = 0.1;
+    allE = 0.18;
+  }
+  const lk = 1 - Math.exp(-dt * 10);
+  VIZGL.bass += (bassE - VIZGL.bass) * lk;
+  VIZGL.mid += (midE - VIZGL.mid) * lk;
+  VIZGL.high += (highE - VIZGL.high) * lk;
+  VIZGL.level += (allE - VIZGL.level) * lk;
+
+  // Transport events first — while they flow, the analyser beat-guesser
+  // stands down so kicks don't double-trigger.
+  processVizEvents();
+  VIZGL.shockAge += dt;
+  VIZGL.noteAge += dt;
+  VIZGL.glint *= Math.exp(-dt * 6);
+  const eventDriven = VIZGL.t - VIZGL.lastEventT < 2;
+
+  VIZGL.beatAvg = VIZGL.beatAvg * 0.94 + bassE * 0.06;
+  if (VIZGL.beatCooldown > 0) VIZGL.beatCooldown -= dt;
+  if (!eventDriven && VIZGL.beatCooldown <= 0 && bassE > VIZGL.beatAvg * 1.55 && bassE > 0.12) {
+    VIZGL.beat = 1;
+    VIZGL.beatCooldown = 0.18;
+    const ka = Math.random() * Math.PI * 2;
+    VIZGL.kickX += Math.cos(ka) * 0.2 * bassE;
+    VIZGL.kickY += Math.sin(ka) * 0.15 * bassE;
+  }
+  VIZGL.beat *= Math.exp(-dt * 7);
+
+  // ── Scene machine ─────────────────────────────────────────────
+  VIZGL.sceneTimer += dt;
+  if (VIZGL.sceneTimer >= VIZGL.sceneDur) advanceVizScene();
+  const sc = VIZGL_SCENES[VIZGL.sceneIdx];
+  const pk = 1 - Math.exp(-dt * 0.9);
+  const p = VIZGL.p;
+  VIZGL_PARAM_KEYS.forEach((key) => (p[key] += (sc[key] - p[key]) * pk));
+  VIZGL.hue = (VIZGL.hue + p.hueVel * dt * (1 + VIZGL.high * 5) + 1) % 1;
+
+  // ── Camera wander: layered incommensurate sines ≈ smooth 1D noise.
+  // Integrated rate (not t × rate) so mid-energy speeds the path without
+  // phase jumps; level/bass widen it; beats kick it off-axis briefly.
+  VIZGL.wanderT += dt * (0.12 + VIZGL.mid * 0.35 + VIZGL.beat * 0.4);
+  const wt = VIZGL.wanderT;
+  const amp = 0.3 + VIZGL.level * 0.45 + VIZGL.bass * 0.3;
+  const tx =
+    (Math.sin(wt) * 0.55 + Math.sin(wt * 2.37 + 1.7) * 0.3 + Math.sin(wt * 5.11 + 4.2) * 0.15) *
+      amp + VIZGL.kickX;
+  const ty =
+    (Math.cos(wt * 0.83 + 0.9) * 0.55 + Math.cos(wt * 2.71 + 3.1) * 0.3 + Math.sin(wt * 4.53 + 2.0) * 0.15) *
+      amp + VIZGL.kickY;
+  VIZGL.kickX *= Math.exp(-dt * 3.5);
+  VIZGL.kickY *= Math.exp(-dt * 3.5);
+  const ck = 1 - Math.exp(-dt * 2.2);
+  VIZGL.camX += (tx - VIZGL.camX) * ck;
+  VIZGL.camY += (ty - VIZGL.camY) * ck;
+
+  // ── Audio texture: sqrt-spaced spectrum row + waveform row ────
+  const ab = VIZGL.audioBytes;
+  for (let i = 0; i < 512; i++) {
+    const t01 = i / 511;
+    const bin = Math.min(fLen - 1, Math.floor(t01 * t01 * (fLen - 1)));
+    ab[i] = freq ? freq[bin] : 0;
+    ab[512 + i] = wave ? wave[Math.min(wave.length - 1, i * 4)] : 128;
+  }
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, VIZGL.audioTex);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 512, 2, gl.RED, gl.UNSIGNED_BYTE, ab);
+
+  // ── Sim pass: accumulate into the back buffer ─────────────────
+  gl.bindFramebuffer(gl.FRAMEBUFFER, VIZGL.fbB);
+  gl.viewport(0, 0, VIZGL.simW, VIZGL.simH);
+  gl.useProgram(VIZGL.progSim);
+  const us = VIZGL.uniSim;
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, VIZGL.texA);
+  gl.uniform1i(us.uPrev, 0);
+  gl.uniform1i(us.uAudio, 1);
+  gl.uniform2f(us.uRes, VIZGL.simW, VIZGL.simH);
+  gl.uniform1f(us.uTime, VIZGL.t);
+  gl.uniform1f(us.uBass, VIZGL.bass);
+  gl.uniform1f(us.uMid, VIZGL.mid);
+  gl.uniform1f(us.uHigh, VIZGL.high);
+  gl.uniform1f(us.uLevel, VIZGL.level);
+  gl.uniform1f(us.uBeat, VIZGL.beat);
+  gl.uniform1f(us.uHue, VIZGL.hue);
+  gl.uniform2f(us.uCam, VIZGL.camX * 0.4, VIZGL.camY * 0.3);
+  gl.uniform4f(us.uA, p.speed, p.fold, p.twist, p.decay);
+  gl.uniform4f(us.uB, p.glow, p.ring, p.warp, p.wave);
+  // Star density drifts on a slow two-sine LFO so the dust layer comes and
+  // goes even inside one mood; phase is integrated so speed changes are smooth.
+  VIZGL.starT += dt * (0.05 + p.speed * 0.03);
+  const starLfo = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(VIZGL.t * 0.047 + Math.sin(VIZGL.t * 0.013) * 1.8));
+  gl.uniform1f(us.uStars, p.stars * starLfo);
+  gl.uniform1f(us.uStarT, VIZGL.starT);
+  // Kick light phases in/out on a slow irregular cycle (~1 min on, ~1 min
+  // off, few-second crossfade); the trail-warping refraction stays constant.
+  const gateWave = Math.sin(VIZGL.t * 0.052) + 0.35 * Math.sin(VIZGL.t * 0.0137);
+  const shockLight = Math.min(1, Math.max(0, 0.5 + gateWave * 6));
+  gl.uniform3f(us.uShock, VIZGL.shockAge, VIZGL.shockAmp, shockLight);
+  gl.uniform1f(us.uGlint, VIZGL.glint);
+  gl.uniform3f(us.uNote, VIZGL.noteAngle, VIZGL.noteAge, VIZGL.noteAmp);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // ── Post pass: tone map to screen ─────────────────────────────
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.useProgram(VIZGL.progPost);
+  const up = VIZGL.uniPost;
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, VIZGL.texB);
+  gl.uniform1i(up.uTex, 0);
+  gl.uniform2f(up.uRes, canvas.width, canvas.height);
+  gl.uniform1f(up.uTime, VIZGL.t);
+  gl.uniform1f(up.uBeat, VIZGL.beat);
+  gl.uniform1f(up.uLevel, VIZGL.level);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  const swapT = VIZGL.texA;
+  VIZGL.texA = VIZGL.texB;
+  VIZGL.texB = swapT;
+  const swapF = VIZGL.fbA;
+  VIZGL.fbA = VIZGL.fbB;
+  VIZGL.fbB = swapF;
+}
+
 function buildVisualPanel() {
   const panel = document.getElementById('visualPanel');
   if (!panel) return;
@@ -2643,20 +3358,48 @@ function buildVisualPanel() {
   canvas.className = 'viz-canvas';
   panel.appendChild(canvas);
   VIZ.canvas = canvas;
-  VIZ.ctx = canvas.getContext('2d');
+  // Context is taken lazily on first start: WebGL2 when available; otherwise
+  // the canvas stays unbound so the 2D fallback can still claim it.
   const ro = new ResizeObserver(() => {
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
+    VIZGL.cssW = canvas.offsetWidth;
+    VIZGL.cssH = canvas.offsetHeight;
+    if (!VIZGL.gl) {
+      canvas.width = VIZGL.cssW;
+      canvas.height = VIZGL.cssH;
+    }
   });
   ro.observe(canvas);
+
+  const label = document.createElement('div');
+  label.className = 'viz-scene-label';
+  panel.appendChild(label);
+  VIZGL.labelEl = label;
+
+  canvas.addEventListener('pointerdown', () => {
+    VIZGL.beat = 1;
+    VIZGL.hue = (VIZGL.hue + 0.31) % 1;
+  });
+  canvas.addEventListener('dblclick', () => {
+    if (document.fullscreenElement) document.exitFullscreen?.();
+    else panel.requestFullscreen?.();
+  });
 }
 
 function startViz() {
   if (VIZ.animId) return;
   ensureVizAnalyser();
+  if (!VIZGL.gl && !VIZGL.failed) {
+    initVizGL();
+    if (VIZGL.gl && !VIZGL.failed) vizShowLabel('CLICK · PULSE — DBLCLICK · FULLSCREEN', 4500);
+  }
+  VIZGL.lastNow = 0;
   (function frame() {
     VIZ.animId = requestAnimationFrame(frame);
-    renderViz();
+    if (VIZGL.gl) {
+      if (!VIZGL.lost) renderVizGL();
+    } else {
+      renderViz();
+    }
   })();
 }
 
@@ -2677,8 +3420,11 @@ function vizFlowField(x, y, cx, cy, t, bass, mid, orbitStr, turbStr) {
 }
 
 function renderViz() {
-  const { canvas, ctx } = VIZ;
-  if (!canvas || !ctx || canvas.width === 0) return;
+  const { canvas } = VIZ;
+  if (!canvas) return;
+  if (!VIZ.ctx) VIZ.ctx = canvas.getContext('2d');
+  const ctx = VIZ.ctx;
+  if (!ctx || canvas.width === 0) return;
 
   ensureVizAnalyser();
 
@@ -3238,14 +3984,16 @@ function buildPianoRoll() {
 
       cell.addEventListener('click', async () => {
         if (GEN3.sustainMode) {
-          // During Song playback this edits the focused loop without
-          // retargeting the chord that belongs to the audible arrangement entry.
+          // During Song playback of a DIFFERENT loop this only edits the
+          // focused loop, without retargeting the audible entry's chord.
+          // Editing the loop that is sounding syncs right away.
           if (GEN3.lockedMidis.has(midi)) {
             GEN3.lockedMidis.delete(midi);
           } else {
             GEN3.lockedMidis.add(midi);
           }
-          if (!(PLAY.mode === 'song' && GEN4.playing)) {
+          const songPlaying = PLAY.mode === 'song' && GEN4.playing;
+          if (!songPlaying || getAudibleLoop() === getEditLoop()) {
             await ensureAudioEngine();
             syncGen3SustainChord(GEN3.lockedMidis);
           }
@@ -3634,6 +4382,8 @@ const GEN4 = {
   scheduleInterval: 25,
   stepCount: 16,
   nodes: null,
+  cycleCount: 0, // pattern passes since play started — drives A:B trig conditions
+  condFired: GEN4_DEFS.map(() => false), // last per-lane trig decision, for PRE
   channels: GEN4_DEFS.map((def) => {
     return {
       id: def.id,
@@ -3646,6 +4396,7 @@ const GEN4 = {
       locks: Array.from({ length: 32 }, () => ({})),
       stutter: new Array(32).fill(1),
       probability: new Array(32).fill(1.0),
+      condition: new Array(32).fill(0),
       params: Object.fromEntries(def.paramDefs.map((p) => [p.key, p.value])),
     };
   }),
@@ -3679,6 +4430,7 @@ let gen4NoteRollEl = null;
 let gen4NoteStepNumberEls = []; // roll header numbers — double as lock-step selectors
 let gen4NotePencilBtn = null;
 let gen4NotePencilEnabled = true;
+let gen4GenTab = 'euc'; // which generator's controls the toolbar shows
 let gen4NoteCellEls = Array.from({ length: 32 }, () => new Map());
 let gen4NotePlayheadStep = -1;
 let gen4LockSelection = null;
@@ -3716,7 +4468,7 @@ addEventListener('mousemove', (e) => {
     gen4DragState.suppressClick = true;
   }
   if (gen4DragState.axis === 'timing') {
-    GEN4.channels[ci].timing[si] = clamp(startTiming + Math.round(dx / 12), -4, 4);
+    GEN4.channels[ci].timing[si] = clamp(startTiming + Math.round(dx / 6), -8, 8);
     gen4ApplyStepBtn(ci, si);
     return;
   }
@@ -4077,8 +4829,10 @@ function getEffectiveGen4Params(ci, locks = null) {
     if (!mapping) return;
     const scaled = getModSourceScaledValue(mapping.sourceIdx);
     if (scaled === null) return;
-    const half = (pd.max - pd.min) * 0.5;
-    effective[pd.key] = Math.max(pd.min, Math.min(pd.max, effective[pd.key] + scaled * half));
+    effective[pd.key] = Math.max(
+      pd.min,
+      Math.min(pd.max, effective[pd.key] + getModOffset(mapping.sourceIdx, scaled, pd)),
+    );
   });
   return effective;
 }
@@ -4141,13 +4895,14 @@ function gen4FireChannel(ci, time, velocity, midi = null, loop = null, locks = n
       gen4TriggerSmp(time, velocity, p, dest);
       break;
   }
+  queueVizEvent(ch.id, time, velocity, midi);
 }
 
 function gen4ScheduleTick() {
   if (!audioCtx || !GEN4.nodes || !GEN4.playing) return;
   const secPerStep = 60.0 / TRANSPORT.bpm / 4;
-  const secPerSixtyFourth = 60.0 / TRANSPORT.bpm / 16;
-  const scheduleHorizon = GEN4.scheduleAheadTime + secPerSixtyFourth * 4;
+  const secPerOneTwentyEighth = 60.0 / TRANSPORT.bpm / 32;
+  const scheduleHorizon = GEN4.scheduleAheadTime + secPerOneTwentyEighth * 8;
   while (GEN4.nextStepTime < audioCtx.currentTime + scheduleHorizon) {
     // The pattern to schedule from: the edited loop in loop mode, the loop at
     // the song cursor in song mode. Resolved per step so a pattern boundary
@@ -4160,6 +4915,7 @@ function gen4ScheduleTick() {
     let pattern = getGen4PlaybackPattern(loop);
     let step = GEN4.schedulerStep + 1;
     if (step >= pattern.stepCount) {
+      GEN4.cycleCount += 1;
       if (gen4FillState.active && gen4FillState.loopId === loop.id) clearGen4Fill();
       if (PLAY.mode === 'song') {
         if (!advanceSongCursor()) {
@@ -4191,12 +4947,14 @@ function gen4ScheduleTick() {
     if (gen4Schedule.length > 48) gen4Schedule.shift();
     pattern.channels.forEach((pat, ci) => {
       if (!pat.steps[step]) return;
-      if (Math.random() > pat.probability[step]) return;
+      const fired = gen4StepConditionMet(pat, ci, step) && Math.random() <= pat.probability[step];
+      GEN4.condFired[ci] = fired;
+      if (!fired) return;
       const count = pat.stutter[step];
-      const timing = clamp(Math.round(pat.timing?.[step] || 0), -4, 4);
+      const timing = clamp(Math.round(pat.timing?.[step] || 0), -8, 8);
       const stepTime = Math.max(
         audioCtx.currentTime,
-        GEN4.nextStepTime + swingOffset + timing * secPerSixtyFourth,
+        GEN4.nextStepTime + swingOffset + timing * secPerOneTwentyEighth,
       );
       for (let r = 0; r < count; r++) {
         gen4FireChannel(
@@ -4270,6 +5028,7 @@ function gen4DuplicateStepRange(fromStepCount, toStepCount) {
       ch.locks[dest] = { ...ch.locks[src] };
       ch.stutter[dest] = ch.stutter[src];
       ch.probability[dest] = ch.probability[src];
+      ch.condition[dest] = ch.condition[src];
       gen4ApplyStepBtn(ci, dest);
     }
   });
@@ -4333,6 +5092,8 @@ function startGen4Sequencer() {
   GEN4.playing = true;
   GEN4.schedulerStep = -1;
   GEN4.displayStep = -1;
+  GEN4.cycleCount = 0;
+  GEN4.condFired.fill(false);
   gen4Schedule.length = 0;
   if (PLAY.mode === 'song') resetSongPlayback();
   else {
@@ -4387,17 +5148,10 @@ function gen4ApplyStepBtn(ci, si) {
   const on = ch.steps[si];
   btn.classList.toggle('on', on);
   btn.style.setProperty('--step-velocity', ch.velocity[si]);
-  const timing = clamp(Math.round(ch.timing?.[si] || 0), -4, 4);
+  const timing = clamp(Math.round(ch.timing?.[si] || 0), -8, 8);
   btn.title = on
-    ? `Velocity ${Math.round(ch.velocity[si] * 100)}% · timing ${timing > 0 ? '+' : ''}${timing}/64`
+    ? `Velocity ${Math.round(ch.velocity[si] * 100)}% · timing ${timing > 0 ? '+' : ''}${timing}/128`
     : '';
-
-  const noteEl = btn.querySelector('.drum-step-note');
-  if (noteEl) {
-    const midi = Number.isFinite(ch.notes[si]) ? ch.notes[si] : getGen4BaseMidi(ci);
-    noteEl.textContent = ch.id === 'osc' ? 'CHD' : formatMidiNote(midi);
-    noteEl.hidden = !on;
-  }
 
   const stutterEl = btn.querySelector('.drum-step-stutter');
   if (stutterEl) {
@@ -4423,12 +5177,51 @@ function gen4ApplyStepBtn(ci, si) {
     probEl.style.width = `${p * 100}%`;
     probEl.hidden = !on || p >= 1.0;
   }
+
+  const condEl = btn.querySelector('.drum-step-cond');
+  if (condEl) {
+    const cond = GEN4_TRIG_CONDITIONS[ch.condition?.[si] || 0];
+    condEl.textContent = cond?.label || '';
+    condEl.hidden = !on || !cond?.label;
+  }
 }
 
 function gen4CycleStutter(ci, si) {
   const ch = GEN4.channels[ci];
   ch.stutter[si] = (ch.stutter[si] % 4) + 1;
   gen4ApplyStepBtn(ci, si);
+}
+
+// ── Trig conditions ── Elektron-style per-step gates evaluated at schedule
+// time: A:B fires on the Ath of every B pattern cycles, FILL only while the
+// fill is engaged, PRE/!PRE follow the lane's previous trig decision.
+const GEN4_TRIG_CONDITIONS = [
+  { id: 'always', label: '' },
+  { id: '1:2', label: '1:2', a: 1, b: 2 },
+  { id: '2:2', label: '2:2', a: 2, b: 2 },
+  { id: '1:4', label: '1:4', a: 1, b: 4 },
+  { id: '4:4', label: '4:4', a: 4, b: 4 },
+  { id: 'fill', label: 'FIL', fill: true },
+  { id: 'pre', label: 'PRE', pre: true },
+  { id: 'npre', label: '!PR', pre: false },
+];
+
+function gen4CycleCondition(ci, si) {
+  const ch = GEN4.channels[ci];
+  ch.condition[si] = ((ch.condition[si] || 0) + 1) % GEN4_TRIG_CONDITIONS.length;
+  gen4ApplyStepBtn(ci, si);
+}
+
+function gen4StepConditionMet(pat, ci, step) {
+  const cond = GEN4_TRIG_CONDITIONS[pat.condition?.[step] || 0];
+  if (!cond || cond.id === 'always') return true;
+  if (cond.b) {
+    const cycle = PLAY.mode === 'song' ? SONG.cursor.repeat : GEN4.cycleCount;
+    return cycle % cond.b === cond.a - 1;
+  }
+  if (cond.fill) return gen4FillState.active;
+  if ('pre' in cond) return GEN4.condFired[ci] === cond.pre;
+  return true;
 }
 
 function gen4CycleProbability(ci, si) {
@@ -4511,6 +5304,7 @@ function editGen4NoteCell(stepIdx, midi, action) {
     ch.locks[stepIdx] = {};
     ch.stutter[stepIdx] = 1;
     ch.probability[stepIdx] = 1;
+    ch.condition[stepIdx] = 0;
   } else {
     ch.steps[stepIdx] = true;
     ch.notes[stepIdx] = midi;
@@ -4806,7 +5600,8 @@ async function fitGen3ChordToScale() {
   snapped.forEach((m) => GEN3.lockedMidis.add(m));
   const changed = before.filter((m, i) => snapped[i] !== m).length;
   refreshGen3KeyStates();
-  if (GEN3.sustainMode && !(PLAY.mode === 'song' && GEN4.playing)) {
+  const songPlaying = PLAY.mode === 'song' && GEN4.playing;
+  if (GEN3.sustainMode && (!songPlaying || getAudibleLoop() === getEditLoop())) {
     await ensureAudioEngine();
     syncGen3SustainChord(GEN3.lockedMidis);
   }
@@ -4864,6 +5659,7 @@ function clearGen4Step(ch, si) {
   ch.locks[si] = {};
   ch.stutter[si] = 1;
   ch.probability[si] = 1;
+  ch.condition[si] = 0;
 }
 
 function repaintGen4NoteLane(ci) {
@@ -4885,6 +5681,38 @@ function generateGen4Euclid(pulses, rotation) {
   }
   repaintGen4NoteLane(ci);
   setStatus(`${GEN4_DEFS[ci].label}: euclid ${p}/${steps}${rot ? ` rot ${rot}` : ''}`);
+}
+
+// True polyrhythm: N hits spread mathematically evenly across the bar.
+// Positions that fall between grid steps land on the nearest step with a
+// 1/128-tick timing offset (one step = 8 ticks, max deviation ±4), so
+// 5-over-4, 7-over-4 etc. play exactly, not grid-quantized. First hit of the
+// cycle is accented. Notes already sitting on a surviving step are kept.
+function generateGen4Polyrhythm(hits, rotation) {
+  const ci = gen4SelectedNoteChannel;
+  const ch = GEN4.channels[ci];
+  if (!ch) return;
+  const n = GEN4.stepCount;
+  const count = clamp(Math.round(hits), 2, n);
+  const rot = clamp(Math.round(rotation), 0, n - 1);
+  const TICKS_PER_STEP = 8; // 1 grid step (1/16) = 8 × 1/128
+  const oldSteps = ch.steps.slice(0, n);
+  const oldNotes = ch.notes.slice(0, n);
+  for (let si = 0; si < n; si++) if (ch.steps[si]) clearGen4Step(ch, si);
+  for (let k = 0; k < count; k++) {
+    const exact = ((k * n) / count + rot) % n;
+    let si = Math.round(exact) % n;
+    const frac = exact - Math.round(exact);
+    if (ch.steps[si]) continue; // two hits rounded onto one step — keep the first
+    ch.steps[si] = true;
+    ch.notes[si] = oldSteps[si] ? oldNotes[si] : null;
+    ch.timing[si] = clamp(Math.round(frac * TICKS_PER_STEP), -8, 8);
+    ch.velocity[si] = k === 0 ? 1 : 0.8;
+  }
+  repaintGen4NoteLane(ci);
+  setStatus(
+    `${GEN4_DEFS[ci].label}: polyrhythm ${count} over ${n} steps (micro-timed)${rot ? ` rot ${rot}` : ''}`,
+  );
 }
 
 // Arp material: gen3's locked chord when keys are locked, else a 1-3-5 triad
@@ -5135,6 +5963,7 @@ const GEN4_LANE_STEP_KEYS = [
   'timing',
   'stutter',
   'probability',
+  'condition',
   'locks',
 ];
 
@@ -5201,7 +6030,11 @@ function transposeGen4Lane(delta) {
   if (!ch) return;
   let changed = 0;
   const range = getGen4LaneMidiRange(ci);
+  const base = clamp(getGen4BaseMidi(ci), range.min, range.max);
   for (let si = 0; si < 32; si++) {
+    // A note-less active step follows the channel base pitch — pin it to that
+    // note first so the whole lane moves, not just explicitly-pitched steps.
+    if (ch.steps[si] && !Number.isFinite(ch.notes[si])) ch.notes[si] = base;
     if (!Number.isFinite(ch.notes[si])) continue;
     const next =
       Math.abs(delta) === 12 ? ch.notes[si] + delta : stepMidiInScale(ch.notes[si], delta);
@@ -5224,7 +6057,7 @@ function humanizeGen4Lane() {
     if (!ch.steps[si]) continue;
     ch.velocity[si] = clamp(ch.velocity[si] * (0.8 + Math.random() * 0.3), 0.05, 1);
     if (Math.random() < 0.6) {
-      ch.timing[si] = clamp(ch.timing[si] + (Math.random() < 0.5 ? -1 : 1), -2, 2);
+      ch.timing[si] = clamp(ch.timing[si] + (Math.random() < 0.5 ? -1 : 1), -4, 4);
     }
   }
   repaintGen4NoteLane(ci);
@@ -5240,7 +6073,7 @@ function glitchGen4Lane() {
     if (Math.random() < 0.18) ch.stutter[si] = 2 + Math.floor(Math.random() * 3);
     if (Math.random() < 0.15) ch.probability[si] = 0.5 + Math.random() * 0.4;
     if (Math.random() < 0.1) {
-      ch.timing[si] = clamp(ch.timing[si] + (Math.random() < 0.5 ? -1 : 1), -4, 4);
+      ch.timing[si] = clamp(ch.timing[si] + (Math.random() < 0.5 ? -2 : 2), -8, 8);
     }
   }
   repaintGen4NoteLane(ci);
@@ -5534,11 +6367,77 @@ function setGen4EditorMode(mode) {
   }
   if (gen4HintsEl) {
     gen4HintsEl.innerHTML =
-      '<span class="drum-hint"><span class="drum-hint-key">drag ↕</span> velocity</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">drag ↔</span> timing</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">shift + click</span> probability</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">right-click</span> stutter</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">alt + click</span> param-lock step (knobs write to it, Esc deselects)</span>';
+      '<span class="drum-hint"><span class="drum-hint-key">drag ↕</span> velocity</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">drag ↔</span> timing</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">shift + click</span> probability</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">right-click</span> stutter</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">⌘ + click</span> trig condition</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">alt + click</span> param-lock step (knobs write to it, Esc deselects)</span>';
   }
   refreshGen4NoteEditor();
   refreshGen4LockEditor();
 }
+
+// Instant tooltips, app-wide — the native title waits ~1s before showing.
+// Any element with a title gets an immediate tooltip instead: the title is
+// stripped while hovered (suppresses the native bubble) and handed back on
+// leave, so runtime `.title =` writes keep working. Canvases keep native
+// titles (they draw their own hover readouts); note-roll cells are skipped
+// (hundreds of them — pure hover noise while drawing).
+let uiTipEl = null;
+
+function ensureUiTip() {
+  if (uiTipEl) return uiTipEl;
+  uiTipEl = document.createElement('div');
+  uiTipEl.className = 'ui-tip';
+  uiTipEl.hidden = true;
+  document.body.appendChild(uiTipEl);
+  return uiTipEl;
+}
+
+function hideUiTip() {
+  if (uiTipEl) uiTipEl.hidden = true;
+}
+
+function initInstantTips() {
+  document.addEventListener(
+    'pointerover',
+    (e) => {
+      const el = e.target.closest?.('[title], [data-tip]');
+      if (!(el instanceof Element) || el.tagName === 'CANVAS') return;
+      if (el.classList.contains('drum-note-cell')) return;
+      if (el.hasAttribute('title')) {
+        el.dataset.tip = el.getAttribute('title');
+        el.removeAttribute('title');
+      }
+      const text = el.dataset.tip;
+      if (!text) return;
+      const tip = ensureUiTip();
+      tip.textContent = text;
+      tip.hidden = false;
+      const r = el.getBoundingClientRect();
+      tip.style.left = '0px'; // reset so the width measures unconstrained
+      const tw = tip.offsetWidth;
+      tip.style.left = `${clamp(r.left + r.width / 2 - tw / 2, 4, window.innerWidth - tw - 4)}px`;
+      const below = r.bottom + 6;
+      tip.style.top =
+        below + tip.offsetHeight > window.innerHeight - 4
+          ? `${Math.max(4, r.top - tip.offsetHeight - 6)}px`
+          : `${below}px`;
+    },
+    true,
+  );
+  document.addEventListener(
+    'pointerout',
+    (e) => {
+      const el = e.target.closest?.('[data-tip]');
+      if (!(el instanceof Element)) return;
+      // Hand the title back so dynamic title updates keep working.
+      if (!el.hasAttribute('title')) el.setAttribute('title', el.dataset.tip);
+      delete el.dataset.tip;
+      hideUiTip();
+    },
+    true,
+  );
+  document.addEventListener('pointerdown', hideUiTip, true);
+}
+
+initInstantTips();
 
 function buildGen4NoteEditor() {
   const editor = document.createElement('div');
@@ -5603,6 +6502,8 @@ function buildGen4NoteEditor() {
     return btn;
   };
 
+  // One generator visible at a time: EUC/ARP/MEL/BASS tabs swap their
+  // controls, and a single GO button runs the active one.
   const genRow = document.createElement('div');
   genRow.className = 'drum-note-gen';
   const genLabel = document.createElement('span');
@@ -5610,8 +6511,36 @@ function buildGen4NoteEditor() {
   genLabel.textContent = 'gen';
   genRow.appendChild(genLabel);
 
-  const eucGroup = document.createElement('div');
-  eucGroup.className = 'drum-scale-group';
+  const genTabs = document.createElement('div');
+  genTabs.className = 'drum-gen-tabs';
+  genRow.appendChild(genTabs);
+
+  const genTabBtns = new Map();
+  const genPanels = new Map();
+  const setGenTab = (id) => {
+    gen4GenTab = id;
+    genTabBtns.forEach((btn, tid) => btn.classList.toggle('active', tid === id));
+    genPanels.forEach(({ panel }, tid) => {
+      panel.hidden = tid !== id;
+    });
+  };
+  const addGenTab = (id, label, title, controls, run) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'drum-gen-tab';
+    btn.textContent = label;
+    btn.title = title;
+    btn.addEventListener('click', () => setGenTab(id));
+    genTabBtns.set(id, btn);
+    genTabs.appendChild(btn);
+    const panel = document.createElement('div');
+    panel.className = 'drum-gen-panel';
+    panel.append(...controls);
+    panel.hidden = true;
+    genPanels.set(id, { panel, run });
+    genRow.appendChild(panel);
+  };
+
   const eucPulses = makeGenSelect(
     'Euclid pulses',
     Array.from({ length: 32 }, (_, i) => [i + 1, `${i + 1}`]),
@@ -5622,17 +6551,7 @@ function buildGen4NoteEditor() {
     Array.from({ length: 32 }, (_, i) => [i, `r${i}`]),
     0,
   );
-  eucGroup.append(
-    eucPulses,
-    eucRotate,
-    makeGenBtn('Euc', 'Spread N pulses evenly across the pattern — existing notes survive', () =>
-      generateGen4Euclid(Number(eucPulses.value), Number(eucRotate.value)),
-    ),
-  );
-  genRow.appendChild(eucGroup);
 
-  const arpGroup = document.createElement('div');
-  arpGroup.className = 'drum-scale-group';
   const arpMode = makeGenSelect(
     'Arp pattern',
     [
@@ -5709,30 +6628,6 @@ function buildGen4NoteEditor() {
     ],
     'off',
   );
-  arpGroup.append(
-    arpMode,
-    arpOct,
-    arpRate,
-    arpRepeat,
-    arpVel,
-    arpChance,
-    arpRatchet,
-    makeGenBtn('Arp', 'Arpeggiate gen3 locked keys (or the scale triad) across the lane', () =>
-      generateGen4Arp({
-        mode: arpMode.value,
-        octaves: Number(arpOct.value),
-        everyN: Number(arpRate.value),
-        repeat: Number(arpRepeat.value),
-        velShape: arpVel.value,
-        chance: Number(arpChance.value),
-        ratchet: arpRatchet.value,
-      }),
-    ),
-  );
-  genRow.appendChild(arpGroup);
-
-  const melGroup = document.createElement('div');
-  melGroup.className = 'drum-scale-group';
   const melContour = makeGenSelect(
     'Melody contour — the pitch shape across the bar',
     [
@@ -5755,17 +6650,6 @@ function buildGen4NoteEditor() {
     ],
     'keep',
   );
-  melGroup.append(
-    melContour,
-    melDensity,
-    makeGenBtn('Mel', 'Generate a scale-snapped melody following the contour', () =>
-      generateGen4Melody(melContour.value, melDensity.value),
-    ),
-  );
-  genRow.appendChild(melGroup);
-
-  const bassGroup = document.createElement('div');
-  bassGroup.className = 'drum-scale-group';
   const bassStyle = makeGenSelect(
     'Bassline style — rooted on gen3’s lowest locked key or the scale root',
     [
@@ -5775,41 +6659,109 @@ function buildGen4NoteEditor() {
     ],
     'root8',
   );
-  bassGroup.append(
-    bassStyle,
-    makeGenBtn('Bass', 'Generate a bassline figure across the lane', () =>
-      generateGen4Bass(bassStyle.value),
-    ),
-  );
-  genRow.appendChild(bassGroup);
 
-  // ── Transform row: non-generative edits of what's already in the lane ──
+  const polyHits = makeGenSelect(
+    'Hits per bar — spread mathematically evenly, micro-timed between grid steps',
+    Array.from({ length: 15 }, (_, i) => [i + 2, `${i + 2}`]),
+    5,
+  );
+  const polyRotate = makeGenSelect(
+    'Polyrhythm rotation (in grid steps)',
+    Array.from({ length: 32 }, (_, i) => [i, `r${i}`]),
+    0,
+  );
+
+  addGenTab(
+    'euc',
+    'EUC',
+    'Euclidean rhythm — spread N pulses evenly; existing notes survive',
+    [eucPulses, eucRotate],
+    () => generateGen4Euclid(Number(eucPulses.value), Number(eucRotate.value)),
+  );
+  addGenTab(
+    'poly',
+    'POLY',
+    'True polyrhythm — N hits over the bar, exact positions via 1/128 micro-timing (try 5 or 7 against a 16-step kick)',
+    [polyHits, polyRotate],
+    () => generateGen4Polyrhythm(Number(polyHits.value), Number(polyRotate.value)),
+  );
+  addGenTab(
+    'arp',
+    'ARP',
+    'Arpeggiate gen3 locked keys (or the scale triad) across the lane',
+    [arpMode, arpOct, arpRate, arpRepeat, arpVel, arpChance, arpRatchet],
+    () =>
+      generateGen4Arp({
+        mode: arpMode.value,
+        octaves: Number(arpOct.value),
+        everyN: Number(arpRate.value),
+        repeat: Number(arpRepeat.value),
+        velShape: arpVel.value,
+        chance: Number(arpChance.value),
+        ratchet: arpRatchet.value,
+      }),
+  );
+  addGenTab(
+    'mel',
+    'MEL',
+    'Generate a scale-snapped melody following a contour',
+    [melContour, melDensity],
+    () => generateGen4Melody(melContour.value, melDensity.value),
+  );
+  addGenTab('bass', 'BASS', 'Generate a bassline figure across the lane', [bassStyle], () =>
+    generateGen4Bass(bassStyle.value),
+  );
+
+  const genRun = makeGenBtn('GO', 'Run the selected generator on this lane', () =>
+    genPanels.get(gen4GenTab)?.run(),
+  );
+  genRun.classList.add('drum-gen-run');
+  genRow.appendChild(genRun);
+  setGenTab(genPanels.has(gen4GenTab) ? gen4GenTab : 'euc');
+
+  // ── Transform row: non-generative edits, grouped by what they touch ──
   const editRow = document.createElement('div');
   editRow.className = 'drum-note-gen';
   const editLabel = document.createElement('span');
   editLabel.className = 'drum-note-gen-label';
   editLabel.textContent = 'edit';
   editRow.appendChild(editLabel);
-  [
+  const addEditGroup = (caption, items) => {
+    const group = document.createElement('div');
+    group.className = 'drum-note-edit-group';
+    const cap = document.createElement('span');
+    cap.className = 'drum-note-edit-caption';
+    cap.textContent = caption;
+    group.appendChild(cap);
+    items.forEach(([label, title, fn]) => group.appendChild(makeGenBtn(label, title, fn)));
+    editRow.appendChild(group);
+  };
+  addEditGroup('time', [
     ['◀', 'Rotate the pattern one step earlier', () => rotateGen4Lane(-1)],
     ['▶', 'Rotate the pattern one step later', () => rotateGen4Lane(1)],
     ['Rev', 'Reverse the pattern in time (retrograde)', reverseGen4Lane],
-    ['Inv', 'Mirror the pitches around the pattern’s center', invertGen4Lane],
+    ['Flip', 'Rhythmic negative — fire exactly where the lane was silent', flipGen4Rhythm],
+  ]);
+  addEditGroup('pitch', [
     ['−1', 'Transpose down a scale step (semitone without a scale)', () => transposeGen4Lane(-1)],
     ['+1', 'Transpose up a scale step (semitone without a scale)', () => transposeGen4Lane(1)],
     ['Oct−', 'Transpose down an octave', () => transposeGen4Lane(-12)],
     ['Oct+', 'Transpose up an octave', () => transposeGen4Lane(12)],
+    ['Inv', 'Mirror the pitches around the pattern’s center', invertGen4Lane],
+  ]);
+  addEditGroup('feel', [
     ['Hum', 'Humanize — jitter velocity and micro-timing', humanizeGen4Lane],
-    ['Glitch', 'Sprinkle ratchets, probability dips, and timing nudges', glitchGen4Lane],
-    ['A→B', 'Copy the first half over the second with mutations (call & response)', callResponseGen4Lane],
-    ['Mut', 'Mutate — nudge a few pitches, drop and sprout a few hits; press repeatedly to evolve', mutateGen4Lane],
-    ['Thin', 'Drop every second active step', thinGen4Lane],
-    ['Echo', 'Add a quiet echo of each note on the following free step', echoGen4Lane],
-    ['Flip', 'Rhythmic negative — fire exactly where the lane was silent', flipGen4Rhythm],
-    ['Ghost', 'Sprinkle quiet low-probability ghost notes into empty steps', ghostGen4Lane],
     ['Groove', 'Blend velocities toward a 16th-grid accent template', grooveGen4Lane],
     ['Ramp', 'Probability build — each cycle starts sparse and fills toward the turnaround', rampGen4Lane],
-  ].forEach(([label, title, fn]) => editRow.appendChild(makeGenBtn(label, title, fn)));
+  ]);
+  addEditGroup('vary', [
+    ['Mut', 'Mutate — nudge a few pitches, drop and sprout a few hits; press repeatedly to evolve', mutateGen4Lane],
+    ['A→B', 'Copy the first half over the second with mutations (call & response)', callResponseGen4Lane],
+    ['Thin', 'Drop every second active step', thinGen4Lane],
+    ['Echo', 'Add a quiet echo of each note on the following free step', echoGen4Lane],
+    ['Ghost', 'Sprinkle quiet low-probability ghost notes into empty steps', ghostGen4Lane],
+    ['Glitch', 'Sprinkle ratchets, probability dips, and timing nudges', glitchGen4Lane],
+  ]);
 
   const roll = document.createElement('div');
   roll.className = 'drum-note-roll';
@@ -6028,9 +6980,11 @@ function buildDrumPanel() {
     '<span class="drum-hints-sep">·</span>' +
     '<span class="drum-hint"><span class="drum-hint-key">drag ↔</span> timing</span>' +
     '<span class="drum-hints-sep">·</span>' +
-    '<span class="drum-hint"><span class="drum-hint-key">shift + click</span> active step → cycle probability</span>' +
+    '<span class="drum-hint"><span class="drum-hint-key">shift + click</span> probability</span>' +
     '<span class="drum-hints-sep">·</span>' +
-    '<span class="drum-hint"><span class="drum-hint-key">right-click</span> active step → cycle stutter</span>';
+    '<span class="drum-hint"><span class="drum-hint-key">right-click</span> stutter</span>' +
+    '<span class="drum-hints-sep">·</span>' +
+    '<span class="drum-hint"><span class="drum-hint-key">⌘ + click</span> trig condition</span>';
   panel.appendChild(hints);
   gen4HintsEl = hints;
 
@@ -6070,11 +7024,6 @@ function buildDrumPanel() {
       btn.className = 'drum-step';
       gen4StepEls[ci][si] = btn;
 
-      const noteEl = document.createElement('span');
-      noteEl.className = 'drum-step-note';
-      noteEl.hidden = true;
-      btn.appendChild(noteEl);
-
       const stutterEl = document.createElement('span');
       stutterEl.className = 'drum-step-stutter';
       stutterEl.hidden = true;
@@ -6096,6 +7045,11 @@ function buildDrumPanel() {
       probEl.hidden = true;
       btn.appendChild(probEl);
 
+      const condEl = document.createElement('span');
+      condEl.className = 'drum-step-cond';
+      condEl.hidden = true;
+      btn.appendChild(condEl);
+
       if (si >= GEN4.stepCount) btn.classList.add('step-inactive');
       gen4ApplyStepBtn(ci, si);
 
@@ -6116,6 +7070,10 @@ function buildDrumPanel() {
           }
           return;
         }
+        if ((e.metaKey || e.ctrlKey) && ch.steps[si]) {
+          gen4CycleCondition(ci, si);
+          return;
+        }
         if (e.shiftKey && ch.steps[si]) {
           gen4CycleProbability(ci, si);
           return;
@@ -6128,6 +7086,7 @@ function buildDrumPanel() {
           ch.locks[si] = {};
           ch.stutter[si] = 1;
           ch.probability[si] = 1.0;
+          ch.condition[si] = 0;
           if (gen4LockSelection?.ci === ci && gen4LockSelection?.si === si) {
             gen4LockSelection = null;
             refreshGen4LockEditor();
@@ -6771,7 +7730,8 @@ function refreshSequencerUI() {
 }
 
 function setSequencerStep(stepIdx, value) {
-  STEP_SEQ.steps[stepIdx] = clamp(value, -1, 1);
+  // 12 levels each way — one level = one semitone on a pitch target.
+  STEP_SEQ.steps[stepIdx] = clamp(Math.round(value * 12) / 12, -1, 1);
   STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
   refreshSequencerUI();
   refreshBackPanelState();
@@ -6831,6 +7791,7 @@ function createGen4PatternData(stepCount = 16) {
       locks: Array.from({ length: 32 }, () => ({})),
       stutter: new Array(32).fill(1),
       probability: new Array(32).fill(1.0),
+      condition: new Array(32).fill(0),
     })),
   };
 }
@@ -6847,6 +7808,7 @@ function cloneGen4Pattern(pattern) {
     channel.locks = source.locks.map((locks) => ({ ...locks }));
     channel.stutter = [...source.stutter];
     channel.probability = [...source.probability];
+    if (Array.isArray(source.condition)) channel.condition = [...source.condition];
   });
   return clone;
 }
@@ -6863,6 +7825,7 @@ function serializeGen4Pattern(pattern) {
       locks: channel.locks.map((locks) => ({ ...locks })),
       stutter: [...channel.stutter],
       probability: [...channel.probability],
+      condition: [...(channel.condition || [])],
     })),
   };
 }
@@ -6887,7 +7850,7 @@ function deserializeGen4Pattern(data) {
     if (Array.isArray(saved.timing))
       saved.timing
         .slice(0, 32)
-        .forEach((value, si) => (channel.timing[si] = clamp(Math.round(value), -4, 4)));
+        .forEach((value, si) => (channel.timing[si] = clamp(Math.round(value), -8, 8)));
     if (Array.isArray(saved.locks))
       saved.locks.slice(0, 32).forEach((values, si) => {
         if (!values || typeof values !== 'object') return;
@@ -6908,6 +7871,13 @@ function deserializeGen4Pattern(data) {
       saved.probability
         .slice(0, 32)
         .forEach((value, si) => (channel.probability[si] = clamp(value, 0, 1)));
+    if (Array.isArray(saved.condition))
+      saved.condition
+        .slice(0, 32)
+        .forEach(
+          (value, si) =>
+            (channel.condition[si] = clamp(Math.round(value) || 0, 0, GEN4_TRIG_CONDITIONS.length - 1)),
+        );
   });
   return pattern;
 }
@@ -7022,6 +7992,7 @@ function adoptInitialLoop() {
           locks: ch.locks,
           stutter: ch.stutter,
           probability: ch.probability,
+          condition: ch.condition,
         })),
       },
       gen3: { lockedMidis: GEN3.lockedMidis },
@@ -7303,6 +8274,9 @@ function bindEditLoop() {
     ch.locks = pat.locks;
     ch.stutter = pat.stutter;
     ch.probability = pat.probability;
+    // Patterns from older saves may predate trig conditions.
+    if (!Array.isArray(pat.condition)) pat.condition = new Array(32).fill(0);
+    ch.condition = pat.condition;
   });
   const sustainChordShouldFollowEditLoop =
     GEN3.sustainMode &&
@@ -7527,6 +8501,62 @@ function closeSettingsMenu() {
   if (modal?.open) modal.close();
 }
 
+// ── Tooltip toggle ── native title tooltips can't be disabled via CSS.
+// When off, every title is stashed into data-saved-title, and a mutation
+// observer keeps stripping titles the app re-sets (step repaints, UI
+// refreshes) or adds on newly built elements.
+const TOOLTIPS_STORAGE_KEY = 'grnsh-tooltips-v1';
+const TOOLTIPS = { enabled: localStorage.getItem(TOOLTIPS_STORAGE_KEY) !== 'off' };
+
+// ── Bounce render mode ── master-only wav (default) or master + per-bus stems.
+const BOUNCE_RENDER_STORAGE_KEY = 'grnsh-bounce-stems-v1';
+const BOUNCE_RENDER = { stems: localStorage.getItem(BOUNCE_RENDER_STORAGE_KEY) === 'on' };
+
+function setBounceRenderStems(on) {
+  BOUNCE_RENDER.stems = on;
+  localStorage.setItem(BOUNCE_RENDER_STORAGE_KEY, on ? 'on' : 'off');
+}
+
+function stripTooltipTitle(el) {
+  const t = el.getAttribute?.('title');
+  if (!t) return;
+  el.dataset.savedTitle = t;
+  el.removeAttribute('title');
+}
+
+new MutationObserver((mutations) => {
+  if (TOOLTIPS.enabled) return;
+  mutations.forEach((m) => {
+    if (m.type === 'attributes') {
+      stripTooltipTitle(m.target);
+      return;
+    }
+    m.addedNodes.forEach((n) => {
+      if (n.nodeType !== 1) return;
+      stripTooltipTitle(n);
+      n.querySelectorAll?.('[title]').forEach(stripTooltipTitle);
+    });
+  });
+}).observe(document.documentElement, {
+  subtree: true,
+  childList: true,
+  attributes: true,
+  attributeFilter: ['title'],
+});
+
+function setTooltipsEnabled(on) {
+  TOOLTIPS.enabled = on;
+  localStorage.setItem(TOOLTIPS_STORAGE_KEY, on ? 'on' : 'off');
+  if (on) {
+    document.querySelectorAll('[data-saved-title]').forEach((el) => {
+      el.setAttribute('title', el.dataset.savedTitle);
+      delete el.dataset.savedTitle;
+    });
+  } else {
+    document.querySelectorAll('[title]').forEach(stripTooltipTitle);
+  }
+}
+
 function initSettingsMenu() {
   const modal = getSettingsModal();
   const btn = document.getElementById('settingsMenuBtn');
@@ -7535,6 +8565,20 @@ function initSettingsMenu() {
     themeSelect.value = document.documentElement.dataset.theme || 'original';
     themeSelect.addEventListener('change', () => setAppTheme(themeSelect.value));
   }
+  const tooltipsEnable = document.getElementById('tooltipsEnable');
+  if (tooltipsEnable) {
+    tooltipsEnable.checked = TOOLTIPS.enabled;
+    tooltipsEnable.addEventListener('change', () => setTooltipsEnabled(tooltipsEnable.checked));
+  }
+  const bounceModeSelect = document.getElementById('bounceModeSelect');
+  if (bounceModeSelect) {
+    bounceModeSelect.value = BOUNCE_RENDER.stems ? 'stems' : 'master';
+    bounceModeSelect.addEventListener('change', () =>
+      setBounceRenderStems(bounceModeSelect.value === 'stems'),
+    );
+  }
+  // A stored "off" must strip the titles the UI build just created.
+  if (!TOOLTIPS.enabled) setTooltipsEnabled(false);
   btn?.addEventListener('click', () => {
     modal?.open ? modal.close() : modal?.showModal();
     btn.classList.toggle('open', !!modal?.open);
@@ -7600,12 +8644,27 @@ function initConfirmDialog() {
 // ── Song entry ops ──
 
 function addSongEntry(loopId = getEditLoop()?.id) {
+  insertSongEntry(loopId, null);
+}
+
+// Insert before the given entry (null → append). A drop from the loops bar
+// lands mid-arrangement without disturbing playback position.
+function insertSongEntry(loopId, beforeEntryId = null) {
   const loop = getLoopById(loopId);
   if (!loop) return;
   do {
     SONG.entryCounter += 1;
   } while (SONG.entries.some((e) => e.id === `entry-${SONG.entryCounter}`));
-  SONG.entries.push({ id: `entry-${SONG.entryCounter}`, loopId, repeats: 1 });
+  const entry = { id: `entry-${SONG.entryCounter}`, loopId, repeats: 1 };
+  const idx = beforeEntryId ? SONG.entries.findIndex((e) => e.id === beforeEntryId) : -1;
+  if (idx >= 0) {
+    SONG.entries.splice(idx, 0, entry);
+    if (GEN4.playing && PLAY.mode === 'song' && idx <= SONG.cursor.entryIdx) {
+      SONG.cursor.entryIdx += 1;
+    }
+  } else {
+    SONG.entries.push(entry);
+  }
   renderSongLane();
 }
 
@@ -7838,6 +8897,15 @@ function renderLoopsBar() {
   LOOPS.list.forEach((loop, idx) => {
     const chip = document.createElement('div');
     chip.className = 'loop-chip' + (idx === LOOPS.editIndex ? ' active' : '');
+    // Chips drag into the song lane, which inserts an entry at the drop spot.
+    chip.draggable = true;
+    chip.addEventListener('dragstart', (e) => {
+      if (!e.dataTransfer) return;
+      e.dataTransfer.effectAllowed = 'copy';
+      try {
+        e.dataTransfer.setData('text/plain', `loop:${loop.id}`);
+      } catch (_) {}
+    });
 
     const nameBtn = document.createElement('button');
     nameBtn.type = 'button';
@@ -7976,12 +9044,27 @@ function renderSongLane() {
 
   blocksWrap.addEventListener('dragover', (e) => {
     const dragging = blocksWrap.querySelector('.song-block.dragging');
-    if (!dragging) return;
+    if (dragging) {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      const after = getSongDragAfterElement(blocksWrap, e.clientX);
+      if (after == null) blocksWrap.appendChild(dragging);
+      else if (after !== dragging) blocksWrap.insertBefore(dragging, after);
+      return;
+    }
+    // No block mid-drag → a loop chip is incoming (dragover can't read the
+    // payload, so any external text drag is accepted; drop validates).
+    if (e.dataTransfer?.types.includes('text/plain')) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    }
+  });
+  blocksWrap.addEventListener('drop', (e) => {
+    const data = e.dataTransfer?.getData('text/plain') || '';
+    if (!data.startsWith('loop:')) return;
     e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     const after = getSongDragAfterElement(blocksWrap, e.clientX);
-    if (after == null) blocksWrap.appendChild(dragging);
-    else if (after !== dragging) blocksWrap.insertBefore(dragging, after);
+    insertSongEntry(data.slice(5), after?.dataset.entryId || null);
   });
   attachStripWheelPan(blocksWrap);
   lane.appendChild(blocksWrap);
@@ -8775,6 +9858,14 @@ function buildBackPanel() {
       params: GEN3_LFO_PARAMS.map((p) => ({
         routeKey: `2:${p.key}`,
         label: getGen3ParamLabel(p.key),
+      })),
+    },
+    {
+      title: 'Beat Rpt',
+      subtitle: 'Stutter engine',
+      params: ['gate', 'pitch', 'decay', 'chance', 'mix'].map((key) => ({
+        routeKey: `3:beatrepeat:${key}`,
+        label: getFxParamDef('beatrepeat', key)?.label || key,
       })),
     },
     {
@@ -11547,7 +12638,7 @@ function buildMasterPanel() {
   bounceBtn.className = 'master-tool-btn';
   bounceBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="4.7"/><path d="M6 3.5v4.2M4.3 6 6 7.7 7.7 6"/></svg>';
   bounceBtn.title = 'Bounce song → here — silent one-pass render of the arrangement, fed straight into mastering';
-  bounceBtn.addEventListener('click', bounceSong);
+  bounceBtn.addEventListener('click', (e) => bounceSong({ invert: e.shiftKey }));
 
   const loadInput = document.createElement('input');
   loadInput.type = 'file';
@@ -12059,8 +13150,23 @@ function buildSequencerSection() {
     step.style.setProperty('--seq-value', `${Math.abs(stepValue)}`);
     step.dataset.step = `${stepIdx + 1}`;
 
+    // Live readout while dragging: the step's level in ±12 (semitones when
+    // the seq drives a pitch param).
+    const showStepTip = () => {
+      const level = Math.round((STEP_SEQ.steps[stepIdx] || 0) * 12);
+      const tip = ensureUiTip();
+      tip.textContent = `${level > 0 ? '+' : ''}${level} st`;
+      tip.hidden = false;
+      const r = step.getBoundingClientRect();
+      tip.style.left = '0px';
+      const tw = tip.offsetWidth;
+      tip.style.left = `${clamp(r.left + r.width / 2 - tw / 2, 4, window.innerWidth - tw - 4)}px`;
+      tip.style.top = `${Math.max(4, r.top - tip.offsetHeight - 6)}px`;
+    };
+
     const updateStep = (event) => {
       setSequencerStep(stepIdx, valueFromPointer(event, step));
+      showStepTip();
       if (STEP_SEQ.currentStep === stepIdx) applyMappedModulationTargets();
     };
 
@@ -12077,6 +13183,7 @@ function buildSequencerSection() {
     const endDrag = (event) => {
       if (step.hasPointerCapture(event.pointerId)) step.releasePointerCapture(event.pointerId);
       step.classList.remove('dragging');
+      hideUiTip();
     };
     step.addEventListener('pointerup', endDrag);
     step.addEventListener('pointercancel', endDrag);
@@ -12648,6 +13755,7 @@ function capturePreset() {
   return {
     transport: { bpm: TRANSPORT.bpm },
     gens: state.map((gen) => ({ ...gen })),
+    sourceModes: GRANULAR_SOURCES.map((source) => source.mode),
     gen3: {
       type: GEN3.type,
       gain: GEN3.gain,
@@ -12719,7 +13827,21 @@ function applyPreset(preset, { resetSources = true } = {}) {
       state[genIdx].densitySyncIndex = gen.densitySyncIndex;
     refreshGeneratorUI(genIdx);
   });
-  if (resetSources) resetGranularSources();
+  if (resetSources) {
+    resetGranularSources();
+    // Honor the saved source modes so a project that never used the mic
+    // doesn't reopen in mic mode (file data is layered back on by the
+    // scope's clip restore). Legacy presets lack the field → mic default.
+    if (Array.isArray(preset.sourceModes)) {
+      preset.sourceModes.slice(0, 2).forEach((mode, genIdx) => {
+        if (mode !== 'file' && mode !== 'mic') return;
+        getSourceState(genIdx).mode = mode;
+        refreshSourceModeUI(genIdx);
+        if (node) syncGranularSourceState(genIdx);
+      });
+      if (!anyMicSourceSelected()) disconnectGranularInput({ stopTracks: true });
+    }
+  }
 
   if (preset.gen3) {
     // The chord (lockedMidis) is loop data now — legacy presets carry it here
@@ -13746,8 +14868,10 @@ async function ensureMicInput({ forceReconnect = false } = {}) {
 async function syncGranularSourceState(genIdx) {
   if (!node) return;
   const source = getSourceState(genIdx);
-  if (source.mode === 'file' && source.bufferData) {
-    const workletBuffer = source.bufferData.slice();
+  if (source.mode === 'file') {
+    // No data yet → a silent stub, so the worklet never falls back to the
+    // live input while the generator claims to be a file source.
+    const workletBuffer = source.bufferData ? source.bufferData.slice() : new Float32Array(2048);
     node.port.postMessage({ type: 'set-gen-source-buffer', gen: genIdx, buffer: workletBuffer }, [
       workletBuffer.buffer,
     ]);
@@ -13775,15 +14899,18 @@ async function setGeneratorSourceMode(genIdx, mode) {
   const source = getSourceState(genIdx);
   if (!source) return;
   if (mode === 'file') {
-    if (!source.bufferData) {
-      setStatus('drop a .wav file');
-      return;
-    }
+    // Switch even with nothing loaded — an empty file source is silent
+    // instead of trapping the generator in mic mode.
     source.mode = 'file';
-    setSourceDurationSec(genIdx, source.durationSec);
+    setSourceDurationSec(genIdx, source.bufferData ? source.durationSec : LIVE_SOURCE_SECONDS);
     refreshSourceModeUI(genIdx);
-    await ensureGranularEngine();
-    await syncGranularSourceState(genIdx);
+    if (!source.bufferData) setStatus('file source — drop a .wav on the panel');
+    if (source.bufferData || node) {
+      await ensureGranularEngine();
+      await syncGranularSourceState(genIdx);
+    }
+    // The mic stream dies once no generator listens to it.
+    if (!anyMicSourceSelected()) disconnectGranularInput({ stopTracks: true });
   } else {
     source.mode = 'mic';
     setSourceDurationSec(genIdx, LIVE_SOURCE_SECONDS);
@@ -13915,7 +15042,9 @@ getRecordBtn()?.addEventListener('click', () => {
   REC.isRecording ? stopRecording() : startRecording();
 });
 
-document.getElementById('bounceBtn')?.addEventListener('click', bounceSong);
+document
+  .getElementById('bounceBtn')
+  ?.addEventListener('click', (e) => bounceSong({ invert: e.shiftKey }));
 
 function syncGateUI() {
   const enable = getGateEnable();
@@ -14018,6 +15147,12 @@ window.addEventListener('keydown', (event) => {
 window.addEventListener(
   'keydown',
   (event) => {
+    // Before the dialog-open guard so it also closes an open settings menu.
+    if ((event.metaKey || event.ctrlKey) && event.key === ',') {
+      event.preventDefault();
+      document.getElementById('settingsMenuBtn')?.click();
+      return;
+    }
     if (document.querySelector('dialog[open]')) return;
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
       event.preventDefault();

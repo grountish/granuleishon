@@ -97,6 +97,17 @@
                 <option value="aurora">Aurora</option>
               </select>
             </label>
+            <label class="input-box" for="bounceModeSelect">
+              <span class="input-label">Bounce</span>
+              <select id="bounceModeSelect" class="input-select">
+                <option value="master">Master only</option>
+                <option value="stems">Master + stems</option>
+              </select>
+            </label>
+            <label class="gate-box" for="tooltipsEnable">
+              <input id="tooltipsEnable" class="gate-enable" type="checkbox" checked />
+              <span class="gate-label">Tooltips</span>
+            </label>
             <label class="gate-box" for="gateThreshold" title="Mute mic into the granulator below this threshold">
               <input id="gateEnable" class="gate-enable" type="checkbox" />
               <span class="gate-label">Mic Gate</span>
@@ -107,6 +118,7 @@
               <div class="settings-section-label">Shortcuts</div>
               <div class="shortcut-row"><kbd>space</kbd><span>play / stop</span></div>
               <div class="shortcut-row"><kbd>tab</kbd><span>front / back panel</span></div>
+              <div class="shortcut-row"><kbd>&#8984; ,</kbd><span>options</span></div>
               <div class="shortcut-row"><kbd>&#8984; s</kbd><span>save project</span></div>
               <div class="shortcut-row"><kbd>&#8984; z</kbd><span>undo</span></div>
               <div class="shortcut-row"><kbd>&#8679;&#8984; z</kbd><span>redo</span></div>

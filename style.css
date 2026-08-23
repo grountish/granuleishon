@@ -1299,6 +1299,25 @@ button:disabled {
   display: block;
   width: 100%;
   height: 100%;
+  cursor: pointer;
+}
+
+.viz-scene-label {
+  position: absolute;
+  left: 18px;
+  bottom: 14px;
+  font: 600 10px ui-monospace, monospace;
+  letter-spacing: 0.3em;
+  color: rgba(255, 255, 255, 0.65);
+  text-shadow: 0 0 8px rgba(120, 180, 255, 0.5);
+  opacity: 0;
+  transition: opacity 1.2s ease;
+  pointer-events: none;
+  user-select: none;
+}
+
+.viz-scene-label.show {
+  opacity: 1;
 }
 
 .back-board {
@@ -2858,10 +2877,13 @@ button:disabled {
 
 .drum-row {
   display: grid;
-  grid-template-columns: 38px auto 1fr;
+  /* Steps take the stretch; the FX/mute actions hug the right edge. */
+  grid-template-columns: 38px minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 6px;
-  height: 26px;
+  /* Tall enough that a step's badge rows (timing/stutter up top, note and
+     trig condition at the bottom) never overlap. */
+  height: 34px;
 }
 
 .drum-row-actions {
@@ -2869,11 +2891,18 @@ button:disabled {
   align-items: center;
   gap: 6px;
   justify-self: end;
+  /* Constant width (FX 22 + gap 6 + M 22) even on rows without an FX button
+     (OSC), so every row's fluid step cells line up column-for-column. */
+  min-width: 50px;
+  justify-content: flex-end;
 }
 
 .drum-row-label {
   width: 38px;
-  height: 100%;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 0;
   border: 0;
   background: transparent;
@@ -2883,7 +2912,7 @@ button:disabled {
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ch-color, var(--text));
-  text-align: left;
+  text-align: center;
   cursor: pointer;
   user-select: none;
 }
@@ -2903,9 +2932,11 @@ button:disabled {
 
 .drum-steps {
   display: grid;
-  grid-template-columns: repeat(32, 26px);
+  /* Fluid columns: fill the row's width, never shrinking below tap size. */
+  grid-template-columns: repeat(32, minmax(22px, 1fr));
   gap: 3px;
-  flex-shrink: 0;
+  width: 100%;
+  min-width: 0;
   height: 100%;
 }
 
@@ -3033,6 +3064,79 @@ button:disabled {
   color: var(--muted);
 }
 
+.drum-gen-tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.drum-gen-tab {
+  height: 18px;
+  min-height: 18px;
+  padding: 0 8px;
+  font-size: 7px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.drum-gen-tab.active {
+  color: #fff;
+  background: #333;
+  border-color: #5a5a5a;
+}
+
+.drum-gen-panel {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
+/* display:flex would otherwise defeat the hidden attribute */
+.drum-gen-panel[hidden] {
+  display: none;
+}
+
+.drum-gen-run {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.drum-note-edit-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-left: 8px;
+  margin-left: 2px;
+  border-left: 1px solid var(--border);
+}
+
+.drum-note-edit-caption {
+  font-size: 7px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+/* Shared instant tooltip — replaces the slow native title on toolbars. */
+.ui-tip {
+  position: fixed;
+  z-index: 1000;
+  max-width: 320px;
+  padding: 4px 7px;
+  font-size: 9px;
+  line-height: 1.4;
+  color: var(--text);
+  background: #111;
+  border: 1px solid #4a4a4a;
+  border-radius: 3px;
+  pointer-events: none;
+  white-space: normal;
+}
+
 .drum-note-lane-btn {
   min-width: 42px;
   height: 19px;
@@ -3054,7 +3158,7 @@ button:disabled {
 .drum-note-pencil-btn {
   width: 24px;
   height: 19px;
-  margin-left: auto;
+  margin-left: 8px;
   padding: 0;
   border-color: #3b3b3b;
   background: #202020;
@@ -3231,13 +3335,13 @@ button:disabled {
 
 .drum-step-stutter {
   position: absolute;
-  top: 1px;
-  right: 1px;
+  top: 2px;
+  right: 2px;
   z-index: 2;
   padding: 1px 2px;
   border-radius: 2px;
   background: rgba(12, 16, 16, 0.72);
-  font-size: 5px;
+  font-size: 6px;
   line-height: 1;
   color: rgba(255, 255, 255, 0.95);
   font-weight: 700;
@@ -3248,25 +3352,27 @@ button:disabled {
 
 .drum-step-timing {
   position: absolute;
-  top: 1px;
-  left: 1px;
+  top: 2px;
+  left: 2px;
   z-index: 2;
   min-width: 9px;
   padding: 1px 2px;
   border-radius: 2px;
   background: rgba(12, 16, 16, 0.72);
   color: rgba(255, 255, 255, 0.95);
-  font-size: 5px;
+  font-size: 6px;
   font-weight: 700;
   letter-spacing: 0;
   line-height: 1;
   pointer-events: none;
 }
 
+/* Lock marker sits in the free middle band, clear of the corner badges. */
 .drum-step-lock {
   position: absolute;
   right: 2px;
-  bottom: 4px;
+  top: 50%;
+  transform: translateY(-50%);
   z-index: 2;
   color: rgba(10, 14, 14, 0.88);
   font-size: 6px;
@@ -3292,23 +3398,6 @@ button:disabled {
   color: var(--gen-accent);
 }
 
-.drum-step-note {
-  position: absolute;
-  left: 2px;
-  bottom: 4px;
-  z-index: 1;
-  color: rgba(10, 14, 14, 0.82);
-  font-size: 6px;
-  font-weight: 800;
-  letter-spacing: -0.03em;
-  line-height: 1;
-  pointer-events: none;
-}
-
-.drum-step-note[hidden] {
-  display: none;
-}
-
 .drum-step-prob {
   position: absolute;
   bottom: 0;
@@ -3317,6 +3406,27 @@ button:disabled {
   background: rgba(255, 255, 255, 0.42);
   pointer-events: none;
   transition: width 0.1s;
+}
+
+/* Trig condition badge — bottom-right so it coexists with stutter (top-right). */
+.drum-step-cond {
+  position: absolute;
+  right: 2px;
+  bottom: 5px;
+  z-index: 2;
+  padding: 1px 2px;
+  border-radius: 2px;
+  background: rgba(12, 16, 16, 0.78);
+  color: #ffd76a;
+  font-size: 6px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.drum-step-cond[hidden] {
+  display: none;
 }
 
 
@@ -3505,7 +3615,10 @@ button:disabled {
 }
 
 .loops-bar {
-  flex: 1;
+  /* Shrink to content so the song lane gets the leftover width; cap it so a
+     pile of loops still leaves the song room and scrolls instead. */
+  flex: 0 1 auto;
+  max-width: 35%;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -3537,7 +3650,7 @@ button:disabled {
 .loop-chip-name {
   border: none;
   background: transparent;
-  padding: 3px 8px;
+  padding: 3px 5px;
   font-size: 9px;
   font-weight: 700;
   color: var(--text);
@@ -3562,12 +3675,16 @@ button:disabled {
   background: transparent;
   color: var(--muted);
   font-size: 9px;
-  padding: 3px 5px 3px 0;
+  padding: 3px 0;
+  width: 0;
+  overflow: hidden;
   opacity: 0;
 }
 
 .loop-chip:hover .loop-chip-del {
   opacity: 1;
+  width: auto;
+  padding: 3px 5px 3px 0;
 }
 
 .loop-chip-del:hover:not(:disabled) {
@@ -3636,43 +3753,25 @@ button:disabled {
   min-width: 0;
 }
 
-/* The loop/song strips live inside the 36px header — the native horizontal
-   scrollbar is taller than the free space and paints over the blocks, so
-   both get a slim thumb-only bar hugging the bottom edge instead. */
+/* The loop/song strips live inside the 36px header — hide the scrollbar
+   entirely (they still scroll with the trackpad / wheel). */
 .loops-bar,
 .song-blocks {
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
+  scrollbar-width: none;
   overscroll-behavior-x: contain;
 }
 
 .loops-bar::-webkit-scrollbar,
 .song-blocks::-webkit-scrollbar {
-  height: 3px;
-}
-
-.loops-bar::-webkit-scrollbar-track,
-.song-blocks::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.loops-bar::-webkit-scrollbar-thumb,
-.song-blocks::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 2px;
-}
-
-.loops-bar::-webkit-scrollbar-thumb:hover,
-.song-blocks::-webkit-scrollbar-thumb:hover {
-  background: #5a5a5a;
+  display: none;
 }
 
 .song-block {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 3px;
   flex-shrink: 0;
-  padding: 3px 8px;
+  padding: 2px 4px;
   border: 1px solid var(--border);
   border-radius: 2px;
   background: var(--surface-2);
@@ -3712,7 +3811,7 @@ button:disabled {
   padding: 0;
   font-size: 8px;
   color: var(--muted);
-  min-width: 14px;
+  min-width: 10px;
   text-align: right;
 }
 
