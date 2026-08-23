@@ -40,17 +40,26 @@ class GrainArpProcessor extends AudioWorkletProcessor {
     this.voices = [];
   }
 
-  spawnGrain(lenSamples, semitones, shape) {
+  spawnGrain(lenSamples, semitones, shape, scatter, reverseChance) {
     const rate = Math.pow(2, semitones / 12);
     const srcSpan = lenSamples * rate;
-    if (srcSpan >= this.ringLen - 1) return; // out of the ring's reach
-    let srcStart = this.write - srcSpan;
+    // Scatter resequences: pull the slice from up to 8 steps back in the ring.
+    // The clamp keeps the whole read behind what the writer will overwrite
+    // while this grain plays (writer advances lenSamples during playback).
+    let offset = Math.floor(Math.random() * scatter * 8) * lenSamples;
+    offset = Math.min(offset, this.ringLen - srcSpan - lenSamples - 256);
+    if (offset < 0) return; // slice + guard don't fit the ring at this pitch
+    let srcEnd = this.write - offset;
+    if (srcEnd < 0) srcEnd += this.ringLen;
+    let srcStart = srcEnd - srcSpan;
     if (srcStart < 0) srcStart += this.ringLen;
     if (this.voices.length >= MAX_VOICES) this.voices.shift(); // steal oldest
     this.panFlip = !this.panFlip;
     const wide = 0.35; // gentle alternate-pan width
     this.voices.push({
       srcStart,
+      srcEnd,
+      dir: Math.random() < reverseChance ? -1 : 1,
       pos: 0,
       len: lenSamples,
       rate,
@@ -71,6 +80,9 @@ class GrainArpProcessor extends AudioWorkletProcessor {
     const chance = parameters.chance[0];
     const shape = parameters.shape[0];
     const fb = Math.max(0, Math.min(0.85, parameters.feedback[0]));
+    const scatter = Math.max(0, Math.min(1, parameters.scatter[0]));
+    const reverseChance = Math.max(0, Math.min(1, parameters.reverse[0]));
+    const hold = parameters.hold[0] >= 0.5;
 
     const stepSamples = Math.max(64, Math.round(grid * sampleRate));
     const pattern = PATTERNS[patternIdx];
@@ -88,7 +100,8 @@ class GrainArpProcessor extends AudioWorkletProcessor {
           ? pattern[this.patternStep % pattern.length]
           : RANDOM_INTERVALS[(Math.random() * RANDOM_INTERVALS.length) | 0];
         this.patternStep++;
-        if (Math.random() < chance) this.spawnGrain(stepSamples, st, shape);
+        if (Math.random() < chance)
+          this.spawnGrain(stepSamples, st, shape, scatter, reverseChance);
       }
 
       // Sum active grain voices.
@@ -99,8 +112,13 @@ class GrainArpProcessor extends AudioWorkletProcessor {
         const t = voice.pos / voice.len;
         const a = voice.attackFrac;
         const env = t < a ? t / a : (1 - t) / (1 - a);
-        let readPos = voice.srcStart + voice.pos * voice.rate;
-        readPos %= ringLen;
+        // Forward grains scan srcStart→srcEnd; reversed grains scan back from
+        // srcEnd — both stay inside the already-written span.
+        let readPos =
+          voice.dir > 0
+            ? voice.srcStart + voice.pos * voice.rate
+            : voice.srcEnd - voice.pos * voice.rate;
+        readPos = ((readPos % ringLen) + ringLen) % ringLen;
         const i0 = readPos | 0;
         const i1 = i0 + 1 === ringLen ? 0 : i0 + 1;
         const frac = readPos - i0;
@@ -115,11 +133,15 @@ class GrainArpProcessor extends AudioWorkletProcessor {
       outR[i] = wetR;
 
       // Capture input plus fed-back grains; soft clip keeps recursion sane.
-      const dryL = inL ? inL[i] : 0;
-      const dryR = inR ? inR[i] : 0;
-      this.ring[0][this.write] = Math.tanh(dryL + wetL * fb);
-      this.ring[1][this.write] = Math.tanh(dryR + wetR * fb);
-      this.write = this.write + 1 === ringLen ? 0 : this.write + 1;
+      // Hold freezes the ring (and the write head) so the latched material
+      // keeps arping unchanged while fresh input passes by uncaptured.
+      if (!hold) {
+        const dryL = inL ? inL[i] : 0;
+        const dryR = inR ? inR[i] : 0;
+        this.ring[0][this.write] = Math.tanh(dryL + wetL * fb);
+        this.ring[1][this.write] = Math.tanh(dryR + wetR * fb);
+        this.write = this.write + 1 === ringLen ? 0 : this.write + 1;
+      }
     }
 
     return true;

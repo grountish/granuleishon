@@ -995,6 +995,47 @@ body.view-master .transport > .status {
   cursor: pointer;
 }
 
+/* LAN Link row (settings modal) */
+.link-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  background: #202020;
+  border-radius: 2px;
+}
+
+.link-room-input {
+  width: 64px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 9px;
+  padding: 2px 5px;
+  outline: none;
+}
+
+.link-room-input:focus {
+  border-color: var(--accent-0-dim);
+}
+
+.link-btn {
+  padding: 2px 8px;
+  font-size: 8px;
+}
+
+.link-status {
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 .gate-box.active {
   border-color: var(--accent-0);
 }

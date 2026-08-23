@@ -113,6 +113,14 @@
               <input id="soloAdditiveEnable" class="gate-enable" type="checkbox" checked />
               <span class="gate-label">Additive solo</span>
             </label>
+            <div class="link-box"
+              title="Sync tempo &amp; phase with another machine on your network — enter the same room name on both, then press Link">
+              <span class="input-label">Link</span>
+              <input id="linkRoomInput" class="link-room-input" type="text" placeholder="room"
+                maxlength="24" spellcheck="false" autocomplete="off" />
+              <button id="linkConnectBtn" class="link-btn" type="button">Link</button>
+              <span id="linkStatus" class="link-status">off</span>
+            </div>
             <label class="gate-box" for="gateThreshold" title="Mute mic into the granulator below this threshold">
               <input id="gateEnable" class="gate-enable" type="checkbox" />
               <span class="gate-label">Mic Gate</span>

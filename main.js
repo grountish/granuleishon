@@ -1709,6 +1709,7 @@ let resonatorNoteModeControl = null;
 let beatRepeatSyncModeControl = null;
 let beatRepeatGridSyncModeControl = null;
 let grainArpGridSyncModeControl = null;
+let grainArpHoldButton = null;
 const grainArpPatternButtons = new Map();
 const fxSectionEls = new Map(); // effect id → its draggable section element
 let fxLimiterSection = null; // the pinned (non-draggable) limiter section
@@ -1736,6 +1737,8 @@ const FX_LFO_PARAMS = [
   { id: 'beatrepeat', key: 'mix', min: 0, max: 1 },
   { id: 'grainarp', key: 'chance', min: 0, max: 1 },
   { id: 'grainarp', key: 'shape', min: 0, max: 1 },
+  { id: 'grainarp', key: 'scatter', min: 0, max: 1 },
+  { id: 'grainarp', key: 'reverse', min: 0, max: 1 },
   { id: 'grainarp', key: 'feedback', min: 0, max: 0.85 },
   { id: 'grainarp', key: 'mix', min: 0, max: 1 },
   { id: 'delay', key: 'time', min: 0, max: MAX_DELAY_SECONDS },
@@ -4600,6 +4603,219 @@ const GEN4_PRESETS = {
   ],
 };
 
+// ── Genre kits ── one selection sets every lane's sound AND writes a groove
+// into the edit loop's drum pattern (sound is global, the pattern lands in the
+// loop being edited). Step entries: step | [step, velocity] |
+// { s, v (velocity), p (probability), st (stutter retrigs), t (timing,
+// 1/128ths), n (MIDI note — overrides the lane's tuning for that step) }.
+const GEN4_KIT_PRESETS = [
+  {
+    name: 'House',
+    bpm: 124,
+    swing: 0.12,
+    stepCount: 32,
+    channels: {
+      kick: {
+        params: { tune: 76, decay: 0.46, punch: 0.5, drive: 0, gain: 1 },
+        steps: [0, 4, 8, 12, 16, 20, 24, 28],
+      },
+      snare: {
+        params: { tune: 170, decay: 0.14, snap: 0.53, gain: 0.88 }, // tight clap
+        steps: [4, 12, 20, 28],
+      },
+      hat: {
+        params: { decay: 0.125, tone: 9800, gain: 0.55 },
+        steps: [2, 6, 10, 14, 18, 22, 26, 30],
+      },
+      perc: {
+        params: { tune: 255, ratio: 1.4, index: 0.9, decay: 0.12, gain: 0.42 },
+        steps: [
+          [3, 0.5],
+          [10, 0.7],
+          [11, 0.45],
+          [15, 0.35],
+          [19, 0.5],
+          [23, 0.65],
+          [27, 0.5],
+          [29, 0.4],
+          [31, 0.55], // little turnaround into bar 1
+        ],
+      },
+      fm: {
+        // offbeat sub bounce
+        params: { tune: 55, ratio: 0.5, index: 1.2, feedback: 0.08, attack: 0.005, decay: 0.3, modDecay: 0.3, tone: 1800, gain: 0.8 },
+        steps: [2, 6, 10, 14, 18, 22, 26, 30],
+      },
+    },
+  },
+  {
+    name: 'Drum n Bass',
+    bpm: 174,
+    swing: 0,
+    stepCount: 32,
+    channels: {
+      kick: {
+        // short and clicky — leaves the low end to the sub
+        params: { tune: 56, decay: 0.28, punch: 0.8, drive: 0.15, gain: 1 },
+        steps: [0, 10, 16, 26],
+      },
+      snare: {
+        // cracky jungle snare; ghost hits between backbeats make the roll
+        params: { tune: 250, decay: 0.15, snap: 1, gain: 0.95 },
+        steps: [
+          4,
+          12,
+          20,
+          28,
+          { s: 7, v: 0.3, t: 1 },
+          { s: 9, v: 0.25 },
+          { s: 15, v: 0.35, t: -1 },
+          { s: 23, v: 0.3, t: 1 },
+          { s: 25, v: 0.25 },
+          { s: 31, v: 0.35, t: -1 },
+        ],
+      },
+      hat: {
+        // rolling 16ths, 8th-note accent cycle
+        params: { decay: 0.03, tone: 12500, gain: 0.45 },
+        steps: [
+          [0, 0.75], [1, 0.3], [2, 0.5], [3, 0.3],
+          [4, 0.75], [5, 0.3], [6, 0.5], [7, 0.3],
+          [8, 0.75], [9, 0.3], [10, 0.5], [11, 0.3],
+          [12, 0.75], [13, 0.3], [14, 0.5], [15, 0.3],
+          [16, 0.75], [17, 0.3], [18, 0.5], [19, 0.3],
+          [20, 0.75], [21, 0.3], [22, 0.5], [23, 0.3],
+          [24, 0.75], [25, 0.3], [26, 0.5], [27, 0.3],
+          [28, 0.75], [29, 0.3], [30, 0.5], [31, 0.3],
+        ],
+      },
+      perc: {
+        // dry rim on the syncopation
+        params: { tune: 190, ratio: 1.4, index: 0.9, decay: 0.06, gain: 0.5 },
+        steps: [
+          [3, 0.4],
+          [11, 0.45],
+          [19, 0.4],
+          [27, 0.45],
+          [31, 0.5],
+        ],
+      },
+      fm: {
+        // sub bassline under the kick: E1 · E1 · G1 · A1
+        params: { tune: 41, ratio: 0.5, index: 0.8, feedback: 0, attack: 0.004, decay: 0.9, modDecay: 0.2, tone: 900, gain: 0.9 },
+        steps: [
+          { s: 0, n: 28 },
+          { s: 10, n: 28 },
+          { s: 16, n: 31 },
+          { s: 26, n: 33 },
+        ],
+      },
+    },
+  },
+  {
+    name: 'Techno',
+    bpm: 132,
+    swing: 0,
+    stepCount: 32,
+    channels: {
+      kick: {
+        params: { tune: 55, decay: 0.5, punch: 0.7, drive: 0.75, gain: 0.85 },
+        steps: [0, 4, 8, 12, 16, 20, 24, 28],
+      },
+      snare: {
+        params: { tune: 210, decay: 0.32, snap: 0.62, gain: 0.85 },
+        steps: [[30, 0.5]], // single pre-loop clap turnaround
+      },
+      hat: {
+        params: { decay: 0.3, tone: 9800, gain: 0.5 },
+        steps: [2, 6, 10, 14, 18, 22, 26, 30],
+      },
+      perc: {
+        // metallic 16th ticks, accented at each bar's tail
+        params: { tune: 520, ratio: 6.2, index: 8.2, decay: 0.08, gain: 0.45 },
+        steps: [
+          [1, 0.3],
+          [3, 0.3],
+          [5, 0.3],
+          [7, 0.45],
+          [9, 0.3],
+          [11, 0.3],
+          [13, 0.3],
+          [15, 0.45],
+          [17, 0.3],
+          [19, 0.3],
+          [21, 0.3],
+          [23, 0.45],
+          [25, 0.3],
+          [27, 0.3],
+          [29, 0.3],
+          [31, 0.45],
+        ],
+      },
+      fm: {
+        // sparse stab, second one less certain
+        params: { tune: 110, ratio: 5.25, index: 12, feedback: 0.55, attack: 0.001, decay: 0.22, modDecay: 0.06, tone: 14000, gain: 0.55 },
+        steps: [
+          { s: 14, v: 0.6 },
+          { s: 30, v: 0.6, p: 0.6 },
+        ],
+      },
+    },
+  },
+  {
+    name: 'Glitch',
+    bpm: 100,
+    swing: 0,
+    stepCount: 32,
+    channels: {
+      kick: {
+        params: { tune: 82, decay: 0.18, punch: 0.78, drive: 0.05, gain: 0.9 },
+        steps: [0, 3, 8, 11, 16, 19, 24, 26], // bar 2 stumbles differently
+      },
+      snare: {
+        params: { tune: 210, decay: 0.32, snap: 0.62, gain: 0.92 },
+        steps: [4, { s: 12, st: 3 }, 20, { s: 23, v: 0.4, p: 0.6 }, { s: 28, st: 4 }],
+      },
+      hat: {
+        params: { decay: 0.06, tone: 11200, gain: 0.6 },
+        steps: [
+          { s: 2, p: 0.8 },
+          { s: 5, v: 0.6 },
+          7,
+          { s: 10, p: 0.7 },
+          { s: 13, v: 0.5 },
+          15,
+          { s: 18, p: 0.8 },
+          { s: 21, v: 0.6 },
+          23,
+          { s: 26, p: 0.7 },
+          { s: 29, v: 0.5 },
+          { s: 30, v: 0.4, st: 2 },
+          31,
+        ],
+      },
+      perc: {
+        params: { tune: 330, ratio: 3.5, index: 4.8, decay: 0.45, gain: 0.5 },
+        steps: [
+          { s: 6, v: 0.5 },
+          { s: 9, v: 0.4 },
+          { s: 22, v: 0.5 },
+          { s: 25, v: 0.4 },
+        ],
+      },
+      fm: {
+        params: { tune: 110, ratio: 5.25, index: 12, feedback: 0.55, attack: 0.001, decay: 0.22, modDecay: 0.06, tone: 14000, gain: 0.55 },
+        steps: [
+          { s: 1, p: 0.5 },
+          { s: 14, p: 0.6 },
+          { s: 17, p: 0.5 },
+          { s: 30, p: 0.7 },
+        ],
+      },
+    },
+  },
+];
+
 let gen4StepCountBtns = [];
 let gen4SwingInput = null;
 const gen4PresetSelects = new Map();
@@ -4637,6 +4853,63 @@ function applyGen4Preset(ci, presetIndex) {
     for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
   }
   refreshGen4PresetSelection(ci);
+  refreshBackPanelState();
+}
+
+// Apply a genre kit: every lane's sound params plus a fresh groove written
+// into the edit loop's active drum pattern (wipes that pattern first).
+function applyGen4KitPreset(presetIndex) {
+  const kit = GEN4_KIT_PRESETS[presetIndex];
+  const loop = getEditLoop();
+  if (!kit || !loop) return;
+  if (typeof kit.bpm === 'number') setTransportBpm(kit.bpm);
+  loop.gen4.swing = kit.swing || 0;
+
+  GEN4.channels.forEach((ch, ci) => {
+    const spec = kit.channels[ch.id];
+    // Clean slate for the lane — a kit is a groove, not a merge.
+    for (let si = 0; si < 32; si++) {
+      ch.steps[si] = false;
+      ch.notes[si] = null;
+      ch.velocity[si] = 1;
+      ch.timing[si] = 0;
+      ch.locks[si] = {};
+      ch.stutter[si] = 1;
+      ch.probability[si] = 1;
+      ch.condition[si] = 0;
+    }
+    if (spec?.params) {
+      Object.entries(spec.params).forEach(([key, value]) => {
+        ch.params[key] = value;
+        gen4ControlBindings[ci].get(key)?.setValue(value);
+      });
+    }
+    (spec?.steps || []).forEach((entry) => {
+      const e =
+        typeof entry === 'number'
+          ? { s: entry }
+          : Array.isArray(entry)
+            ? { s: entry[0], v: entry[1] }
+            : entry;
+      if (!Number.isInteger(e.s) || e.s < 0 || e.s >= 32) return;
+      ch.steps[e.s] = true;
+      if (typeof e.v === 'number') ch.velocity[e.s] = e.v;
+      if (typeof e.p === 'number') ch.probability[e.s] = e.p;
+      if (typeof e.st === 'number') ch.stutter[e.s] = e.st;
+      if (typeof e.t === 'number') ch.timing[e.s] = e.t;
+      if (Number.isInteger(e.n)) ch.notes[e.s] = clamp(e.n, GEN4_NOTE_MIN, GEN4_NOTE_MAX);
+    });
+    refreshGen4PresetSelection(ci);
+  });
+
+  gen4SetStepCount(kit.stepCount || 16, { duplicateOnExpand: false });
+  refreshGen4SwingUI();
+  GEN4.channels.forEach((_, ci) => {
+    for (let si = 0; si < 32; si++) gen4ApplyStepBtn(ci, si);
+  });
+  gen4RefreshStepDisplay();
+  if (gen4EditorMode === 'notes') refreshGen4NoteEditor();
+  refreshGen4LockEditor();
   refreshBackPanelState();
 }
 
@@ -5263,7 +5536,14 @@ function gen4ScheduleTick() {
         );
       }
     });
-    GEN4.nextStepTime += secPerStep;
+    if (linkSynced()) {
+      // Absolute grid time, re-derived from the live clock offset every step —
+      // corrections land as micro-shifts, never as accumulated drift.
+      LINK.stepAbs += 1;
+      GEN4.nextStepTime = linkStepAudioTime(LINK.stepAbs);
+    } else {
+      GEN4.nextStepTime += secPerStep;
+    }
   }
 }
 
@@ -5409,7 +5689,18 @@ function startGen4Sequencer() {
   });
   lfoLastTs = 0;
   FX_BUS_IDS.forEach((busId) => fxBuses[busId]?.beatrepeat.node.port.postMessage('reset'));
-  GEN4.nextStepTime = audioCtx.currentTime;
+  if (LINK.active && !LINK.applyingRemote && !LINK.grid.playing) {
+    // We start the linked session: anchor the shared grid slightly ahead so
+    // the peer can catch step 0 too.
+    LINK.grid = { bpm: TRANSPORT.bpm, origin: linkNow() + 0.15, playing: true };
+    linkBroadcastGrid();
+  }
+  if (linkSynced()) {
+    LINK.stepAbs = linkJoinStep();
+    GEN4.nextStepTime = linkStepAudioTime(LINK.stepAbs);
+  } else {
+    GEN4.nextStepTime = audioCtx.currentTime;
+  }
   GEN4.schedulerTimer = setInterval(gen4ScheduleTick, GEN4.scheduleInterval);
   if (!gen4DisplayFrame) gen4DisplayFrame = requestAnimationFrame(gen4DisplayTick);
   refreshSongTransportUI();
@@ -7111,6 +7402,30 @@ function buildDrumPanel() {
   const actions = document.createElement('div');
   actions.className = 'gen-header-actions';
 
+  // Genre kit — one-shot action: sets every lane's sound, writes a groove into
+  // this loop's pattern, and moves the transport to the genre's tempo.
+  const kitSelect = document.createElement('select');
+  kitSelect.className = 'fx-preset-select drum-preset-select drum-kit-select';
+  kitSelect.title = "Genre kit — sets drum sounds + tempo and overwrites this loop's drum pattern";
+  const kitPlaceholder = document.createElement('option');
+  kitPlaceholder.value = '';
+  kitPlaceholder.textContent = 'Kit…';
+  kitSelect.appendChild(kitPlaceholder);
+  GEN4_KIT_PRESETS.forEach(({ name }, kitIndex) => {
+    const option = document.createElement('option');
+    option.value = `${kitIndex}`;
+    option.textContent = name;
+    kitSelect.appendChild(option);
+  });
+  kitSelect.addEventListener('change', () => {
+    if (kitSelect.value === '') return;
+    applyGen4KitPreset(Number(kitSelect.value));
+    kitSelect.value = ''; // action, not state — the pattern is the user's now
+  });
+  kitSelect.addEventListener('click', (event) => event.stopPropagation());
+  kitSelect.addEventListener('keydown', (event) => event.stopPropagation());
+  actions.appendChild(kitSelect);
+
   const editorModeGroup = document.createElement('div');
   editorModeGroup.className = 'drum-editor-mode-group';
   [
@@ -7547,6 +7862,8 @@ const FX_DEFS = [
       { key: 'grid', label: 'Grid', min: 10, max: 500, step: 1, value: 250, unit: 'ms' },
       { key: 'chance', label: 'Activity', min: 0, max: 1, step: 0.01, value: 1, unit: '' },
       { key: 'shape', label: 'Shape', min: 0, max: 1, step: 0.01, value: 0.3, unit: '' },
+      { key: 'scatter', label: 'Scatter', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
+      { key: 'reverse', label: 'Reverse', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
       { key: 'feedback', label: 'Repeats', min: 0, max: 0.85, step: 0.01, value: 0.25, unit: '' },
       { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
     ],
@@ -7711,6 +8028,8 @@ const FX_PRESETS = {
         pattern: 'oct',
         chance: 1,
         shape: 0.3,
+        scatter: 0,
+        reverse: 0,
         feedback: 0.25,
         mix: 0,
       },
@@ -7724,6 +8043,8 @@ const FX_PRESETS = {
         pattern: 'oct',
         chance: 0.85,
         shape: 0.25,
+        scatter: 0,
+        reverse: 0.15,
         feedback: 0.45,
         mix: 0.5,
       },
@@ -7737,6 +8058,8 @@ const FX_PRESETS = {
         pattern: 'up',
         chance: 0.7,
         shape: 0.15,
+        scatter: 0,
+        reverse: 0,
         feedback: 0.3,
         mix: 0.45,
       },
@@ -7750,6 +8073,8 @@ const FX_PRESETS = {
         pattern: 'down',
         chance: 0.6,
         shape: 0.6,
+        scatter: 0.3,
+        reverse: 0.35,
         feedback: 0.55,
         mix: 0.5,
       },
@@ -7763,6 +8088,8 @@ const FX_PRESETS = {
         pattern: 'rand',
         chance: 0.5,
         shape: 0.4,
+        scatter: 0.7,
+        reverse: 0.25,
         feedback: 0.35,
         mix: 0.45,
       },
@@ -8034,7 +8361,10 @@ function makeDefaultFxState() {
       pattern: 'oct',
       chance: 1,
       shape: 0.3,
+      scatter: 0,
+      reverse: 0,
       feedback: 0.25,
+      hold: false, // performance latch — freezes the capture ring
       mix: 0,
     },
     delay: {
@@ -9035,6 +9365,10 @@ async function stopTransport() {
 
 async function stripPlayToggle() {
   if (isTransportOn()) {
+    if (LINK.active && !LINK.applyingRemote && LINK.grid.playing) {
+      LINK.grid.playing = false;
+      linkBroadcastGrid();
+    }
     await stopTransport();
     setStatus('stopped');
   } else {
@@ -9087,6 +9421,254 @@ const SOLO_MODE = { additive: localStorage.getItem(SOLO_MODE_STORAGE_KEY) !== 'o
 function setSoloAdditive(on) {
   SOLO_MODE.additive = on;
   localStorage.setItem(SOLO_MODE_STORAGE_KEY, on ? 'on' : 'off');
+}
+
+// ── LAN Link ── Ableton-Link-style tempo/phase sync with one other machine on
+// the same network. A WebRTC data channel carries clock pings and the shared
+// grid (PeerJS's public broker does signaling only — audio never leaves the
+// machine). The host's performance clock is the shared timeline; the joiner
+// measures its offset NTP-style (min-RTT filtered) and both machines schedule
+// every step at an absolute grid time, so correction is continuous and
+// drift can never accumulate.
+const LINK = {
+  peer: null,
+  conn: null,
+  role: null, // 'host' | 'join'
+  active: false, // data channel open
+  room: '',
+  offset: 0, // join only: host clock − local clock, seconds
+  rtt: 0,
+  samples: [], // recent {offset, rtt} pairs; best (lowest rtt) wins
+  pingTimer: null,
+  grid: { bpm: 120, origin: 0, playing: false }, // origin = shared time of absolute step 0
+  stepAbs: 0, // next absolute grid step this machine will schedule
+  applyingRemote: false, // guards echo loops on remote-driven transport/bpm
+};
+
+const LINK_QUANTUM = 16; // machines join the grid on 16-step (one bar) boundaries
+const LINK_PEER_PREFIX = 'grnsh-link-';
+
+function linkLocalNow() {
+  return performance.now() / 1000;
+}
+
+function linkNow() {
+  return linkLocalNow() + (LINK.role === 'join' ? LINK.offset : 0);
+}
+
+function linkClockReady() {
+  return LINK.role === 'host' || LINK.samples.length >= 3;
+}
+
+function linkSynced() {
+  return LINK.active && LINK.grid.playing && linkClockReady();
+}
+
+function linkSecPerStep() {
+  return 60 / LINK.grid.bpm / 4;
+}
+
+// Map a shared-timeline instant to this machine's audio clock, compensating
+// the local output latency so the *sound* lines up, not just the schedule.
+function linkSharedToAudioTime(ts) {
+  const out = audioCtx.outputLatency || audioCtx.baseLatency || 0;
+  return audioCtx.currentTime + (ts - linkNow()) - out;
+}
+
+function linkStepAudioTime(stepAbs) {
+  return linkSharedToAudioTime(LINK.grid.origin + stepAbs * linkSecPerStep());
+}
+
+// First grid step at/after "now + guard", rounded up to the join quantum so
+// both machines share a downbeat.
+function linkJoinStep(guardSec = 0.06) {
+  const k = Math.ceil((linkNow() + guardSec - LINK.grid.origin) / linkSecPerStep());
+  return Math.max(0, Math.ceil(k / LINK_QUANTUM) * LINK_QUANTUM);
+}
+
+function linkSend(msg) {
+  if (LINK.conn?.open) LINK.conn.send(msg);
+}
+
+function linkSetStatus(text) {
+  const el = document.getElementById('linkStatus');
+  if (el) el.textContent = text;
+  const btn = document.getElementById('linkConnectBtn');
+  if (btn) btn.textContent = LINK.peer ? 'Unlink' : 'Link';
+}
+
+function linkStatusLine() {
+  if (!LINK.active) return LINK.role === 'host' ? 'hosting — waiting' : 'connecting…';
+  if (LINK.role === 'host') return 'linked · host';
+  const halfMs = Math.max(1, Math.round((LINK.rtt * 1000) / 2));
+  return `linked · ±${halfMs}ms`;
+}
+
+function linkBroadcastGrid() {
+  linkSend({ t: 'grid', bpm: LINK.grid.bpm, origin: LINK.grid.origin, playing: LINK.grid.playing });
+}
+
+async function linkRemoteStart() {
+  LINK.applyingRemote = true;
+  try {
+    await ensureTransportEngine();
+    if (!started) await start();
+    startGen4Sequencer();
+    setStatus('playing (link)');
+  } finally {
+    LINK.applyingRemote = false;
+  }
+  refreshSongTransportUI();
+}
+
+async function linkRemoteStop() {
+  LINK.applyingRemote = true;
+  try {
+    await stopTransport();
+    setStatus('stopped (link)');
+  } finally {
+    LINK.applyingRemote = false;
+  }
+}
+
+function linkOnMessage(msg) {
+  if (!msg || typeof msg !== 'object') return;
+  if (msg.t === 'ping') {
+    linkSend({ t: 'pong', t0: msg.t0, t1: linkLocalNow() });
+  } else if (msg.t === 'pong') {
+    const t2 = linkLocalNow();
+    const rtt = t2 - msg.t0;
+    LINK.samples.push({ offset: msg.t1 + rtt / 2 - t2, rtt });
+    if (LINK.samples.length > 12) LINK.samples.shift();
+    const best = LINK.samples.reduce((a, b) => (b.rtt < a.rtt ? b : a));
+    LINK.offset = best.offset;
+    LINK.rtt = best.rtt;
+    linkSetStatus(linkStatusLine());
+  } else if (msg.t === 'grid') {
+    const wasPlaying = LINK.grid.playing;
+    LINK.grid = {
+      bpm: clamp(Number(msg.bpm) || 120, BPM_BOUNDS.min, BPM_BOUNDS.max),
+      origin: Number(msg.origin) || 0,
+      playing: msg.playing === true,
+    };
+    if (TRANSPORT.bpm !== LINK.grid.bpm) {
+      LINK.applyingRemote = true;
+      setTransportBpm(LINK.grid.bpm);
+      LINK.applyingRemote = false;
+    }
+    if (LINK.grid.playing && !GEN4.playing) {
+      linkRemoteStart();
+    } else if (!LINK.grid.playing && isTransportOn()) {
+      linkRemoteStop();
+    } else if (LINK.grid.playing && GEN4.playing && wasPlaying) {
+      // Live tempo/origin change: keep our absolute step counter, remap its time.
+      GEN4.nextStepTime = linkStepAudioTime(LINK.stepAbs);
+    }
+  }
+}
+
+function linkWireConn(conn) {
+  LINK.conn = conn;
+  conn.on('open', () => {
+    LINK.active = true;
+    linkSetStatus(linkStatusLine());
+    setStatus(`link: connected as ${LINK.role}`);
+    if (LINK.role === 'host') linkBroadcastGrid();
+    if (LINK.role === 'join') {
+      clearInterval(LINK.pingTimer);
+      LINK.pingTimer = setInterval(() => linkSend({ t: 'ping', t0: linkLocalNow() }), 1000);
+      linkSend({ t: 'ping', t0: linkLocalNow() });
+    }
+  });
+  conn.on('data', linkOnMessage);
+  conn.on('close', () => {
+    if (LINK.conn !== conn) return;
+    LINK.active = false;
+    LINK.conn = null;
+    clearInterval(LINK.pingTimer);
+    LINK.pingTimer = null;
+    linkSetStatus(LINK.role === 'host' ? 'hosting — waiting' : 'peer left');
+  });
+  conn.on('error', () => linkSetStatus('link error'));
+}
+
+let peerJsPromise = null;
+function loadPeerJs() {
+  if (window.Peer) return Promise.resolve();
+  if (!peerJsPromise) {
+    peerJsPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';
+      s.onload = resolve;
+      s.onerror = () => {
+        peerJsPromise = null;
+        reject(new Error('peerjs load failed'));
+      };
+      document.head.appendChild(s);
+    });
+  }
+  return peerJsPromise;
+}
+
+async function linkConnect(room) {
+  linkDisconnect();
+  LINK.room = room;
+  linkSetStatus('loading…');
+  try {
+    await loadPeerJs();
+  } catch {
+    linkSetStatus('script load failed — offline?');
+    return;
+  }
+  const hostId = LINK_PEER_PREFIX + room;
+  linkSetStatus('connecting…');
+  // Deterministic pairing: the first machine claims the room id and hosts;
+  // the second finds the id taken and joins it.
+  const peer = new Peer(hostId);
+  LINK.peer = peer;
+  LINK.role = 'host';
+  linkSetStatus(linkStatusLine());
+  peer.on('open', () => {
+    if (LINK.peer !== peer) return;
+    linkSetStatus('hosting — waiting');
+    peer.on('connection', (conn) => {
+      LINK.conn?.close();
+      linkWireConn(conn);
+    });
+  });
+  peer.on('error', (err) => {
+    if (LINK.peer !== peer) return;
+    if (err.type === 'unavailable-id') {
+      peer.destroy();
+      const joiner = new Peer();
+      LINK.peer = joiner;
+      LINK.role = 'join';
+      LINK.samples = [];
+      linkSetStatus('connecting…');
+      joiner.on('open', () => {
+        if (LINK.peer !== joiner) return;
+        linkWireConn(joiner.connect(hostId, { serialization: 'json' }));
+      });
+      joiner.on('error', (e2) => {
+        if (LINK.peer === joiner) linkSetStatus(`link error: ${e2.type || 'unknown'}`);
+      });
+    } else {
+      linkSetStatus(`link error: ${err.type || 'unknown'}`);
+    }
+  });
+}
+
+function linkDisconnect() {
+  clearInterval(LINK.pingTimer);
+  LINK.pingTimer = null;
+  LINK.conn?.close();
+  LINK.peer?.destroy();
+  LINK.peer = null;
+  LINK.conn = null;
+  LINK.role = null;
+  LINK.active = false;
+  LINK.samples = [];
+  linkSetStatus('off');
 }
 
 function stripTooltipTitle(el) {
@@ -9156,6 +9738,24 @@ function initSettingsMenu() {
       setSoloAdditive(soloAdditiveEnable.checked),
     );
   }
+  const linkBtn = document.getElementById('linkConnectBtn');
+  const linkRoom = document.getElementById('linkRoomInput');
+  linkBtn?.addEventListener('click', () => {
+    if (LINK.peer) {
+      linkDisconnect();
+      return;
+    }
+    const room =
+      (linkRoom?.value || '').trim().toLowerCase().replace(/[^a-z0-9-]/g, '') || 'jam';
+    if (linkRoom) linkRoom.value = room;
+    linkConnect(room);
+  });
+  linkRoom?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      linkBtn?.click();
+    }
+  });
   // A stored "off" must strip the titles the UI build just created.
   if (!TOOLTIPS.enabled) setTooltipsEnabled(false);
   btn?.addEventListener('click', () => {
@@ -10024,6 +10624,10 @@ function refreshGrainArpPatternUI() {
   );
 }
 
+function refreshGrainArpHoldUI() {
+  grainArpHoldButton?.classList.toggle('active', !!FX.grainarp.hold);
+}
+
 function refreshResonatorFreqUI() {
   const control = fxControlBindings.get('resonator:freq');
   if (!control) return;
@@ -10095,6 +10699,19 @@ function setTransportBpm(value, { refresh = true, updateField = true } = {}) {
   // updateField false while the user is typing — rewriting mid-keystroke
   // would clamp "1" to "40" before they can finish "175".
   if (bpmInput && updateField) bpmInput.value = TRANSPORT.bpm.toFixed(decimals);
+  if (LINK.active && !LINK.applyingRemote && LINK.grid.bpm !== TRANSPORT.bpm) {
+    if (LINK.grid.playing) {
+      // Re-anchor the shared grid so the current phase carries into the new
+      // tempo; the peer remaps its own next step from the same numbers.
+      const stepFloat = (linkNow() - LINK.grid.origin) / linkSecPerStep();
+      LINK.grid.bpm = TRANSPORT.bpm;
+      LINK.grid.origin = linkNow() - stepFloat * linkSecPerStep();
+      if (GEN4.playing) GEN4.nextStepTime = linkStepAudioTime(LINK.stepAbs);
+    } else {
+      LINK.grid.bpm = TRANSPORT.bpm;
+    }
+    linkBroadcastGrid();
+  }
   if (!refresh) return;
   // Every bus has its own sync-locked delay/beat-repeat times — retune them all.
   FX_BUS_IDS.forEach((busId) => {
@@ -10923,7 +11540,7 @@ function refreshBackPanelState() {
   BACK_PANEL.audioModules.get('grainarp') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('grainarp');
-      module.subtitleEl.textContent = `${FX.grainarp.pattern.toUpperCase()} • ${formatBackValue(getFxParamDef('grainarp', 'mix'), FX.grainarp.mix)} wet`;
+      module.subtitleEl.textContent = `${FX.grainarp.hold ? 'HOLD • ' : ''}${FX.grainarp.pattern.toUpperCase()} • ${formatBackValue(getFxParamDef('grainarp', 'mix'), FX.grainarp.mix)} wet`;
       module.el.classList.toggle('active', FX.grainarp.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('delay') &&
@@ -14032,6 +14649,14 @@ function applyGrainArpPattern(busId = activeBus) {
     ?.setValueAtTime(Math.max(0, idx), audioCtx.currentTime);
 }
 
+function applyGrainArpHold(busId = activeBus) {
+  const bus = fxBuses[busId];
+  if (!bus?.grainarp?.node) return;
+  bus.grainarp.node.parameters
+    .get('hold')
+    ?.setValueAtTime(fxStates[busId].grainarp.hold ? 1 : 0, audioCtx.currentTime);
+}
+
 // Build the global master tail once: every bus output sums into master.sum,
 // which feeds the single limiter and the master output gain → destination.
 function buildMaster() {
@@ -14104,7 +14729,10 @@ function buildBusFx(busId) {
       ),
       chance: st.grainarp.chance,
       shape: st.grainarp.shape,
+      scatter: st.grainarp.scatter,
+      reverse: st.grainarp.reverse,
       feedback: st.grainarp.feedback,
+      hold: st.grainarp.hold ? 1 : 0,
     },
   });
   const arpOut = ac.createGain();
@@ -14379,6 +15007,8 @@ function applyFx(id, key, val, busId = activeBus) {
     if (key === 'grid') setParam('grid', clamp(val, 0.005, 1));
     if (key === 'chance') setParam('chance', clamp(val, 0, 1));
     if (key === 'shape') setParam('shape', clamp(val, 0, 1));
+    if (key === 'scatter') setParam('scatter', clamp(val, 0, 1));
+    if (key === 'reverse') setParam('reverse', clamp(val, 0, 1));
     if (key === 'feedback') setParam('feedback', clamp(val, 0, 0.85));
     if (key === 'mix') {
       fx.grainarp.wet.gain.value = val;
@@ -14481,6 +15111,7 @@ function applyAllFx(busId = activeBus) {
   applyDelayMode(busId);
   applyFilterMode(busId);
   applyGrainArpPattern(busId);
+  applyGrainArpHold(busId);
 }
 
 function refreshGen3UI() {
@@ -15336,6 +15967,24 @@ function renderActiveBusFx() {
         modeRow.appendChild(btn);
       });
       content.appendChild(modeRow);
+
+      // HOLD latch — freezes the capture ring so the arp loops the latched
+      // material. A performance gesture, so it never marks the preset custom.
+      const holdRow = document.createElement('div');
+      holdRow.className = 'fx-mode-row';
+      grainArpHoldButton = document.createElement('button');
+      grainArpHoldButton.type = 'button';
+      grainArpHoldButton.className = 'fx-mode-btn' + (FX.grainarp.hold ? ' active' : '');
+      grainArpHoldButton.textContent = 'HOLD';
+      grainArpHoldButton.title = 'Freeze the capture ring — the arp keeps looping what it holds';
+      grainArpHoldButton.addEventListener('click', () => {
+        FX.grainarp.hold = !FX.grainarp.hold;
+        applyGrainArpHold();
+        refreshGrainArpHoldUI();
+        refreshBackPanelState();
+      });
+      holdRow.appendChild(grainArpHoldButton);
+      content.appendChild(holdRow);
     }
 
     def.params.forEach((p) => {
@@ -15497,6 +16146,7 @@ function renderActiveBusFx() {
   refreshBeatRepeatGridUI();
   refreshGrainArpGridUI();
   refreshGrainArpPatternUI();
+  refreshGrainArpHoldUI();
   refreshResonatorFreqUI();
   // Freshly built controls start with unlit map LEDs — re-apply the active
   // mappings so a bus switch/reorder/preset never hides live modulation.
