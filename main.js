@@ -4608,45 +4608,67 @@ const GEN4_PRESETS = {
 // loop being edited). Step entries: step | [step, velocity] |
 // { s, v (velocity), p (probability), st (stutter retrigs), t (timing,
 // 1/128ths), n (MIDI note — overrides the lane's tuning for that step) }.
+// Optional `mods`: [{ target: '4:<lane>:<param>', source: 'lfo1'|'lfo2'|'seq'|'kick' }]
+// — modulation routes applied with the kit (replacing existing drum-lane routes).
 const GEN4_KIT_PRESETS = [
   {
+    // Captured from a live session — pattern, sounds, and mod routes together.
     name: 'House',
     bpm: 124,
-    swing: 0.12,
+    swing: 0.4,
     stepCount: 32,
     channels: {
       kick: {
         params: { tune: 76, decay: 0.46, punch: 0.5, drive: 0, gain: 1 },
-        steps: [0, 4, 8, 12, 16, 20, 24, 28],
+        steps: [0, 4, 8, 12, 16, 20, 24, 28, 30], // pickup kick into the loop
       },
       snare: {
-        params: { tune: 170, decay: 0.14, snap: 0.53, gain: 0.88 }, // tight clap
-        steps: [4, 12, 20, 28],
+        params: { tune: 135, decay: 0.13, snap: 0.82, gain: 0.99 },
+        steps: [{ s: 4, t: 1 }, 12, 20, 28, 30, 31], // fill rolls out of bar 2
       },
       hat: {
-        params: { decay: 0.125, tone: 9800, gain: 0.55 },
+        params: { decay: 0.125, tone: 8400, gain: 0.55 },
         steps: [2, 6, 10, 14, 18, 22, 26, 30],
       },
       perc: {
-        params: { tune: 255, ratio: 1.4, index: 0.9, decay: 0.12, gain: 0.42 },
+        params: { tune: 255, ratio: 1.4, index: 1.9, decay: 0.1, gain: 0.42 },
         steps: [
-          [3, 0.5],
-          [10, 0.7],
-          [11, 0.45],
-          [15, 0.35],
-          [19, 0.5],
-          [23, 0.65],
-          [27, 0.5],
-          [29, 0.4],
-          [31, 0.55], // little turnaround into bar 1
+          { s: 6, v: 0.69 },
+          { s: 10, v: 0.7 },
+          { s: 11, v: 0.45 },
+          { s: 15, v: 0.35 },
+          { s: 19, v: 0.5 },
+          { s: 23, v: 0.65 },
+          26,
+          { s: 27, v: 0.5 },
         ],
       },
       fm: {
-        // offbeat sub bounce
+        // offbeat sub bounce with a walking note line
         params: { tune: 55, ratio: 0.5, index: 1.2, feedback: 0.08, attack: 0.005, decay: 0.3, modDecay: 0.3, tone: 1800, gain: 0.8 },
-        steps: [2, 6, 10, 14, 18, 22, 26, 30],
+        steps: [
+          { s: 0, n: 27 },
+          2,
+          { s: 5, n: 30 },
+          6,
+          { s: 8, n: 41 },
+          10,
+          { s: 11, n: 36 },
+          14,
+          { s: 15, n: 41 },
+          18,
+          22,
+          26,
+          { s: 28, n: 38 },
+          30,
+        ],
       },
     },
+    mods: [
+      { target: '4:hat:decay', source: 'lfo1' },
+      { target: '4:hat:tone', source: 'lfo1' },
+      { target: '4:perc:index', source: 'lfo1' },
+    ],
   },
   {
     name: 'Drum n Bass',
@@ -4713,106 +4735,150 @@ const GEN4_KIT_PRESETS = [
     },
   },
   {
+    // Captured from a live session — pattern, sounds, and mod routes together.
     name: 'Techno',
     bpm: 132,
     swing: 0,
     stepCount: 32,
     channels: {
       kick: {
-        params: { tune: 55, decay: 0.5, punch: 0.7, drive: 0.75, gain: 0.85 },
+        params: { tune: 82, decay: 0.69, punch: 0.57, drive: 0.01, gain: 1 },
         steps: [0, 4, 8, 12, 16, 20, 24, 28],
       },
       snare: {
-        params: { tune: 210, decay: 0.32, snap: 0.62, gain: 0.85 },
-        steps: [[30, 0.5]], // single pre-loop clap turnaround
+        params: { tune: 500, decay: 0.13, snap: 1, gain: 1 },
+        steps: [4, 12, 20, 28],
       },
       hat: {
-        params: { decay: 0.3, tone: 9800, gain: 0.5 },
+        // dark open offbeat — the pump
+        params: { decay: 0.265, tone: 5000, gain: 0.63 },
         steps: [2, 6, 10, 14, 18, 22, 26, 30],
       },
       perc: {
-        // metallic 16th ticks, accented at each bar's tail
-        params: { tune: 520, ratio: 6.2, index: 8.2, decay: 0.08, gain: 0.45 },
+        // metallic rim on a 3-against-4 cycle — the hypnotic layer
+        params: { tune: 605, ratio: 5.8, index: 6.5, decay: 0.07, gain: 0.29 },
         steps: [
-          [1, 0.3],
-          [3, 0.3],
-          [5, 0.3],
-          [7, 0.45],
-          [9, 0.3],
-          [11, 0.3],
-          [13, 0.3],
-          [15, 0.45],
-          [17, 0.3],
-          [19, 0.3],
-          [21, 0.3],
-          [23, 0.45],
-          [25, 0.3],
-          [27, 0.3],
-          [29, 0.3],
-          [31, 0.45],
+          [3, 0.5],
+          [6, 0.35],
+          [11, 0.5],
+          [14, 0.35],
+          [19, 0.5],
+          [22, 0.35],
+          [27, 0.5],
+          [30, 0.35],
         ],
       },
       fm: {
-        // sparse stab, second one less certain
-        params: { tune: 110, ratio: 5.25, index: 12, feedback: 0.55, attack: 0.001, decay: 0.22, modDecay: 0.06, tone: 14000, gain: 0.55 },
+        // rolling acid-style bassline around E1–A1
+        params: { tune: 62, ratio: 1.8, index: 5, feedback: 0.15, attack: 0.001, decay: 0.55, modDecay: 0.27, tone: 2800, gain: 0.5 },
         steps: [
-          { s: 14, v: 0.6 },
-          { s: 30, v: 0.6, p: 0.6 },
+          { s: 0, n: 28 },
+          { s: 1, n: 32 },
+          { s: 3, n: 33 },
+          { s: 4, n: 31 },
+          { s: 6, v: 0.55 },
+          { s: 7, n: 30 },
+          { s: 8, n: 33 },
+          { s: 10, n: 32 },
+          { s: 11, n: 31 },
+          { s: 12, n: 30 },
+          { s: 14, n: 32 },
+          { s: 15, n: 33 },
+          { s: 17, n: 32 },
+          { s: 19, n: 31 },
+          { s: 21, n: 33 },
+          { s: 22, v: 0.55 },
+          { s: 24, n: 33 },
+          { s: 25, n: 29 },
+          { s: 27, n: 32 },
+          { s: 28, n: 31 },
+          { s: 30, v: 0.5, p: 0.6 },
+          { s: 31, n: 33 },
         ],
       },
     },
+    mods: [
+      { target: '4:perc:tune', source: 'lfo2' },
+      { target: '4:perc:decay', source: 'lfo2' },
+      { target: '4:fm:ratio', source: 'lfo1' },
+      { target: '4:fm:decay', source: 'lfo2' },
+    ],
   },
   {
+    // Captured from a live session — pattern, sounds, and mod routes together.
     name: 'Glitch',
     bpm: 100,
     swing: 0,
     stepCount: 32,
     channels: {
       kick: {
-        params: { tune: 82, decay: 0.18, punch: 0.78, drive: 0.05, gain: 0.9 },
-        steps: [0, 3, 8, 11, 16, 19, 24, 26], // bar 2 stumbles differently
+        params: { tune: 50, decay: 0.18, punch: 0.43, drive: 0, gain: 0.9 },
+        steps: [0, { s: 3, n: 26 }, 8, { s: 11, n: 28 }, 16, 19, 24, 26],
       },
       snare: {
-        params: { tune: 210, decay: 0.32, snap: 0.62, gain: 0.92 },
-        steps: [4, { s: 12, st: 3 }, 20, { s: 23, v: 0.4, p: 0.6 }, { s: 28, st: 4 }],
+        params: { tune: 150, decay: 0.09, snap: 1, gain: 1 },
+        steps: [4, { s: 10, n: 47 }, 12, 20, { s: 23, v: 0.4, p: 0.6 }, 28],
       },
       hat: {
-        params: { decay: 0.06, tone: 11200, gain: 0.6 },
+        params: { decay: 0.04, tone: 10800, gain: 0.6 },
         steps: [
+          0,
+          1,
           { s: 2, p: 0.8 },
+          3,
           { s: 5, v: 0.6 },
           7,
+          8,
+          9,
           { s: 10, p: 0.7 },
           { s: 13, v: 0.5 },
           15,
           { s: 18, p: 0.8 },
-          { s: 21, v: 0.6 },
-          23,
+          { s: 21, v: 0.6, n: 115 },
+          { s: 23, n: 113 },
+          { s: 24, n: 112 },
           { s: 26, p: 0.7 },
           { s: 29, v: 0.5 },
-          { s: 30, v: 0.4, st: 2 },
-          31,
+          { s: 30, v: 0.4, p: 0.75, st: 2 },
+          { s: 31, p: 0.75 },
         ],
       },
       perc: {
-        params: { tune: 330, ratio: 3.5, index: 4.8, decay: 0.45, gain: 0.5 },
+        params: { tune: 800, ratio: 8, index: 1.7, decay: 0.04, gain: 0.23 },
         steps: [
+          2,
+          4,
+          5,
           { s: 6, v: 0.5 },
-          { s: 9, v: 0.4 },
-          { s: 22, v: 0.5 },
-          { s: 25, v: 0.4 },
+          10,
+          13,
+          15,
+          19,
+          { s: 22, v: 0.54, p: 0.25, st: 4 },
+          { s: 25, v: 0.4, n: 76 },
+          { s: 28, n: 79 },
+          { s: 29, p: 0.5, n: 79 },
+          30,
         ],
       },
       fm: {
-        params: { tune: 110, ratio: 5.25, index: 12, feedback: 0.55, attack: 0.001, decay: 0.22, modDecay: 0.06, tone: 14000, gain: 0.55 },
+        params: { tune: 1200, ratio: 5.25, index: 16.8, feedback: 0.1, attack: 0.001, decay: 0.11, modDecay: 0.01, tone: 9300, gain: 0.06 },
         steps: [
-          { s: 1, p: 0.5 },
-          { s: 14, p: 0.6 },
-          { s: 17, p: 0.5 },
+          5,
+          { s: 6, p: 0.25, n: 78 },
+          7,
+          { s: 14, p: 0.6, n: 75 },
+          { s: 17, p: 0.5, n: 80 },
           { s: 30, p: 0.7 },
         ],
       },
     },
+    mods: [
+      { target: '4:hat:decay', source: 'lfo1' },
+      { target: '4:hat:tone', source: 'lfo2' },
+      { target: '4:perc:index', source: 'lfo1' },
+      { target: '4:perc:decay', source: 'lfo2' },
+    ],
   },
 ];
 
@@ -4901,6 +4967,21 @@ function applyGen4KitPreset(presetIndex) {
     });
     refreshGen4PresetSelection(ci);
   });
+
+  // Modulation routes: the kit's drum-lane mappings replace any existing ones
+  // (clean slate, like the pattern). Non-drum routes are left alone.
+  [...lfoMappings.keys()].filter((k) => k.startsWith('4:')).forEach((k) => lfoMappings.delete(k));
+  const KIT_MOD_SOURCES = { lfo1: 0, lfo2: 1, seq: 2, kick: 3 };
+  (kit.mods || []).forEach(({ target, source }) => {
+    const sourceIdx = KIT_MOD_SOURCES[source];
+    const match = typeof target === 'string' && target.match(/^4:([a-z]+):(\w+)$/);
+    if (sourceIdx === undefined || !match) return;
+    const def = GEN4_DEFS.find((d) => d.id === match[1]);
+    if (!def?.paramDefs.some((p) => p.key === match[2])) return;
+    lfoMappings.set(target, { genIdx: 4, key: `${match[1]}:${match[2]}`, sourceIdx });
+  });
+  rebuildBackWireSVG();
+  refreshLFOMappingUI();
 
   gen4SetStepCount(kit.stepCount || 16, { duplicateOnExpand: false });
   refreshGen4SwingUI();
