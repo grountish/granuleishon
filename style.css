@@ -3459,6 +3459,19 @@ button:disabled {
 }
 
 /* Scale mode: out-of-scale keys recede, root keys get a tinted edge. */
+.piano-cell.black-key.in-scale {
+  background: linear-gradient(180deg, #314a4d 0 24%, #202b2b 24% 100%);
+  border-color: rgba(64, 184, 208, 0.62);
+  box-shadow:
+    inset 0 2px 0 rgba(93, 208, 228, 0.48),
+    inset 0 -3px 0 rgba(4, 11, 12, 0.52);
+}
+
+.piano-cell.black-key.in-scale:hover {
+  background: linear-gradient(180deg, #3b5c60 0 24%, #293737 24% 100%);
+  border-color: rgba(93, 208, 228, 0.85);
+}
+
 .piano-cell.out-scale {
   opacity: 0.35;
 }
@@ -3530,6 +3543,54 @@ button:disabled {
   background: #1a3028;
   border-color: #3a7050;
   color: #6ec8a0;
+}
+
+.osc-arp-btn.active {
+  background: #163039;
+  border-color: var(--gen-accent-dim);
+  color: var(--gen-accent);
+}
+
+.gen3-arp-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: #1a1d1d;
+  flex-shrink: 0;
+}
+
+.gen3-arp-bar[hidden] {
+  display: none;
+}
+
+.gen3-arp-control {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.gen3-arp-control select {
+  min-width: 58px;
+  height: 22px;
+  padding: 0 20px 0 7px;
+  border: 1px solid #3a4141;
+  border-radius: 2px;
+  background: #1e2222;
+  color: var(--text);
+  font: 700 9px var(--mono);
+}
+
+.gen3-arp-control:nth-child(2) select {
+  min-width: 88px;
 }
 
 /* ── Gen 4: Glitch Drums ─────────────────────────────────────── */

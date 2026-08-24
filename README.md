@@ -48,10 +48,15 @@ feedback. Make a sound and play with the controls.
 
 ## Loops & Song mode
 
-The instrument rack (generator, kit, FX, LFO settings and routings) is global
-and always live. What is _sequenced_ — the drum grid, the chord the OSC row
-fires, and the mod-sequencer pattern — lives in a **Loop**. Seq 1 can optionally
-share the currently edited sequence across every loop and Song mode.
+Granular 1/2 settings, the complete Gen 3 sound and chord, the drum grid, and
+the mod-sequencer pattern live in a **Loop**. Right-click an instrument knob to
+copy its value to the other loops. FX, LFO settings, and modulation routings
+remain global. Seq 1 can optionally share the currently edited sequence across
+every loop and Song mode.
+
+Gen 3 offers mutually exclusive **SUS** and **ARP** modes. ARP sequences the
+selected keys with per-loop rate, direction, octave range, and gate settings;
+right-click any ARP control to copy that value to the other loops.
 
 - The **Loops** bar (under the header) holds your loops: click to edit, `+` to
   add an empty one, `⧉` to duplicate the current one, double-click to rename.

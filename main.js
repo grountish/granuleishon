@@ -619,7 +619,14 @@ async function applyRestoredClip(genIdx, clip) {
 async function restoreAudioForScope(scope) {
   for (let genIdx = 0; genIdx < 2; genIdx++) {
     const clip = await audioClipGet(`${scope}:gen${genIdx}`);
-    if (clip) await applyRestoredClip(genIdx, clip);
+    if (clip) {
+      await applyRestoredClip(genIdx, clip);
+    } else {
+      // bindEditLoop may temporarily preserve a file position beyond the
+      // placeholder 10-second duration while waiting for its audio. If no
+      // clip exists, this is the point where that placeholder becomes final.
+      setSourceDurationSec(genIdx, getSourceState(genIdx).durationSec);
+    }
   }
   const masterClip = await audioClipGet(`${scope}:master`);
   if (masterClip?.left?.length && masterClip.right?.length) {
@@ -2020,12 +2027,22 @@ function setGranularRunning() {
   refreshBackPanelState();
 }
 
-function setGeneratorParam(genIdx, key, value, { send = true } = {}) {
+function setGeneratorParam(genIdx, key, value, { send = true, deferMaxClamp = false } = {}) {
   const param = getParamBounds(genIdx, key);
   if (!param) return;
-  const next = Math.max(param.min, Math.min(param.max, value));
+  const finiteValue = Number.isFinite(value) ? value : param.min;
+  const next = Math.max(
+    param.min,
+    deferMaxClamp && key === 'positionSec' ? finiteValue : Math.min(param.max, finiteValue),
+  );
   state[genIdx][key] = next;
-  genControlBindings[genIdx].get(key)?.setValue(next);
+  const control = genControlBindings[genIdx].get(key);
+  if (deferMaxClamp && key === 'positionSec') {
+    // Keep the restored value representable until applyRestoredClip supplies
+    // the WAV's real duration and performs the authoritative clamp.
+    control?.setConfig({ min: param.min, max: Math.max(param.max, next) });
+  }
+  control?.setValue(next);
   if (key === 'positionSec') {
     const posX = Math.max(
       0,
@@ -2079,13 +2096,31 @@ function getFxParamBounds(id, key) {
   return FX_LFO_PARAMS.find((param) => param.id === id && param.key === key) || null;
 }
 
-function getEffectiveGen3Params() {
+function getGen3SoundState() {
+  if (PLAY.mode === 'song' && GEN4.playing) {
+    const audibleEntry = SONG.entries[SONG.audibleEntryIdx];
+    const base =
+      getLoopById(audibleEntry?.loopId)?.gen3 ||
+      getSchedulerLoop()?.gen3 ||
+      getEditLoop()?.gen3 ||
+      GEN3;
+    // Mid-morph the synth blends toward the next block's gen3 sound, same
+    // ramp as the granular gens (numerics glide, type/sustainMode snap at
+    // the midpoint).
+    const morphTo = SONG_MORPH.t > 0 ? SONG_MORPH.loop?.gen3 : null;
+    if (morphTo && morphTo !== base) return lerpGens(base, morphTo, SONG_MORPH.t);
+    return base;
+  }
+  return GEN3;
+}
+
+function getEffectiveGen3Params(base = getGen3SoundState()) {
   const effective = {
-    gain: GEN3.gain,
-    pitch: GEN3.pitch,
-    detune: GEN3.detune,
-    decay: GEN3.decay,
-    sustain: GEN3.sustain,
+    gain: base.gain,
+    pitch: base.pitch,
+    detune: base.detune,
+    decay: base.decay,
+    sustain: base.sustain,
   };
   if (lfoMappings.size > 0) {
     lfoMappings.forEach(({ genIdx, key, sourceIdx }) => {
@@ -2216,15 +2251,39 @@ function applyMappedModulationTargets() {
   modVisualsActive = hasMappings;
 }
 
+// ── Song morph ── while an entry with `morph ×N` runs its final N cycles,
+// the worklet hears a blend between this block's gens and the next block's,
+// ramped by playback position. Numeric params interpolate; anything else
+// snaps at the midpoint; freeze stays engine state. updateSongMorph drives t
+// per display frame; the blend lives inside sendParams so a knob tweak
+// mid-morph re-sends blended values, never raw ones.
+const SONG_MORPH = { t: 0, gens: null, loop: null };
+
+function lerpGens(a, b, t) {
+  const out = { ...(t < 0.5 ? a : b) };
+  Object.keys(out).forEach((k) => {
+    if (typeof a[k] === 'number' && typeof b[k] === 'number') {
+      out[k] = a[k] + (b[k] - a[k]) * t;
+    }
+  });
+  if ('freeze' in a) out.freeze = a.freeze;
+  return out;
+}
+
 function sendParams(genIdx) {
   if (!node) return;
   // The worklet hears the audible loop's sound: in song mode with follow off,
   // the loop being edited (state) differs from the one sounding.
   const audibleGens = getAudibleLoop()?.gens?.[genIdx];
-  const base =
+  let base =
     audibleGens && audibleGens !== state[genIdx]
       ? { ...audibleGens, freeze: state[genIdx].freeze }
       : state[genIdx];
+  const morphTo =
+    SONG_MORPH.t > 0 && PLAY.mode === 'song' && GEN4.playing
+      ? SONG_MORPH.gens?.[genIdx]
+      : null;
+  if (morphTo && morphTo !== base) base = lerpGens(base, morphTo, SONG_MORPH.t);
   const effective = getEffectiveGeneratorParams(genIdx, base);
   node.port.postMessage({ type: 'params', gen: genIdx, value: effective });
 }
@@ -2294,7 +2353,7 @@ function refreshModulationVisuals() {
     });
   }
 
-  const gen3Effective = getEffectiveGen3Params();
+  const gen3Effective = getEffectiveGen3Params(GEN3);
   GEN3_LFO_PARAMS.forEach(({ key }) => {
     const control = gen3ControlBindings.get(key);
     const mapped = lfoMappings.has(`2:${key}`);
@@ -2444,7 +2503,7 @@ function setLFOLedState(led, sourceIdx) {
   led.title = `Map: LFO ${sourceIdx + 1}`;
 }
 
-function makeControlRow(p, initialValue, onInput, lfoTarget = null) {
+function makeControlRow(p, initialValue, onInput, lfoTarget = null, contextTarget = lfoTarget) {
   let spec = { ...p };
   let formatter = null;
   let currentValue = initialValue;
@@ -2465,12 +2524,12 @@ function makeControlRow(p, initialValue, onInput, lfoTarget = null) {
     renderValue(v);
     onInput(v);
   });
-  if (lfoTarget && lfoTarget.genIdx >= 0 && lfoTarget.genIdx < 2) {
+  if (contextTarget && contextTarget.genIdx >= 0 && contextTarget.genIdx <= 2) {
     knob.addEventListener('contextmenu', (event) => {
       event.preventDefault();
       event.stopPropagation();
       openKnobContextMenu(
-        { genIdx: lfoTarget.genIdx, key: lfoTarget.key, label: p.label },
+        { genIdx: contextTarget.genIdx, key: contextTarget.key, label: p.label },
         event.clientX,
         event.clientY,
       );
@@ -4216,6 +4275,25 @@ const GEN3_PARAM_DEFS = [
   { key: 'release', label: 'Release', min: 0, max: 10, step: 0.01, unit: 's' },
 ];
 
+const GEN3_OSC_TYPES = new Set(['sine', 'triangle', 'square', 'sawtooth', 'noise']);
+const GEN3_ARP_RATE_OPTIONS = [
+  { beats: 1, label: '1/4' },
+  { beats: 0.5, label: '1/8' },
+  { beats: 0.25, label: '1/16' },
+  { beats: 0.125, label: '1/32' },
+];
+const GEN3_ARP_DIRECTIONS = new Set(['up', 'down', 'updown', 'random']);
+const GEN3_LOOP_PARAM_KEYS = [
+  'type',
+  ...GEN3_PARAM_DEFS.map(({ key }) => key),
+  'sustainMode',
+  'arpEnabled',
+  'arpRateBeats',
+  'arpDirection',
+  'arpOctaves',
+  'arpGate',
+];
+
 const GEN3 = {
   type: 'sine',
   gain: 0.5,
@@ -4226,14 +4304,47 @@ const GEN3 = {
   sustain: 0.7,
   release: 0.5,
   sustainMode: true,
+  arpEnabled: false,
+  arpRateBeats: 0.25,
+  arpDirection: 'up',
+  arpOctaves: 1,
+  arpGate: 0.75,
   lockedMidis: new Set(),
   activeNotes: new Map(),
   releasingVoices: new Set(),
   nodes: null,
 };
+
+function captureGen3LoopParams(source = GEN3) {
+  return Object.fromEntries(GEN3_LOOP_PARAM_KEYS.map((key) => [key, source[key]]));
+}
+
+function writeGen3ParamToEditLoop(key, value) {
+  const loop = getEditLoop();
+  if (loop?.gen3 && GEN3_LOOP_PARAM_KEYS.includes(key)) loop.gen3[key] = value;
+}
+
+function applyGen3LoopParams(loop) {
+  if (!loop?.gen3) return false;
+  let changed = false;
+  GEN3_LOOP_PARAM_KEYS.forEach((key) => {
+    if (!(key in loop.gen3) || GEN3[key] === loop.gen3[key]) return;
+    GEN3[key] = loop.gen3[key];
+    changed = true;
+  });
+  refreshGen3UI();
+  applyGen3Modulation();
+  return changed;
+}
 let gen3ScopeFrame = null;
 let gen3ScopeBuf = null; // reused time-domain buffer for the gen3 scope
 const gen3NoteEls = new Map();
+let gen3ArpBtnEl = null;
+let gen3ArpBarEl = null;
+let gen3ArpRateSelect = null;
+let gen3ArpDirectionSelect = null;
+let gen3ArpOctaveSelect = null;
+let gen3ArpGateSelect = null;
 
 function setGen3NoteActive(midi, active) {
   const el = gen3NoteEls.get(midi);
@@ -4282,12 +4393,12 @@ function stopGen3Voice(voice) {
   }
 }
 
-function createGen3SourceNode(freq, ov = null) {
+function createGen3SourceNode(freq, ov = null, sound = getGen3SoundState()) {
   if (!GEN3.nodes) return null;
   const ac = audioCtx;
-  const effective = getEffectiveGen3Params();
+  const effective = getEffectiveGen3Params(sound);
   let src;
-  if (GEN3.type === 'noise') {
+  if (sound.type === 'noise') {
     const len = ac.sampleRate;
     const buf = ac.createBuffer(1, len, ac.sampleRate);
     const d = buf.getChannelData(0);
@@ -4297,7 +4408,7 @@ function createGen3SourceNode(freq, ov = null) {
     src.loop = true;
   } else {
     src = ac.createOscillator();
-    src.type = GEN3.type;
+    src.type = sound.type;
     src.frequency.setValueAtTime(
       freq * Math.pow(2, (ov?.pitch ?? effective.pitch) / 12),
       ac.currentTime,
@@ -4320,15 +4431,15 @@ function applyGen3VoicePitch(voice, effective = getEffectiveGen3Params()) {
   }
 }
 
-function applyGen3Envelope(envelope, ov = null) {
+function applyGen3Envelope(envelope, ov = null, sound = getGen3SoundState()) {
   const now = audioCtx.currentTime;
-  const effective = getEffectiveGen3Params();
-  const attack = ov?.attack ?? GEN3.attack;
+  const effective = getEffectiveGen3Params(sound);
+  const attack = ov?.attack ?? sound.attack;
   const decay = ov?.decay ?? effective.decay;
   const sustain = ov?.sustain ?? effective.sustain;
   // A locked gain is absolute: the voice is scaled so it lands on the locked
   // level after passing through the master gain node downstream.
-  const scale = ov?.gain != null ? (GEN3.gain > 0 ? ov.gain / GEN3.gain : 0) : 1;
+  const scale = ov?.gain != null ? (sound.gain > 0 ? ov.gain / sound.gain : 0) : 1;
   const attackEnd = now + attack;
   const decayEnd = attackEnd + decay;
 
@@ -4342,14 +4453,14 @@ function applyGen3Envelope(envelope, ov = null) {
   else envelope.gain.setValueAtTime(sustain * scale, attackEnd);
 }
 
-function createGen3Voice(freq, ov = null) {
+function createGen3Voice(freq, ov = null, sound = getGen3SoundState()) {
   if (!GEN3.nodes) return { source: null, envelope: null, releaseTimer: null };
-  const source = createGen3SourceNode(freq, ov);
+  const source = createGen3SourceNode(freq, ov, sound);
   const envelope = audioCtx.createGain();
   envelope.gain.setValueAtTime(0, audioCtx.currentTime);
   source.connect(envelope);
   envelope.connect(GEN3.nodes.gain);
-  applyGen3Envelope(envelope, ov);
+  applyGen3Envelope(envelope, ov, sound);
   source.start();
   return { source, envelope, releaseTimer: null };
 }
@@ -4361,7 +4472,7 @@ function releaseGen3Voice(voice) {
   }
 
   const now = audioCtx.currentTime;
-  const release = voice.ov?.release ?? GEN3.release;
+  const release = voice.ov?.release ?? voice.sound?.release ?? GEN3.release;
   const stopAfterMs = Math.max(0, release * 1000) + 60;
 
   clearGen3ReleaseTimer(voice);
@@ -4383,17 +4494,25 @@ function releaseGen3Voice(voice) {
   }, stopAfterMs);
 }
 
-function addGen3Note(midi, freq, ov = null) {
-  const entry = { freq, ov, autoReleaseTimer: null, ...createGen3Voice(freq, ov) };
+function addGen3Note(midi, freq, ov = null, soundOverride = null, autoReleaseMs = null) {
+  const sound = { ...(soundOverride || getGen3SoundState()) };
+  const entry = { freq, ov, sound, autoReleaseTimer: null, ...createGen3Voice(freq, ov, sound) };
   GEN3.activeNotes.set(midi, entry);
   setGen3NoteActive(midi, true);
-  if (!GEN3.sustainMode) {
-    const attack = ov?.attack ?? GEN3.attack;
-    const decay = ov?.decay ?? getEffectiveGen3Params().decay;
+  if (Number.isFinite(autoReleaseMs)) {
+    entry.autoReleaseTimer = setTimeout(() => {
+      if (GEN3.activeNotes.get(midi) === entry) removeGen3Note(midi);
+    }, Math.max(1, autoReleaseMs));
+  } else if (!sound.sustainMode) {
+    const attack = ov?.attack ?? sound.attack;
+    const decay = ov?.decay ?? getEffectiveGen3Params(sound).decay;
     const ms = Math.max(0, attack + decay) * 1000;
-    entry.autoReleaseTimer = setTimeout(() => removeGen3Note(midi), ms);
+    entry.autoReleaseTimer = setTimeout(() => {
+      if (GEN3.activeNotes.get(midi) === entry) removeGen3Note(midi);
+    }, ms);
   }
   refreshBackPanelState();
+  return entry;
 }
 
 function removeGen3Note(midi) {
@@ -4411,7 +4530,7 @@ function removeGen3Note(midi) {
 }
 
 function syncGen3SustainChord(targetMidis) {
-  if (!GEN3.sustainMode || !GEN3.nodes) return;
+  if (!getGen3SoundState().sustainMode || !GEN3.nodes) return;
   [...GEN3.activeNotes.keys()].forEach((midi) => {
     if (!targetMidis.has(midi)) removeGen3Note(midi);
   });
@@ -4426,7 +4545,6 @@ function startGen3SustainChord() {
 }
 
 function releaseGen3SustainChord() {
-  if (!GEN3.sustainMode) return;
   [...GEN3.activeNotes.keys()].forEach((midi) => removeGen3Note(midi));
 }
 
@@ -4447,11 +4565,95 @@ function restartAllGen3Notes() {
   if (!GEN3.nodes) return;
   GEN3.releasingVoices.forEach((voice) => stopGen3Voice(voice));
   GEN3.releasingVoices.clear();
+  const sound = { ...getGen3SoundState() };
   GEN3.activeNotes.forEach((entry, midi) => {
     stopGen3Voice(entry);
-    Object.assign(entry, createGen3Voice(entry.freq));
+    entry.sound = sound;
+    Object.assign(entry, createGen3Voice(entry.freq, entry.ov, sound));
   });
   refreshBackPanelState();
+}
+
+const GEN3_ARP_RUNTIME = {
+  identity: null,
+  stepCounter: 0,
+  noteIndex: 0,
+  session: 0,
+};
+
+function resetGen3ArpRuntime({ newSession = false } = {}) {
+  GEN3_ARP_RUNTIME.identity = null;
+  GEN3_ARP_RUNTIME.stepCounter = 0;
+  GEN3_ARP_RUNTIME.noteIndex = 0;
+  if (newSession) GEN3_ARP_RUNTIME.session += 1;
+}
+
+function getGen3ArpNotes(sound) {
+  const source = [...(sound?.lockedMidis || [])].sort((a, b) => a - b);
+  if (source.length === 0) return [];
+  const notes = new Set();
+  const octaves = clamp(Math.round(sound.arpOctaves || 1), 1, 3);
+  for (let octave = 0; octave < octaves; octave++) {
+    source.forEach((midi) => {
+      const shifted = midi + octave * 12;
+      if (shifted <= 127) notes.add(shifted);
+    });
+  }
+  const ascending = [...notes].sort((a, b) => a - b);
+  if (sound.arpDirection === 'down') return ascending.reverse();
+  if (sound.arpDirection === 'updown' && ascending.length > 1) {
+    return ascending.concat(ascending.slice(1, -1).reverse());
+  }
+  return ascending;
+}
+
+function scheduleGen3ArpNote(time, midi, sound, stepDuration) {
+  const session = GEN3_ARP_RUNTIME.session;
+  const delayMs = Math.max(0, time - audioCtx.currentTime) * 1000;
+  const gateMs = Math.max(8, stepDuration * clamp(sound.arpGate, 0.1, 1) * 1000);
+  setTimeout(() => {
+    if (!audioCtx || !GEN4.playing || session !== GEN3_ARP_RUNTIME.session) return;
+    if (GEN3.activeNotes.has(midi)) removeGen3Note(midi);
+    addGen3Note(midi, midiNoteToFrequency(midi), null, sound, gateMs);
+  }, delayMs);
+}
+
+function scheduleGen3ArpStep(loop, time) {
+  const sound = loop?.gen3;
+  if (!sound?.arpEnabled) return;
+  const entry = PLAY.mode === 'song' ? SONG.entries[SONG.cursor.entryIdx] : null;
+  const visit = entry ? songRuntime(entry.id).visits : 0;
+  const identity = entry ? `entry:${entry.id}:visit:${visit}` : `loop:${loop.id}`;
+  if (GEN3_ARP_RUNTIME.identity !== identity) {
+    GEN3_ARP_RUNTIME.identity = identity;
+    GEN3_ARP_RUNTIME.stepCounter = 0;
+    GEN3_ARP_RUNTIME.noteIndex = 0;
+  }
+
+  const rateBeats = GEN3_ARP_RATE_OPTIONS.some(
+    ({ beats }) => Math.abs(beats - sound.arpRateBeats) < 1e-6,
+  )
+    ? sound.arpRateBeats
+    : 0.25;
+  const rateDuration = beatsToSeconds(rateBeats);
+  const hitsPerStep = rateBeats < 0.25 ? Math.round(0.25 / rateBeats) : 1;
+  const stepInterval = rateBeats >= 0.25 ? Math.round(rateBeats / 0.25) : 1;
+  const shouldFire = GEN3_ARP_RUNTIME.stepCounter % stepInterval === 0;
+  const notes = shouldFire ? getGen3ArpNotes(sound) : [];
+
+  if (notes.length > 0) {
+    for (let hit = 0; hit < hitsPerStep; hit++) {
+      let midi;
+      if (sound.arpDirection === 'random') {
+        midi = notes[Math.floor(Math.random() * notes.length)];
+      } else {
+        midi = notes[GEN3_ARP_RUNTIME.noteIndex % notes.length];
+        GEN3_ARP_RUNTIME.noteIndex += 1;
+      }
+      scheduleGen3ArpNote(time + hit * rateDuration, midi, sound, rateDuration);
+    }
+  }
+  GEN3_ARP_RUNTIME.stepCounter += 1;
 }
 
 function drawGen3Scope() {
@@ -4535,7 +4737,7 @@ function buildPianoRoll() {
           }
           refreshGen3KeyStates();
         } else {
-          // Sequencer mode: toggle locked state only — sequencer drives playback
+          // Sequencer/arp mode: toggle the note pool; transport drives playback.
           if (GEN3.lockedMidis.has(midi)) {
             GEN3.lockedMidis.delete(midi);
             cell.classList.remove('locked');
@@ -4556,6 +4758,36 @@ function buildPianoRoll() {
   });
   refreshGen3ScaleHighlight();
   return wrap;
+}
+
+function bindGen3CopyContext(el, key, label) {
+  el.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openKnobContextMenu({ genIdx: 2, key, label }, event.clientX, event.clientY);
+  });
+}
+
+function buildGen3ArpSelect(label, key, options, parseValue = (value) => value) {
+  const control = document.createElement('label');
+  control.className = 'gen3-arp-control';
+  const caption = document.createElement('span');
+  caption.textContent = label;
+  const select = document.createElement('select');
+  options.forEach(({ value, text }) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = text;
+    select.appendChild(option);
+  });
+  select.addEventListener('change', () => {
+    GEN3[key] = parseValue(select.value);
+    writeGen3ParamToEditLoop(key, GEN3[key]);
+    resetGen3ArpRuntime({ newSession: true });
+  });
+  bindGen3CopyContext(control, key, `Arp ${label.toLowerCase()}`);
+  control.append(caption, select);
+  return { control, select };
 }
 
 function buildOscPanel() {
@@ -4583,9 +4815,21 @@ function buildOscPanel() {
     btn.textContent = lbl;
     btn.addEventListener('click', () => {
       GEN3.type = type;
+      writeGen3ParamToEditLoop('type', type);
       shapes.querySelectorAll('.osc-shape').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
-      restartAllGen3Notes();
+      if (!(PLAY.mode === 'song' && GEN4.playing && getAudibleLoop() !== getEditLoop())) {
+        restartAllGen3Notes();
+      }
+    });
+    btn.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openKnobContextMenu(
+        { genIdx: 2, key: 'type', label: 'Oscillator shape' },
+        event.clientX,
+        event.clientY,
+      );
     });
     gen3ShapeButtons.set(type, btn);
     shapes.appendChild(btn);
@@ -4597,7 +4841,14 @@ function buildOscPanel() {
   gen3SusBtnEl = susBtn;
   susBtn.addEventListener('click', async () => {
     GEN3.sustainMode = !GEN3.sustainMode;
-    susBtn.classList.toggle('active', GEN3.sustainMode);
+    if (GEN3.sustainMode) GEN3.arpEnabled = false;
+    writeGen3ParamToEditLoop('sustainMode', GEN3.sustainMode);
+    writeGen3ParamToEditLoop('arpEnabled', GEN3.arpEnabled);
+    resetGen3ArpRuntime({ newSession: true });
+    refreshGen3UI();
+    const editingAudibleLoop =
+      !(PLAY.mode === 'song' && GEN4.playing) || getAudibleLoop() === getEditLoop();
+    if (!editingAudibleLoop) return;
     if (GEN3.sustainMode) {
       await ensureAudioEngine();
       const targetLoop = PLAY.mode === 'song' && GEN4.playing ? getAudibleLoop() : getEditLoop();
@@ -4608,6 +4859,26 @@ function buildOscPanel() {
       refreshGen3KeyStates();
     }
   });
+  bindGen3CopyContext(susBtn, 'sustainMode', 'Sustain mode');
+
+  const arpBtn = document.createElement('button');
+  arpBtn.className = 'osc-sus-btn osc-arp-btn' + (GEN3.arpEnabled ? ' active' : '');
+  arpBtn.textContent = 'ARP';
+  arpBtn.title = 'Arpeggiator — plays the selected keys in sequence';
+  gen3ArpBtnEl = arpBtn;
+  arpBtn.addEventListener('click', () => {
+    GEN3.arpEnabled = !GEN3.arpEnabled;
+    if (GEN3.arpEnabled) GEN3.sustainMode = false;
+    writeGen3ParamToEditLoop('arpEnabled', GEN3.arpEnabled);
+    writeGen3ParamToEditLoop('sustainMode', GEN3.sustainMode);
+    resetGen3ArpRuntime({ newSession: true });
+    const editingAudibleLoop =
+      !(PLAY.mode === 'song' && GEN4.playing) || getAudibleLoop() === getEditLoop();
+    if (editingAudibleLoop && GEN3.activeNotes.size > 0) stopAllGen3Notes();
+    refreshGen3UI();
+    refreshGen3KeyStates();
+  });
+  bindGen3CopyContext(arpBtn, 'arpEnabled', 'Arpeggiator mode');
 
   const actions = document.createElement('div');
   actions.className = 'gen-header-actions';
@@ -4615,9 +4886,48 @@ function buildOscPanel() {
     buildScaleGroup('Snap the locked keys to the nearest scale note', fitGen3ChordToScale),
   );
   actions.appendChild(susBtn);
+  actions.appendChild(arpBtn);
 
   header.append(title, shapes, actions);
   panel.appendChild(header);
+
+  const arpBar = document.createElement('div');
+  arpBar.className = 'gen3-arp-bar';
+  gen3ArpBarEl = arpBar;
+  const rate = buildGen3ArpSelect(
+    'Rate',
+    'arpRateBeats',
+    GEN3_ARP_RATE_OPTIONS.map(({ beats, label }) => ({ value: String(beats), text: label })),
+    Number,
+  );
+  gen3ArpRateSelect = rate.select;
+  const direction = buildGen3ArpSelect('Direction', 'arpDirection', [
+    { value: 'up', text: 'Up' },
+    { value: 'down', text: 'Down' },
+    { value: 'updown', text: 'Up / Down' },
+    { value: 'random', text: 'Random' },
+  ]);
+  gen3ArpDirectionSelect = direction.select;
+  const octaves = buildGen3ArpSelect(
+    'Octaves',
+    'arpOctaves',
+    [1, 2, 3].map((value) => ({ value: String(value), text: String(value) })),
+    Number,
+  );
+  gen3ArpOctaveSelect = octaves.select;
+  const gate = buildGen3ArpSelect(
+    'Gate',
+    'arpGate',
+    [0.25, 0.5, 0.75, 1].map((value) => ({
+      value: String(value),
+      text: `${Math.round(value * 100)}%`,
+    })),
+    Number,
+  );
+  gen3ArpGateSelect = gate.select;
+  arpBar.append(rate.control, direction.control, octaves.control, gate.control);
+  panel.appendChild(arpBar);
+  arpBar.hidden = !GEN3.arpEnabled;
 
   // Body: scope (4/5) + piano roll (1/5)
   const body = document.createElement('div');
@@ -4661,6 +4971,7 @@ function buildOscPanel() {
           return;
         }
         GEN3[p.key] = v;
+        writeGen3ParamToEditLoop(p.key, v);
         if (GEN3.nodes && (p.key === 'gain' || p.key === 'pitch' || p.key === 'detune')) {
           applyGen3Modulation();
         }
@@ -4668,6 +4979,7 @@ function buildOscPanel() {
         refreshBackPanelState();
       },
       isMappable ? { genIdx: 2, key: p.key } : null,
+      { genIdx: 2, key: p.key },
     );
     gen3ControlBindings.set(p.key, control);
     if (isMappable) gen3MapBindings.set(p.key, control);
@@ -5586,8 +5898,13 @@ function gen4TriggerPerc(time, velocity, p, dest) {
   car.stop(time + p.decay + 0.05);
 }
 
-function gen4TriggerOsc(time, midis = GEN3.lockedMidis, locks = null) {
-  if (!audioCtx || GEN3.sustainMode || midis.size === 0) return;
+function gen4TriggerOsc(
+  time,
+  midis = GEN3.lockedMidis,
+  locks = null,
+  sound = getGen3SoundState(),
+) {
+  if (!audioCtx || sound.sustainMode || sound.arpEnabled || midis.size === 0) return;
   // Per-step gen3 param locks — only known synth keys ride along as voice
   // overrides (locks can also carry _fxSend and the like).
   let ov = null;
@@ -5605,7 +5922,7 @@ function gen4TriggerOsc(time, midis = GEN3.lockedMidis, locks = null) {
     if (!audioCtx || oscChannel?.muted) return;
     notes.forEach((midi) => {
       if (GEN3.activeNotes.has(midi)) removeGen3Note(midi);
-      addGen3Note(midi, midiNoteToFrequency(midi), ov);
+      addGen3Note(midi, midiNoteToFrequency(midi), ov, sound);
     });
   }, delayMs);
 }
@@ -5796,7 +6113,12 @@ function gen4FireChannel(ci, time, velocity, midi = null, loop = null, locks = n
       gen4TriggerPerc(time, velocity, p, dest);
       break;
     case 'osc':
-      gen4TriggerOsc(time, loop ? loop.gen3.lockedMidis : GEN3.lockedMidis, locks);
+      gen4TriggerOsc(
+        time,
+        loop ? loop.gen3.lockedMidis : GEN3.lockedMidis,
+        locks,
+        loop?.gen3 || GEN3,
+      );
       break;
     case 'fm':
       gen4TriggerFmSynth(time, velocity, p, dest);
@@ -5855,6 +6177,7 @@ function gen4ScheduleTick() {
       repeat: PLAY.mode === 'song' ? SONG.cursor.repeat : 0,
     });
     if (gen4Schedule.length > 48) gen4Schedule.shift();
+    scheduleGen3ArpStep(loop, GEN4.nextStepTime + swingOffset);
     pattern.channels.forEach((pat, ci) => {
       if (!pat.steps[step]) return;
       const fired = gen4StepConditionMet(pat, ci, step) && Math.random() <= pat.probability[step];
@@ -6012,6 +6335,7 @@ function startGen4Sequencer() {
   GEN4.cycleCount = 0;
   GEN4.condFired.fill(false);
   gen4Schedule.length = 0;
+  resetGen3ArpRuntime({ newSession: true });
   if (PLAY.mode === 'song') resetSongPlayback();
   else {
     STEP_SEQ.currentStep = 0;
@@ -6020,6 +6344,7 @@ function startGen4Sequencer() {
     STEP_SEQ.currentValue = seq ? seq.steps[0] || 0 : 0;
     refreshSequencerUI();
   }
+  applyGen3Modulation();
   startGen3SustainChord();
   // Phase-lock modulation to the transport: LFOs restart at phase 0 and the
   // beat-repeat interval clocks realign, so play always begins on the bar
@@ -6049,7 +6374,9 @@ function startGen4Sequencer() {
 
 function stopGen4Sequencer() {
   GEN4.playing = false;
+  resetGen3ArpRuntime({ newSession: true });
   releaseGen3SustainChord();
+  applyGen3Modulation();
   clearInterval(GEN4.schedulerTimer);
   GEN4.schedulerTimer = null;
   if (gen4DisplayFrame) {
@@ -6510,7 +6837,9 @@ function buildScaleGroup(fitTitle, onFit) {
 function refreshGen3ScaleHighlight() {
   const scaleActive = !!getGen4ScaleIntervals();
   gen3NoteEls.forEach((el, midi) => {
-    el.classList.toggle('out-scale', scaleActive && !isMidiInGen4Scale(midi));
+    const inScale = scaleActive && isMidiInGen4Scale(midi);
+    el.classList.toggle('in-scale', inScale);
+    el.classList.toggle('out-scale', scaleActive && !inScale);
     el.classList.toggle('scale-root', scaleActive && midi % 12 === GEN4_SCALE.root);
   });
 }
@@ -9989,7 +10318,7 @@ function createLoopData(name) {
       swing: 0,
       channels: pattern.channels,
     },
-    gen3: { lockedMidis: new Set() },
+    gen3: { ...captureGen3LoopParams(), lockedMidis: new Set() },
     seq: {
       steps: Array.from({ length: 16 }, () => 0),
       subdivision: 16,
@@ -10031,7 +10360,7 @@ function adoptInitialLoop() {
           condition: ch.condition,
         })),
       },
-      gen3: { lockedMidis: GEN3.lockedMidis },
+      gen3: { ...captureGen3LoopParams(), lockedMidis: GEN3.lockedMidis },
       seq: {
         steps: STEP_SEQ.steps,
         subdivision: STEP_SEQ.subdivision,
@@ -10041,6 +10370,10 @@ function adoptInitialLoop() {
   ];
   ensureGen4Variations(LOOPS.list[0]);
   LOOPS.editIndex = 0;
+  // A blank project is immediately playable in Song mode: the initial loop
+  // already occupies the first timeline slot. Restored projects replace this
+  // seed with their saved arrangement, including an intentionally empty one.
+  SONG.entries = [createSongEntryData(LOOPS.list[0].id)];
 }
 
 function getEditLoop() {
@@ -10235,7 +10568,10 @@ function serializeLoop(loop) {
       activeVariation: loop.gen4.activeVariation,
       variations: loop.gen4.variations.map(serializeGen4Pattern),
     },
-    gen3: { lockedMidis: [...loop.gen3.lockedMidis] },
+    gen3: {
+      ...Object.fromEntries(GEN3_LOOP_PARAM_KEYS.map((key) => [key, loop.gen3[key]])),
+      lockedMidis: [...loop.gen3.lockedMidis],
+    },
     seq: {
       steps: [...loop.seq.steps],
       subdivision: loop.seq.subdivision,
@@ -10283,6 +10619,34 @@ function deserializeLoop(data) {
   if (Array.isArray(data?.gen3?.lockedMidis)) {
     loop.gen3.lockedMidis = new Set(data.gen3.lockedMidis.filter((m) => Number.isFinite(m)));
   }
+  if (GEN3_OSC_TYPES.has(data?.gen3?.type)) loop.gen3.type = data.gen3.type;
+  GEN3_PARAM_DEFS.forEach(({ key, min, max }) => {
+    if (typeof data?.gen3?.[key] === 'number') {
+      loop.gen3[key] = clamp(data.gen3[key], min, max);
+    }
+  });
+  if (typeof data?.gen3?.sustainMode === 'boolean') {
+    loop.gen3.sustainMode = data.gen3.sustainMode;
+  }
+  if (typeof data?.gen3?.arpEnabled === 'boolean') {
+    loop.gen3.arpEnabled = data.gen3.arpEnabled;
+  }
+  if (
+    typeof data?.gen3?.arpRateBeats === 'number' &&
+    GEN3_ARP_RATE_OPTIONS.some(({ beats }) => Math.abs(beats - data.gen3.arpRateBeats) < 1e-6)
+  ) {
+    loop.gen3.arpRateBeats = data.gen3.arpRateBeats;
+  }
+  if (GEN3_ARP_DIRECTIONS.has(data?.gen3?.arpDirection)) {
+    loop.gen3.arpDirection = data.gen3.arpDirection;
+  }
+  if (typeof data?.gen3?.arpOctaves === 'number') {
+    loop.gen3.arpOctaves = clamp(Math.round(data.gen3.arpOctaves), 1, 3);
+  }
+  if (typeof data?.gen3?.arpGate === 'number') {
+    loop.gen3.arpGate = clamp(data.gen3.arpGate, 0.1, 1);
+  }
+  if (loop.gen3.arpEnabled) loop.gen3.sustainMode = false;
   const seq = data?.seq;
   if (Array.isArray(seq?.steps)) {
     seq.steps.slice(0, loop.seq.steps.length).forEach((v, i) => {
@@ -10317,7 +10681,10 @@ function legacyLoopData(preset) {
         probability: ch?.probability,
       })),
     },
-    gen3: { lockedMidis: preset?.gen3?.lockedMidis || [] },
+    gen3: {
+      ...captureGen3LoopParams(preset?.gen3 || GEN3),
+      lockedMidis: preset?.gen3?.lockedMidis || [],
+    },
     seq: preset?.seq,
   };
 }
@@ -10331,7 +10698,12 @@ function bindEditLoop() {
     state[gi] = gens;
     refreshGeneratorUI(gi);
     // Re-run the position setter so the waveform playhead tracks the bound value.
-    setGeneratorParam(gi, 'positionSec', gens.positionSec, { send: false });
+    const source = getSourceState(gi);
+    const waitingForFileAudio = source.mode === 'file' && !source.bufferData;
+    setGeneratorParam(gi, 'positionSec', gens.positionSec, {
+      send: false,
+      deferMaxClamp: waitingForFileAudio,
+    });
     sendParams(gi);
   }
   GEN4.channels.forEach((ch, ci) => {
@@ -10347,11 +10719,11 @@ function bindEditLoop() {
     if (!Array.isArray(pat.condition)) pat.condition = new Array(32).fill(0);
     ch.condition = pat.condition;
   });
-  const sustainChordShouldFollowEditLoop =
-    GEN3.sustainMode &&
+  const gen3SoundShouldFollowEditLoop =
     !!GEN3.nodes &&
     (GEN4.playing || GEN3.activeNotes.size > 0) &&
     !(PLAY.mode === 'song' && GEN4.playing);
+  const gen3ParamsChanged = applyGen3LoopParams(loop);
   GEN3.lockedMidis = loop.gen3.lockedMidis;
   STEP_SEQ.steps = loop.seq.steps;
   STEP_SEQ.subdivision = loop.seq.subdivision;
@@ -10369,7 +10741,14 @@ function bindEditLoop() {
   if (gen4EditorMode === 'notes') refreshGen4NoteEditor();
   refreshGen4LockEditor();
 
-  if (sustainChordShouldFollowEditLoop) syncGen3SustainChord(GEN3.lockedMidis);
+  if (gen3SoundShouldFollowEditLoop) {
+    if (GEN3.sustainMode) {
+      syncGen3SustainChord(GEN3.lockedMidis);
+      if (gen3ParamsChanged && GEN3.activeNotes.size > 0) restartAllGen3Notes();
+    } else if (GEN3.activeNotes.size > 0) {
+      stopAllGen3Notes();
+    }
+  }
   refreshGen3KeyStates();
   refreshSequencerUI();
   refreshBackPanelState();
@@ -10547,6 +10926,9 @@ function advanceSongCursor() {
 }
 
 function resetSongPlayback() {
+  SONG_MORPH.t = 0;
+  SONG_MORPH.gens = null;
+  SONG_MORPH.loop = null;
   SONG.runtime.clear();
   SONG.lastJump = null;
   SONG.cursor.entryIdx = 0;
@@ -10564,9 +10946,56 @@ function resetSongPlayback() {
   renderSongPlayhead();
 }
 
+// Ramp SONG_MORPH 0→1 across the final `entry.morph` cycles of the audible
+// block, aimed at the loop the song lands on next. The scheduler cursor runs
+// ahead of the audio: once it has already advanced, its entry IS the
+// destination, so the target can't flip during the ramp's last moments.
+function updateSongMorph(audible) {
+  const prev = SONG_MORPH.t;
+  SONG_MORPH.t = 0;
+  SONG_MORPH.gens = null;
+  SONG_MORPH.loop = null;
+  const entry = SONG.entries[audible.entryIdx];
+  const span = Math.max(0, Math.round(entry?.morph || 0));
+  if (entry && span > 0 && GEN4.playing && PLAY.mode === 'song') {
+    const nextIdx =
+      SONG.cursor.entryIdx === audible.entryIdx
+        ? songExpectedNextIdx()
+        : SONG.cursor.entryIdx;
+    const nextLoop = getLoopById(SONG.entries[nextIdx]?.loopId);
+    const loop = getLoopById(entry.loopId);
+    if (loop && nextLoop && nextLoop !== loop) {
+      const stepCount = Math.max(1, loop.gen4?.stepCount || 16);
+      const secPerStep = 60 / TRANSPORT.bpm / 4;
+      const stepFrac = audioCtx
+        ? clamp((audioCtx.currentTime - audible.time) / secPerStep, 0, 1)
+        : 0;
+      const totalCycles = Math.max(1, entry.repeats);
+      const cycles = Math.min(span, totalCycles);
+      const pos =
+        Math.max(0, audible.repeat) + clamp((audible.step + stepFrac) / stepCount, 0, 1);
+      const t = (pos - (totalCycles - cycles)) / cycles;
+      if (t > 0) {
+        SONG_MORPH.t = clamp(t, 0, 1);
+        SONG_MORPH.gens = nextLoop.gens;
+        SONG_MORPH.loop = nextLoop;
+      }
+    }
+  }
+  if (SONG_MORPH.t !== prev) {
+    sendParams(0);
+    sendParams(1);
+    // Gen3 rides the same ramp: the effective params resolve through
+    // getGen3SoundState, so this pushes the blended gain/pitch to the synth
+    // nodes and any sustained voices.
+    applyGen3Modulation();
+  }
+}
+
 // Called every display frame during song playback with the schedule entry
 // that is currently audible.
 function updateSongPlayhead(audible) {
+  updateSongMorph(audible);
   const changed = audible.entryIdx !== SONG.audibleEntryIdx;
   SONG.audibleEntryIdx = audible.entryIdx;
   if (changed) {
@@ -10588,7 +11017,15 @@ function updateSongPlayhead(audible) {
       sendParams(1);
     }
     const audibleLoop = getAudibleLoop();
-    if (audibleLoop) syncGen3SustainChord(audibleLoop.gen3.lockedMidis);
+    if (audibleLoop) {
+      applyGen3Modulation();
+      if (audibleLoop.gen3.sustainMode) {
+        syncGen3SustainChord(audibleLoop.gen3.lockedMidis);
+        if (GEN3.activeNotes.size > 0) restartAllGen3Notes();
+      } else if (GEN3.activeNotes.size > 0) {
+        stopAllGen3Notes();
+      }
+    }
   }
   updateSongOrbitProgress(audible);
   renderSongPlayhead(audible.repeat);
@@ -11150,6 +11587,23 @@ function initConfirmDialog() {
 
 // ── Song entry ops ──
 
+function createSongEntryData(loopId) {
+  do {
+    SONG.entryCounter += 1;
+  } while (SONG.entries.some((entry) => entry.id === `entry-${SONG.entryCounter}`));
+  return {
+    id: `entry-${SONG.entryCounter}`,
+    loopId,
+    repeats: 1,
+    prob: 1,
+    cond: 0,
+    variation: -1,
+    fill: false,
+    morph: 0, // cycles at the block's end spent morphing gens into the next block
+    jump: null,
+  };
+}
+
 function addSongEntry(loopId = getEditLoop()?.id) {
   insertSongEntry(loopId, null);
 }
@@ -11159,19 +11613,7 @@ function addSongEntry(loopId = getEditLoop()?.id) {
 function insertSongEntry(loopId, beforeEntryId = null) {
   const loop = getLoopById(loopId);
   if (!loop) return;
-  do {
-    SONG.entryCounter += 1;
-  } while (SONG.entries.some((e) => e.id === `entry-${SONG.entryCounter}`));
-  const entry = {
-    id: `entry-${SONG.entryCounter}`,
-    loopId,
-    repeats: 1,
-    prob: 1, // chance this entry plays on a given pass (else skipped)
-    cond: 0, // index into SONG_CONDITIONS, counted per visit
-    variation: -1, // -1 inherit · 0/1/2 A/B/C · 'rnd' · 'cycle'
-    fill: false, // auto-fill the entry's final cycle
-    jump: null, // { targetId, chance, count } — taken after the entry ends
-  };
+  const entry = createSongEntryData(loopId);
   const idx = beforeEntryId ? SONG.entries.findIndex((e) => e.id === beforeEntryId) : -1;
   if (idx >= 0) {
     SONG.entries.splice(idx, 0, entry);
@@ -11319,6 +11761,31 @@ function appendSongEntryControls(container, entry, refresh) {
     refresh(true);
   });
   container.appendChild(fillBtn);
+
+  // Morph: spend the block's last N cycles blending gen 1/2 sound into the
+  // next block's. Patterns and the chord still switch at the boundary.
+  container.appendChild(sect('morph into next'));
+  const morphRow = document.createElement('div');
+  morphRow.className = 'song-block-menu-presets';
+  const morphDefs = [0, 1, 2, 4, 8];
+  const morphBtns = morphDefs.map((n) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'song-block-menu-preset' + ((entry.morph || 0) === n ? ' active' : '');
+    b.textContent = n === 0 ? 'off' : `×${n}`;
+    b.title =
+      n === 0
+        ? 'Switch sound at the block boundary (no morph)'
+        : `Blend the granular sound into the next block across this block's last ${n} cycle${n > 1 ? 's' : ''}`;
+    b.addEventListener('click', () => {
+      entry.morph = n;
+      morphBtns.forEach((x, i) => x.classList.toggle('active', morphDefs[i] === n));
+      refresh(true);
+    });
+    morphRow.appendChild(b);
+    return b;
+  });
+  container.appendChild(morphRow);
 
   // Jump: after this entry ends, go to another block (with odds and a cap)
   // instead of the next one.
@@ -11988,6 +12455,7 @@ function renderSongOrbit(container) {
     else if (Number.isInteger(entry.variation) && entry.variation >= 0)
       opts.push(`var ${'ABC'[entry.variation]}`);
     if (entry.fill) opts.push('fill on change');
+    if (entry.morph > 0) opts.push(`morph ×${entry.morph}`);
     opts.forEach((line, li) => {
       const t = document.createElementNS(ns, 'text');
       t.setAttribute('class', 'song-orbit-opt');
@@ -12637,6 +13105,24 @@ function closeKnobContextMenu() {
 }
 
 function copyGeneratorParamToOtherLoops(genIdx, key) {
+  if (genIdx === 2) {
+    const editLoop = getEditLoop();
+    let copied = 0;
+    LOOPS.list.forEach((loop) => {
+      if (loop === editLoop || !loop.gen3 || !GEN3_LOOP_PARAM_KEYS.includes(key)) return;
+      loop.gen3[key] = GEN3[key];
+      if (key === 'arpEnabled' && GEN3.arpEnabled) loop.gen3.sustainMode = false;
+      if (key === 'sustainMode' && GEN3.sustainMode) loop.gen3.arpEnabled = false;
+      copied += 1;
+    });
+    setStatus(
+      copied > 0
+        ? `copied to ${copied} other loop${copied === 1 ? '' : 's'}`
+        : 'no other loops',
+    );
+    return;
+  }
+
   const source = state[genIdx];
   const editLoop = getEditLoop();
   const keys =
@@ -17613,6 +18099,12 @@ function refreshGen3UI() {
   });
   gen3ShapeButtons.forEach((btn, type) => btn.classList.toggle('active', GEN3.type === type));
   if (gen3SusBtnEl) gen3SusBtnEl.classList.toggle('active', GEN3.sustainMode);
+  if (gen3ArpBtnEl) gen3ArpBtnEl.classList.toggle('active', GEN3.arpEnabled);
+  if (gen3ArpBarEl) gen3ArpBarEl.hidden = !GEN3.arpEnabled;
+  if (gen3ArpRateSelect) gen3ArpRateSelect.value = String(GEN3.arpRateBeats);
+  if (gen3ArpDirectionSelect) gen3ArpDirectionSelect.value = GEN3.arpDirection;
+  if (gen3ArpOctaveSelect) gen3ArpOctaveSelect.value = String(GEN3.arpOctaves);
+  if (gen3ArpGateSelect) gen3ArpGateSelect.value = String(GEN3.arpGate);
 }
 
 function refreshLFOUI() {
@@ -17649,19 +18141,25 @@ function capturePreset() {
       sustain: GEN3.sustain,
       release: GEN3.release,
       sustainMode: GEN3.sustainMode,
+      arpEnabled: GEN3.arpEnabled,
+      arpRateBeats: GEN3.arpRateBeats,
+      arpDirection: GEN3.arpDirection,
+      arpOctaves: GEN3.arpOctaves,
+      arpGate: GEN3.arpGate,
     },
     loops: LOOPS.list.map(serializeLoop),
     activeLoopIndex: LOOPS.editIndex,
     sequencer: { sharedAcrossLoops: STEP_SEQ.sharedAcrossLoops },
     song: {
       // Jump targets are stored by entry index — ids regenerate on load.
-      entries: SONG.entries.map(({ loopId, repeats, prob, cond, variation, fill, jump }) => ({
+      entries: SONG.entries.map(({ loopId, repeats, prob, cond, variation, fill, morph, jump }) => ({
         loopId,
         repeats,
         prob: prob ?? 1,
         cond: cond || 0,
         variation: variation ?? -1,
         fill: !!fill,
+        morph: morph || 0,
         jump: jump?.targetId
           ? {
               target: SONG.entries.findIndex((e) => e.id === jump.targetId),
@@ -17753,7 +18251,18 @@ function applyPreset(preset, { resetSources = true } = {}) {
     // The chord (lockedMidis) is loop data now — legacy presets carry it here
     // and legacyLoopData() migrates it; bindEditLoop() below restores the Set.
     const { lockedMidis: _legacyChord, ...gen3Params } = preset.gen3;
-    Object.assign(GEN3, gen3Params);
+    Object.assign(
+      GEN3,
+      {
+        arpEnabled: false,
+        arpRateBeats: 0.25,
+        arpDirection: 'up',
+        arpOctaves: 1,
+        arpGate: 0.75,
+      },
+      gen3Params,
+    );
+    if (GEN3.arpEnabled) GEN3.sustainMode = false;
     refreshGen3UI();
     if (GEN3.nodes) {
       restartAllGen3Notes();
@@ -17866,6 +18375,7 @@ function applyPreset(preset, { resetSources = true } = {}) {
       cond: clamp(Math.round(e.cond) || 0, 0, SONG_CONDITIONS.length - 1),
       variation,
       fill: !!e.fill,
+      morph: clamp(Math.round(e.morph) || 0, 0, 16),
       jump: null,
     };
     SONG.entries.push(entry);
@@ -17881,6 +18391,12 @@ function applyPreset(preset, { resetSources = true } = {}) {
       count: clamp(Math.round(e.jump.count) || 0, 0, 64),
     };
   });
+  // Empty arrangements from older saves predate the default Loop A song
+  // block. Seed them on restore too, so Song Play has something to launch
+  // and persisted Gen 3 sustain chords retrigger without another edit.
+  if (SONG.entries.length === 0 && LOOPS.list[0]) {
+    SONG.entries.push(createSongEntryData(LOOPS.list[0].id));
+  }
   SONG.loop = preset.song?.loop !== false;
   SONG.follow = preset.song?.follow !== false;
   SONG.runtime.clear();
