@@ -124,15 +124,15 @@
               </select>
             </label>
             <label class="input-box" for="bounceCapSelect"
-              title="Longest a song bounce may run before it stops and saves — protects against endless jump cycles">
-              <span class="input-label">Bounce cap</span>
+              title="Maximum bounce duration. With Song Loop on, the arrangement repeats until this limit; otherwise it ends after one pass">
+              <span class="input-label">Bounce limit</span>
               <select id="bounceCapSelect" class="input-select">
-                <option value="auto">Auto (4&#215; song)</option>
-                <option value="60">1 min</option>
-                <option value="120">2 min</option>
-                <option value="300">5 min</option>
-                <option value="600">10 min</option>
-                <option value="1200">20 min</option>
+                <option value="auto">Auto (4&#215; song max)</option>
+                <option value="60">Max 1 min</option>
+                <option value="120">Max 2 min</option>
+                <option value="300">Max 5 min</option>
+                <option value="600">Max 10 min</option>
+                <option value="1200">Max 20 min</option>
               </select>
             </label>
             <label class="gate-box" for="tooltipsEnable">

@@ -175,7 +175,10 @@ function getBpmInput() {
 
 function setStatus(text) {
   const status = getStatusEl();
-  if (status) status.textContent = text;
+  if (status) {
+    status.textContent = text;
+    status.title = text;
+  }
 }
 
 function clamp(value, min, max) {
@@ -842,7 +845,7 @@ async function ensureGranularModule() {
   await granularModulePromise;
 }
 
-async function startRecording() {
+async function startRecording({ bufferSize = 4096 } = {}) {
   if (REC.isRecording) return;
   await ensureAudioEngine();
   if (!master?.output || !audioCtx) return;
@@ -851,7 +854,7 @@ async function startRecording() {
   REC.right = [];
   REC.sampleCount = 0;
 
-  const processor = audioCtx.createScriptProcessor(4096, 2, 2);
+  const processor = audioCtx.createScriptProcessor(bufferSize, 2, 2);
   const sink = audioCtx.createGain();
   sink.gain.value = 0;
 
@@ -922,12 +925,12 @@ function stopRecording() {
 // realtime pass yields a wav per bus alongside the master.
 const STEM_TAPS = { active: false, taps: [] };
 
-function startStemTaps() {
+function startStemTaps({ bufferSize = 4096 } = {}) {
   stopStemTaps({ save: false });
   STEM_TAPS.taps = FX_BUS_IDS.map((busId) => {
     const bus = fxBuses[busId];
     if (!bus) return null;
-    const processor = audioCtx.createScriptProcessor(4096, 2, 2);
+    const processor = audioCtx.createScriptProcessor(bufferSize, 2, 2);
     const sink = audioCtx.createGain();
     sink.gain.value = 0;
     const tap = { busId, processor, sink, left: [], right: [], sampleCount: 0, peak: 0 };
@@ -982,14 +985,13 @@ function stopStemTaps({ save = false, baseName = 'grnsh' } = {}) {
 }
 
 // ── Song bounce ── renders the arrangement to a WAV: master is unhooked from
-// the speakers, the song plays once from the top through the real graph while
-// the record tap captures it, and capture stops after the song ends plus an
-// FX-tail grace period. Realtime (the graph is live), but hands-off and
-// exact-length.
+// the speakers while the real graph feeds the record tap. A non-looping song
+// renders once plus its FX tail; Song Loop repeats until the selected limit.
 
 const BOUNCE_TAIL_MS = 2000;
+const BOUNCE_CAPTURE_BUFFER_SIZE = 16384;
 // Jumps can loop the song; a 100%-chance ∞ jump would render forever. The
-// bounce stops (and saves) once it runs this far past the written length.
+// bounce stops (and saves) at this limit.
 const BOUNCE_CAP_FACTOR = 4;
 const BOUNCE = {
   active: false,
@@ -1004,6 +1006,7 @@ const BOUNCE = {
   tailStartedAt: 0,
   prevMode: 'loop',
   prevSongLoop: true,
+  prevScheduleAheadTime: 0.15,
 };
 
 function getBounceSongSeconds() {
@@ -1098,8 +1101,20 @@ function refreshBounceProgress() {
   // elapsed / (elapsed + live remaining): honest under jumps — the bar dips
   // when a jump throws the song backward instead of pinning at 100%.
   const elapsed = audioCtx ? REC.sampleCount / audioCtx.sampleRate : 0;
+  if (BOUNCE.prevSongLoop) {
+    setBounceProgress(elapsed / Math.max(0.001, BOUNCE.capSeconds));
+    return;
+  }
   const total = Math.max(0.001, elapsed + getBounceRemainingSeconds() + tailSeconds);
   setBounceProgress(clamp(elapsed / total, 0, 1));
+}
+
+function muteBounceOutput() {
+  if (!master?.output || !audioCtx || BOUNCE.muted) return;
+  try {
+    master.output.disconnect(audioCtx.destination);
+    BOUNCE.muted = true;
+  } catch (e) {}
 }
 
 async function bounceSong(opts = {}) {
@@ -1117,9 +1132,10 @@ async function bounceSong(opts = {}) {
     setStatus('song is empty — add loops to the song lane');
     return;
   }
-  if (isTransportOn()) await stripPlayToggle();
+  if (audioCtx?.state === 'running') await stopTransport();
   BOUNCE.prevMode = PLAY.mode;
   BOUNCE.prevSongLoop = SONG.loop;
+  BOUNCE.prevScheduleAheadTime = GEN4.scheduleAheadTime;
   BOUNCE.active = true;
   BOUNCE.phase = 'preparing';
   BOUNCE.songSeconds = getBounceSongSeconds();
@@ -1130,19 +1146,19 @@ async function bounceSong(opts = {}) {
       : Math.max(BOUNCE.songSeconds * BOUNCE_CAP_FACTOR, BOUNCE.songSeconds + 30);
   BOUNCE.renderedSeconds = 0;
   BOUNCE.tailStartedAt = 0;
+  GEN4.scheduleAheadTime = Math.max(GEN4.scheduleAheadTime, 0.5);
   refreshBounceUI();
   try {
+    // Existing engines are suspended above, so unplugging the monitor here is
+    // silent. A new engine is unplugged again immediately after it is built.
+    muteBounceOutput();
     setPlayMode('song');
-    SONG.loop = false; // play the arrangement once, then the scheduler stops
+    SONG.loop = BOUNCE.prevSongLoop;
     await ensureTransportEngine();
+    muteBounceOutput();
     if (!started) await start();
-    await startRecording();
-    if (stems) startStemTaps();
-    // Silent render: the record tap keeps feeding, the speakers get nothing.
-    try {
-      master.output.disconnect(audioCtx.destination);
-      BOUNCE.muted = true;
-    } catch (e) {}
+    await startRecording({ bufferSize: BOUNCE_CAPTURE_BUFFER_SIZE });
+    if (stems) startStemTaps({ bufferSize: BOUNCE_CAPTURE_BUFFER_SIZE });
     startGen4Sequencer();
     if (!GEN4.playing) {
       finishBounce('bounce failed to start', { save: false });
@@ -1152,14 +1168,17 @@ async function bounceSong(opts = {}) {
     BOUNCE.progressTimer = setInterval(refreshBounceProgress, 100);
     refreshBounceProgress();
     setStatus(
-      `bouncing song… ≈ ${formatSongClock(BOUNCE.songSeconds)} (cap ${formatSongClock(BOUNCE.capSeconds)})`,
+      BOUNCE.prevSongLoop
+        ? `loop → max ${formatSongClock(BOUNCE.capSeconds)}`
+        : `bounce ≈${formatSongClock(BOUNCE.songSeconds)} · max ${formatSongClock(BOUNCE.capSeconds)}`,
     );
     BOUNCE.pollTimer = setInterval(() => {
       const elapsed = audioCtx ? REC.sampleCount / audioCtx.sampleRate : 0;
       if (GEN4.playing && elapsed > BOUNCE.capSeconds) {
-        // Runaway jump cycle — keep what rendered and say why it stopped.
         finishBounce(
-          `bounce stopped at ${Math.round(BOUNCE.capSeconds)}s safety cap — check ∞ jumps`,
+          BOUNCE.prevSongLoop
+            ? `song bounced at ${formatSongClock(BOUNCE.capSeconds)} limit`
+            : `bounce stopped at ${Math.round(BOUNCE.capSeconds)}s safety limit — check ∞ jumps`,
         );
         return;
       }
@@ -1189,6 +1208,7 @@ function finishBounce(statusText, { save = true } = {}) {
   setBounceProgress(save ? 1 : 0);
   BOUNCE.active = false;
   BOUNCE.phase = 'idle';
+  GEN4.scheduleAheadTime = BOUNCE.prevScheduleAheadTime;
   if (GEN4.playing) stopGen4Sequencer();
   let stemCount = 0;
   if (STEM_TAPS.active) {
@@ -1208,17 +1228,18 @@ function finishBounce(statusText, { save = true } = {}) {
     }
     stopRecording();
   }
-  if (BOUNCE.muted) {
-    BOUNCE.muted = false;
-    try {
-      master.output.connect(audioCtx.destination);
-    } catch (e) {}
-  }
+  const restoreMonitor = BOUNCE.muted;
+  BOUNCE.muted = false;
   SONG.loop = BOUNCE.prevSongLoop;
   setPlayMode(BOUNCE.prevMode);
   // The bounce booted the engine; a bounce always begins from a stopped
   // transport, so return to silence instead of leaving the granulars running.
-  stopTransport();
+  Promise.resolve(stopTransport()).finally(() => {
+    if (!restoreMonitor || !master?.output || !audioCtx) return;
+    try {
+      master.output.connect(audioCtx.destination);
+    } catch (e) {}
+  });
   refreshBounceUI();
   setStatus(statusText || (stemCount ? `song bounced + ${stemCount} stems` : 'song bounced'));
 }
@@ -4332,6 +4353,13 @@ function applyGen3LoopParams(loop) {
     GEN3[key] = loop.gen3[key];
     changed = true;
   });
+  // SUS and ARP are mutually exclusive; a loop carrying both (older saves,
+  // partial copies) must not light both buttons. Arp wins, matching load.
+  if (GEN3.arpEnabled && GEN3.sustainMode) {
+    GEN3.sustainMode = false;
+    loop.gen3.sustainMode = false;
+    changed = true;
+  }
   refreshGen3UI();
   applyGen3Modulation();
   return changed;
@@ -6200,7 +6228,7 @@ function gen4ScheduleTick() {
         );
       }
     });
-    if (linkSynced()) {
+    if (!BOUNCE.active && linkSynced()) {
       // Absolute grid time, re-derived from the live clock offset every step —
       // corrections land as micro-shifts, never as accumulated drift.
       LINK.stepAbs += 1;
@@ -6355,19 +6383,20 @@ function startGen4Sequencer() {
   });
   lfoLastTs = 0;
   FX_BUS_IDS.forEach((busId) => fxBuses[busId]?.beatrepeat.node.port.postMessage('reset'));
-  if (LINK.active && !LINK.applyingRemote && !LINK.grid.playing) {
+  if (!BOUNCE.active && LINK.active && !LINK.applyingRemote && !LINK.grid.playing) {
     // We start the linked session: anchor the shared grid slightly ahead so
     // the peer can catch step 0 too.
     LINK.grid = { bpm: TRANSPORT.bpm, origin: linkNow() + 0.15, playing: true };
     linkBroadcastGrid();
   }
-  if (linkSynced()) {
+  if (!BOUNCE.active && linkSynced()) {
     LINK.stepAbs = linkJoinStep();
     GEN4.nextStepTime = linkStepAudioTime(LINK.stepAbs);
   } else {
-    GEN4.nextStepTime = audioCtx.currentTime;
+    GEN4.nextStepTime = audioCtx.currentTime + 0.01;
   }
   GEN4.schedulerTimer = setInterval(gen4ScheduleTick, GEN4.scheduleInterval);
+  gen4ScheduleTick();
   if (!gen4DisplayFrame) gen4DisplayFrame = requestAnimationFrame(gen4DisplayTick);
   refreshSongTransportUI();
 }
@@ -11301,6 +11330,9 @@ function linkOnMessage(msg) {
     LINK.rtt = best.rtt;
     linkSetStatus(linkStatusLine());
   } else if (msg.t === 'grid') {
+    // A bounce is locally clocked. Remote phase/tempo changes must not move
+    // its scheduler while audio is being captured.
+    if (BOUNCE.active) return;
     const wasPlaying = LINK.grid.playing;
     LINK.grid = {
       bpm: clamp(Number(msg.bpm) || 120, BPM_BOUNDS.min, BPM_BOUNDS.max),
@@ -13110,11 +13142,26 @@ function copyGeneratorParamToOtherLoops(genIdx, key) {
     let copied = 0;
     LOOPS.list.forEach((loop) => {
       if (loop === editLoop || !loop.gen3 || !GEN3_LOOP_PARAM_KEYS.includes(key)) return;
-      loop.gen3[key] = GEN3[key];
-      if (key === 'arpEnabled' && GEN3.arpEnabled) loop.gen3.sustainMode = false;
-      if (key === 'sustainMode' && GEN3.sustainMode) loop.gen3.arpEnabled = false;
+      // SUS/ARP are one mode group — copy both flags so the target lands in
+      // exactly the state on screen, never a half-copied combination.
+      if (key === 'arpEnabled' || key === 'sustainMode') {
+        loop.gen3.sustainMode = GEN3.sustainMode;
+        loop.gen3.arpEnabled = GEN3.arpEnabled;
+      } else {
+        loop.gen3[key] = GEN3[key];
+      }
       copied += 1;
     });
+    // A copy can flip the mode of the loop that is sounding right now —
+    // apply the same cleanup a block boundary would.
+    if (PLAY.mode === 'song' && GEN4.playing && (key === 'arpEnabled' || key === 'sustainMode')) {
+      const sound = getGen3SoundState();
+      if (sound.sustainMode) {
+        syncGen3SustainChord(getAudibleLoop()?.gen3?.lockedMidis || GEN3.lockedMidis);
+      } else if (GEN3.activeNotes.size > 0) {
+        stopAllGen3Notes();
+      }
+    }
     setStatus(
       copied > 0
         ? `copied to ${copied} other loop${copied === 1 ? '' : 's'}`
@@ -16288,6 +16335,68 @@ function setMasteringEqReadout(band) {
 
 const MASTERING_DEFAULT_PARAMS = JSON.parse(JSON.stringify(MASTERING.params));
 
+// Built-in mastering chains. Keep these as complete parameter snapshots so
+// adding a module later falls back safely through applyMasteringPreset().
+const MASTERING_FACTORY_PRESETS = [
+  {
+    id: 'preset-1',
+    name: 'Preset 1',
+    params: {
+      ...MASTERING_DEFAULT_PARAMS,
+      levelerGain: -3.5,
+      lowGain: -9,
+      lowFreq: 20,
+      lowQ: 0.7,
+      lowMidGain: -0.5,
+      lowMidFreq: 90,
+      lowMidQ: 1,
+      midGain: 0,
+      midFreq: 900,
+      midQ: 0.7,
+      highMidGain: 0,
+      highMidFreq: 2900,
+      highMidQ: 1,
+      highGain: -1,
+      highFreq: 10000,
+      highQ: 0.7,
+      highDynThresh: -18,
+      highDynRange: 3.5,
+      optoReduction: 3.5,
+      optoMakeup: 2.5,
+      optoMode: '2a',
+      compThreshold: -18,
+      compRatio: 2,
+      compAttack: 0.03,
+      compRelease: 0.25,
+      compMakeup: 1,
+      ottDepth: 15,
+      ottTime: 0.95,
+      ottIn: 1.5,
+      ottOut: 1.5,
+      ottLow: 2.5,
+      ottMid: 3.5,
+      ottHigh: 0,
+      tapeDrive: 1,
+      tapeBump: 0.5,
+      tapeRolloff: 20,
+      tapeLevel: 0.5,
+      subTune: 40,
+      subAmount: 8.5,
+      subMix: 8,
+      excTune: 5000,
+      excHarmonics: 14,
+      excMix: 9,
+      width: 1.6,
+      widthBassFreq: 300,
+      drive: 0,
+      ceiling: -1,
+      outGain: 0,
+      enabled: { ...MASTERING_DEFAULT_PARAMS.enabled },
+      order: [...MASTERING_DEFAULT_PARAMS.order],
+    },
+  },
+];
+
 function applyMasteringPreset(saved) {
   const src = saved && typeof saved === 'object' ? saved : MASTERING_DEFAULT_PARAMS;
   const p = MASTERING.params;
@@ -16305,6 +16414,31 @@ function applyMasteringPreset(saved) {
     });
   }
   rebuildMasterPanelUI();
+}
+
+function buildMasteringPresetSelect() {
+  const select = document.createElement('select');
+  select.className = 'master-preset-select';
+  select.title = 'Recall a complete mastering chain';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = 'Load preset…';
+  placeholder.disabled = true;
+  placeholder.selected = true;
+  select.appendChild(placeholder);
+  MASTERING_FACTORY_PRESETS.forEach((preset) => {
+    const option = document.createElement('option');
+    option.value = preset.id;
+    option.textContent = preset.name;
+    select.appendChild(option);
+  });
+  select.addEventListener('change', () => {
+    const preset = MASTERING_FACTORY_PRESETS.find(({ id }) => id === select.value);
+    if (!preset) return;
+    applyMasteringPreset(preset.params);
+    setStatus(`mastering: loaded ${preset.name}`);
+  });
+  return select;
 }
 
 // Loaded params can change knob values, chain order, and bypass states at
@@ -16746,6 +16880,8 @@ function buildMasterPanel() {
   sourceInfo.className = 'master-source-info';
   MASTERING.els.sourceInfo = sourceInfo;
 
+  const presetSelect = buildMasteringPresetSelect();
+
   const bounceBtn = document.createElement('button');
   bounceBtn.type = 'button';
   bounceBtn.className = 'master-tool-btn';
@@ -16861,6 +16997,7 @@ function buildMasterPanel() {
 
   toolbar.append(
     sourceInfo,
+    presetSelect,
     bounceBtn,
     bounceProgressWrap,
     loadBtn,

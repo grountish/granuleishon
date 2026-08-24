@@ -242,6 +242,20 @@ main {
   text-overflow: ellipsis;
 }
 
+.master-preset-select {
+  width: 112px;
+  height: 22px;
+  flex: 0 0 auto;
+  padding: 0 22px 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--surface);
+  color: var(--text);
+  font: 700 8px var(--mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
 /* Icon toolbar buttons — uniform hit size, svg centered. */
 .master-tool-btn {
   display: inline-flex;
