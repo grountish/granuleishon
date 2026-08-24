@@ -14539,6 +14539,7 @@ const MASTERING = {
     lowGain: 0,
     lowFreq: 120,
     lowQ: 0.7,
+    lowType: 'peak', // 'peak' bell · 'cut' 12 dB/oct high-pass (gain/dyn unused)
     lowDynThresh: 0,
     lowDynRange: 0,
     lowMidGain: 0,
@@ -15022,7 +15023,8 @@ function applyMasteringParams(chain) {
   if (n.chainIn) n.chainIn.gain.value = chain.bypassAll ? 1 : dbToLin(p.levelerGain);
   if (n.dynEq) {
     n.dynEq.port.postMessage({
-      bands: MASTERING_EQ_BANDS.map((band) => ({
+      bands: MASTERING_EQ_BANDS.map((band, bi) => ({
+        type: bi === 0 && p.lowType === 'cut' ? 'cut' : 'peak',
         freq: p[band.freqKey],
         gain: p[band.gainKey],
         q: p[band.qKey],
@@ -15031,6 +15033,7 @@ function applyMasteringParams(chain) {
       })),
     });
   } else if (n.low) {
+    n.low.type = p.lowType === 'cut' ? 'highpass' : 'peaking';
     n.low.frequency.value = p.lowFreq;
     n.low.gain.value = p.lowGain;
     n.low.Q.value = p.lowQ;
@@ -16078,6 +16081,31 @@ function rbjPeaking(sr, f0, gainDb, q) {
   return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
 }
 
+function rbjHighpass(sr, f0, q) {
+  const w0 = (2 * Math.PI * f0) / sr;
+  const alpha = Math.sin(w0) / (2 * Math.max(0.05, q));
+  const cosw = Math.cos(w0);
+  const b0 = (1 + cosw) / 2;
+  const b1 = -(1 + cosw);
+  const b2 = (1 + cosw) / 2;
+  const a0 = 1 + alpha;
+  const a1 = -2 * cosw;
+  const a2 = 1 - alpha;
+  return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
+}
+
+// The low band doubles as a low-cut: same freq/Q handles, gain and dynamics
+// dormant while cut.
+function masteringLowIsCut() {
+  return MASTERING.params.lowType === 'cut';
+}
+
+function masteringBandDisplayCoefs(band, bi, gainDb) {
+  return bi === 0 && masteringLowIsCut()
+    ? rbjHighpass(EQ_DISPLAY_SR, MASTERING.params[band.freqKey], MASTERING.params[band.qKey])
+    : rbjPeaking(EQ_DISPLAY_SR, MASTERING.params[band.freqKey], gainDb, MASTERING.params[band.qKey]);
+}
+
 function biquadMagnitudeDb([b0, b1, b2, a1, a2], freq, sr) {
   const w = (2 * Math.PI * freq) / sr;
   const cw = Math.cos(w);
@@ -16098,11 +16126,10 @@ function biquadMagnitudeDb([b0, b1, b2, a1, a2], freq, sr) {
 function masteringEqCurveCoefs(gains = null) {
   const p = MASTERING.params;
   return MASTERING_EQ_BANDS.map((band, bi) =>
-    rbjPeaking(
-      EQ_DISPLAY_SR,
-      p[band.freqKey],
+    masteringBandDisplayCoefs(
+      band,
+      bi,
       gains && typeof gains[bi] === 'number' ? gains[bi] : p[band.gainKey],
-      p[band.qKey],
     ),
   );
 }
@@ -16192,13 +16219,13 @@ function drawMasteringEq() {
   }
 
   // Selected band's own response — tinted fill against the 0 dB line.
+  MASTERING.els.eqCutBtn?.classList.toggle('active', masteringLowIsCut());
   const selBand = MASTERING_EQ_BANDS[MASTERING.eqBandIndex];
   if (selBand) {
-    const coeffs = rbjPeaking(
-      EQ_DISPLAY_SR,
-      MASTERING.params[selBand.freqKey],
+    const coeffs = masteringBandDisplayCoefs(
+      selBand,
+      MASTERING.eqBandIndex,
       MASTERING.params[selBand.gainKey],
-      MASTERING.params[selBand.qKey],
     );
     const y0 = eqDbToY(0, h);
     const selCol = bandCols[MASTERING.eqBandIndex] || bandCols[0];
@@ -16241,7 +16268,8 @@ function drawMasteringEq() {
   };
   const liveGains = MASTERING.preview ? MASTERING.liveEqGains : null;
   const anyDynamic = MASTERING_EQ_BANDS.some(
-    (band) => (MASTERING.params[band.rangeKey] || 0) > 0,
+    (band, bi) =>
+      !(bi === 0 && masteringLowIsCut()) && (MASTERING.params[band.rangeKey] || 0) > 0,
   );
   if (liveGains && anyDynamic) {
     drawResponseCurve(masteringEqCurveCoefs(), 1, 0.3); // ghost: configured curve
@@ -16257,9 +16285,11 @@ function drawMasteringEq() {
 
   // Band handles.
   MASTERING_EQ_BANDS.forEach((band, bi) => {
+    const cut = bi === 0 && masteringLowIsCut();
     const x = eqFreqToX(MASTERING.params[band.freqKey], w);
-    const y = eqDbToY(MASTERING.params[band.gainKey], h);
-    const range = MASTERING.params[band.rangeKey] || 0;
+    // A cut has no gain — its handle rides the 0 dB line.
+    const y = eqDbToY(cut ? 0 : MASTERING.params[band.gainKey], h);
+    const range = cut ? 0 : MASTERING.params[band.rangeKey] || 0;
     if (range > 0) {
       // Dynamic range indicator: how far the band can be pulled down.
       const yLow = eqDbToY(
@@ -16326,7 +16356,10 @@ function setMasteringEqReadout(band) {
   const dB = MASTERING.params[band.gainKey];
   const q = MASTERING.params[band.qKey];
   const fLabel = f >= 1000 ? `${(f / 1000).toFixed(1)}k` : `${Math.round(f)}`;
-  el.textContent = `${band.label} ${fLabel} Hz ${dB >= 0 ? '+' : ''}${dB.toFixed(1)} dB · Q ${q.toFixed(2)}`;
+  const cut = band === MASTERING_EQ_BANDS[0] && masteringLowIsCut();
+  el.textContent = cut
+    ? `${band.label} ${fLabel} Hz CUT · Q ${q.toFixed(2)}`
+    : `${band.label} ${fLabel} Hz ${dB >= 0 ? '+' : ''}${dB.toFixed(1)} dB · Q ${q.toFixed(2)}`;
 }
 
 // ── Mastering persistence ── params ride inside the preset (autosave, named
@@ -16395,6 +16428,179 @@ const MASTERING_FACTORY_PRESETS = [
       order: [...MASTERING_DEFAULT_PARAMS.order],
     },
   },
+  {
+    id: 'preset-2',
+    name: 'Preset 2',
+    params: {
+      ...MASTERING_DEFAULT_PARAMS,
+      levelerGain: -5.5,
+      lowGain: -8.5,
+      lowFreq: 20,
+      lowQ: 0.7,
+      lowMidGain: 1,
+      lowMidFreq: 80,
+      lowMidQ: 1,
+      midGain: -2.5,
+      midFreq: 200,
+      midQ: 0.7,
+      highMidGain: 1.5,
+      highMidFreq: 3000,
+      highMidQ: 1,
+      highGain: 0,
+      highFreq: 10000,
+      highQ: 0.7,
+      highDynThresh: -18,
+      highDynRange: 4,
+      optoReduction: 7.5,
+      optoMakeup: 4.5,
+      optoMode: '2a',
+      compThreshold: -16.5,
+      compRatio: 3,
+      compAttack: 0.03,
+      compRelease: 0.25,
+      compMakeup: 2,
+      ottDepth: 29,
+      ottTime: 0.95,
+      ottIn: 1.5,
+      ottOut: 1.5,
+      ottLow: 1,
+      ottMid: 5.5,
+      ottHigh: -4,
+      tapeDrive: 1.5,
+      tapeBump: 1,
+      tapeRolloff: 16,
+      tapeLevel: 1.5,
+      subTune: 50,
+      subAmount: 6.5,
+      subMix: 11,
+      excTune: 3400,
+      excHarmonics: 16.5,
+      excMix: 11,
+      width: 1.8,
+      widthBassFreq: 270,
+      drive: 1,
+      ceiling: -0.5,
+      outGain: 0,
+      enabled: { ...MASTERING_DEFAULT_PARAMS.enabled },
+      order: [...MASTERING_DEFAULT_PARAMS.order],
+    },
+  },
+  {
+    id: 'preset-3',
+    name: 'Preset 3',
+    params: {
+      ...MASTERING_DEFAULT_PARAMS,
+      levelerGain: -2,
+      lowType: 'cut',
+      lowGain: 0,
+      lowFreq: 35,
+      lowQ: 0.7,
+      lowMidGain: 1,
+      lowMidFreq: 80,
+      lowMidQ: 1,
+      midGain: 0.5,
+      midFreq: 250,
+      midQ: 0.7,
+      highMidGain: 1.5,
+      highMidFreq: 3000,
+      highMidQ: 1,
+      highGain: -1,
+      highFreq: 13640,
+      highQ: 0.7,
+      highDynThresh: -22,
+      highDynRange: 5.9,
+      optoReduction: 6,
+      optoMakeup: 3,
+      optoMode: '3a',
+      compThreshold: -27,
+      compRatio: 3,
+      compAttack: 0.019,
+      compRelease: 0.2,
+      compMakeup: 1.5,
+      ottDepth: 23,
+      ottTime: 0.95,
+      ottIn: 1.5,
+      ottOut: 1.5,
+      ottLow: 1,
+      ottMid: 0.5,
+      ottHigh: 2.5,
+      tapeDrive: 1,
+      tapeBump: 0.5,
+      tapeRolloff: 20,
+      tapeLevel: 1,
+      subTune: 50,
+      subAmount: 2,
+      subMix: 7,
+      excTune: 3400,
+      excHarmonics: 16.5,
+      excMix: 11,
+      width: 1.4,
+      widthBassFreq: 230,
+      drive: 1,
+      ceiling: -1,
+      outGain: 0,
+      enabled: { ...MASTERING_DEFAULT_PARAMS.enabled },
+      order: ['sub', 'eq', 'ott', 'width', 'opto', 'comp', 'tape', 'exciter', 'limit'],
+    },
+  },
+  {
+    id: 'preset-4',
+    name: 'Preset 4',
+    params: {
+      ...MASTERING_DEFAULT_PARAMS,
+      levelerGain: -9,
+      lowType: 'cut',
+      lowGain: 0,
+      lowFreq: 36,
+      lowQ: 0.7,
+      lowMidGain: 2.5,
+      lowMidFreq: 100,
+      lowMidQ: 1,
+      midGain: -3.5,
+      midFreq: 200,
+      midQ: 0.7,
+      highMidGain: 1.5,
+      highMidFreq: 1250,
+      highMidQ: 1,
+      highGain: -2.5,
+      highFreq: 8980,
+      highQ: 0.5,
+      highDynThresh: -31,
+      highDynRange: 4,
+      optoReduction: 8,
+      optoMakeup: 8,
+      optoMode: '3a',
+      compThreshold: -15,
+      compRatio: 3,
+      compAttack: 0.019,
+      compRelease: 0.2,
+      compMakeup: 1.5,
+      ottDepth: 23,
+      ottTime: 0.95,
+      ottIn: 1.5,
+      ottOut: 1.5,
+      ottLow: 3,
+      ottMid: 0.5,
+      ottHigh: -1,
+      tapeDrive: 1,
+      tapeBump: 0.5,
+      tapeRolloff: 20,
+      tapeLevel: 1,
+      subTune: 55,
+      subAmount: 3,
+      subMix: 18,
+      excTune: 8000,
+      excHarmonics: 20.5,
+      excMix: 11,
+      width: 1.6,
+      widthBassFreq: 260,
+      drive: 1.5,
+      ceiling: -1,
+      outGain: 0,
+      enabled: { ...MASTERING_DEFAULT_PARAMS.enabled },
+      order: ['sub', 'eq', 'tape', 'ott', 'width', 'opto', 'comp', 'exciter', 'limit'],
+    },
+  },
 ];
 
 function applyMasteringPreset(saved) {
@@ -16416,29 +16622,25 @@ function applyMasteringPreset(saved) {
   rebuildMasterPanelUI();
 }
 
-function buildMasteringPresetSelect() {
-  const select = document.createElement('select');
-  select.className = 'master-preset-select';
-  select.title = 'Recall a complete mastering chain';
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = 'Load preset…';
-  placeholder.disabled = true;
-  placeholder.selected = true;
-  select.appendChild(placeholder);
+function buildMasteringPresetGroup() {
+  const group = document.createElement('div');
+  group.className = 'master-preset-group';
+  const label = document.createElement('span');
+  label.textContent = 'Presets';
+  group.appendChild(label);
   MASTERING_FACTORY_PRESETS.forEach((preset) => {
-    const option = document.createElement('option');
-    option.value = preset.id;
-    option.textContent = preset.name;
-    select.appendChild(option);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'master-preset-btn';
+    button.textContent = preset.name.replace(/^Preset\s*/i, 'P');
+    button.title = `Load ${preset.name}`;
+    button.addEventListener('click', () => {
+      applyMasteringPreset(preset.params);
+      setStatus(`mastering: loaded ${preset.name}`);
+    });
+    group.appendChild(button);
   });
-  select.addEventListener('change', () => {
-    const preset = MASTERING_FACTORY_PRESETS.find(({ id }) => id === select.value);
-    if (!preset) return;
-    applyMasteringPreset(preset.params);
-    setStatus(`mastering: loaded ${preset.name}`);
-  });
-  return select;
+  return group;
 }
 
 // Loaded params can change knob values, chain order, and bypass states at
@@ -16541,7 +16743,19 @@ function buildMasteringEqSection() {
     chip.addEventListener('click', () => selectBand(band));
     return chip;
   });
-  chipRow.append(...chips, soloBtn);
+  const cutBtn = document.createElement('button');
+  cutBtn.type = 'button';
+  cutBtn.className = 'master-eq-solo master-eq-cut';
+  cutBtn.textContent = 'CUT';
+  cutBtn.title =
+    'Low band: bell ↔ low-cut (12 dB/oct high-pass) — gain and dynamics sit out while cut; freq and Q still apply';
+  MASTERING.els.eqCutBtn = cutBtn;
+  cutBtn.addEventListener('click', () => {
+    MASTERING.params.lowType = MASTERING.params.lowType === 'cut' ? 'peak' : 'cut';
+    selectBand(MASTERING_EQ_BANDS[0]);
+    bandChanged(MASTERING_EQ_BANDS[0]);
+  });
+  chipRow.append(...chips, cutBtn, soloBtn);
   box.appendChild(chipRow);
 
   // Dynamics (THR/RNG): the band's gain is pulled down (up to RNG dB) while
@@ -16787,9 +17001,13 @@ function buildMasteringEqSection() {
   const bandAtPoint = (px, py, w, h, radius = 12) => {
     let best = null;
     let bestDist = radius; // px hit radius
-    MASTERING_EQ_BANDS.forEach((band) => {
+    MASTERING_EQ_BANDS.forEach((band, bi) => {
       const x = eqFreqToX(MASTERING.params[band.freqKey], w);
-      const y = eqDbToY(MASTERING.params[band.gainKey], h);
+      // Mirror the drawn handle: a cut low band sits on the 0 dB line.
+      const y = eqDbToY(
+        bi === 0 && masteringLowIsCut() ? 0 : MASTERING.params[band.gainKey],
+        h,
+      );
       const d = Math.hypot(px - x, py - y);
       if (d < bestDist) {
         bestDist = d;
@@ -16804,6 +17022,7 @@ function buildMasteringEqSection() {
     p[band.qKey] = band.defaultQ;
     p[band.threshKey] = 0;
     p[band.rangeKey] = 0;
+    if (band === MASTERING_EQ_BANDS[0]) p.lowType = 'peak';
     bandChanged(band);
   };
 
@@ -16836,7 +17055,10 @@ function buildMasteringEqSection() {
     const rawDb = eqYToDb(py, rect.height);
     const dB = e.shiftKey ? Math.round(rawDb * 10) / 10 : Math.round(rawDb * 2) / 2;
     p[activeBand.freqKey] = Math.round(f);
-    p[activeBand.gainKey] = dB;
+    // A cut low band has no gain — vertical motion is ignored, not stored.
+    if (!(activeBand === MASTERING_EQ_BANDS[0] && masteringLowIsCut())) {
+      p[activeBand.gainKey] = dB;
+    }
     bandChanged(activeBand);
   });
   const endEqDrag = (e) => {
@@ -16880,7 +17102,7 @@ function buildMasterPanel() {
   sourceInfo.className = 'master-source-info';
   MASTERING.els.sourceInfo = sourceInfo;
 
-  const presetSelect = buildMasteringPresetSelect();
+  const presetGroup = buildMasteringPresetGroup();
 
   const bounceBtn = document.createElement('button');
   bounceBtn.type = 'button';
@@ -16997,7 +17219,7 @@ function buildMasterPanel() {
 
   toolbar.append(
     sourceInfo,
-    presetSelect,
+    presetGroup,
     bounceBtn,
     bounceProgressWrap,
     loadBtn,

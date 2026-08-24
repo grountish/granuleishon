@@ -2,8 +2,9 @@
 // Each band is an RBJ peaking filter whose effective gain is pulled down when
 // the band's envelope (from a matching bandpass detector) exceeds its
 // threshold — downward dynamic EQ. A band with range = 0 behaves as a plain
-// static peaking filter. Bands arrive via the message port:
-//   { bands: [{ freq, gain, q, thresh, range }, ...] }
+// static peaking filter. A band with type 'cut' is a static 12 dB/oct
+// high-pass instead (gain and dynamics ignored). Bands arrive via the port:
+//   { bands: [{ type?, freq, gain, q, thresh, range }, ...] }
 // While any band is dynamic, effective gains are posted back (~20ms cadence):
 //   { liveGains: [dB, ...] }
 
@@ -18,6 +19,19 @@ function peakingCoefs(sr, f0, gainDb, q) {
   const a0 = 1 + alpha / A;
   const a1 = -2 * cosw;
   const a2 = 1 - alpha / A;
+  return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
+}
+
+function highpassCoefs(sr, f0, q) {
+  const w0 = (2 * Math.PI * Math.min(f0, sr * 0.45)) / sr;
+  const alpha = Math.sin(w0) / (2 * Math.max(0.05, q));
+  const cosw = Math.cos(w0);
+  const b0 = (1 + cosw) / 2;
+  const b1 = -(1 + cosw);
+  const b2 = (1 + cosw) / 2;
+  const a0 = 1 + alpha;
+  const a1 = -2 * cosw;
+  const a2 = 1 - alpha;
   return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
 }
 
@@ -99,6 +113,22 @@ class DynamicEqProcessor extends AudioWorkletProcessor {
       const band = this.bands[bi];
       const st = this.state[bi];
       if (!band || !st) continue;
+
+      // Low-cut band: static high-pass, no envelope, always in the path.
+      if (band.type === 'cut') {
+        if (st.applied !== 'cut') {
+          st.coefs = highpassCoefs(sampleRate, band.freq, band.q);
+          st.applied = 'cut';
+          st.effGain = 0;
+        }
+        for (let c = 0; c < chs; c++) {
+          const data = output[c];
+          const fs = st.flt[c];
+          for (let i = 0; i < data.length; i++) data[i] = runBiquad(fs, st.coefs, data[i]);
+        }
+        continue;
+      }
+      if (st.applied === 'cut') st.applied = null; // back to bell — recompute
 
       let target = band.gain;
       if (band.range > 0) {

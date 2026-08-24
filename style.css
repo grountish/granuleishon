@@ -242,18 +242,34 @@ main {
   text-overflow: ellipsis;
 }
 
-.master-preset-select {
-  width: 112px;
+.master-preset-group {
   height: 22px;
   flex: 0 0 auto;
-  padding: 0 22px 0 7px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 3px 0 7px;
   border: 1px solid var(--border);
   border-radius: 2px;
   background: var(--surface);
-  color: var(--text);
-  font: 700 8px var(--mono);
+  color: var(--muted);
+  font: 700 7px var(--mono);
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+.master-preset-btn {
+  min-width: 25px;
+  height: 16px;
+  padding: 0 5px;
+  border-color: transparent;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 8px;
+}
+
+.master-preset-btn:hover:not(:disabled) {
+  border-color: var(--accent-0);
 }
 
 /* Icon toolbar buttons — uniform hit size, svg centered. */
@@ -659,6 +675,12 @@ body.view-master .transport > .status {
   color: var(--surface);
   border-color: var(--accent-fx);
   background: var(--accent-fx);
+}
+
+.master-eq-cut {
+  width: auto;
+  min-width: 30px;
+  padding: 0 5px;
 }
 
 .bounce-btn.active {
