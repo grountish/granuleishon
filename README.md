@@ -50,7 +50,8 @@ feedback. Make a sound and play with the controls.
 
 The instrument rack (generator, kit, FX, LFO settings and routings) is global
 and always live. What is _sequenced_ — the drum grid, the chord the OSC row
-fires, and the mod-sequencer pattern — lives in a **Loop**.
+fires, and the mod-sequencer pattern — lives in a **Loop**. Seq 1 can optionally
+share the currently edited sequence across every loop and Song mode.
 
 - The **Loops** bar (under the header) holds your loops: click to edit, `+` to
   add an empty one, `⧉` to duplicate the current one, double-click to rename.
@@ -69,6 +70,14 @@ Source audio is persisted too: loaded .wav buffers and **frozen** mic takes are
 stored in IndexedDB per project (and for the autosave session), and reload back
 into the granulators — a frozen take stays frozen across reloads. The live
 unfrozen mic buffer is transient by nature and is not saved.
+
+## Mixer
+
+The Mixer view provides a post-FX channel strip for each granular source, the
+synth, and the drums. Each strip has stereo metering, gain, pan, mute/solo, and
+a bypassable five-band EQ at 100 Hz, 300 Hz, 1 kHz, 3.5 kHz, and 10 kHz. A
+master strip shows the combined output and limiter reduction. Mixer settings are included in
+autosave, named projects, project files, and undo/redo history.
 
 ## Ideas to extend later
 

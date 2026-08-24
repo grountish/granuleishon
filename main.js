@@ -117,6 +117,7 @@ const BACK_PANEL = {
   selectedSourceIdx: null,
   pointerX: null,
   pointerY: null,
+  connFrame: null,
 };
 
 function getStatusEl() {
@@ -682,8 +683,8 @@ function getBackPanel() {
   return document.getElementById('backPanel');
 }
 
-function getViewToggle() {
-  return document.getElementById('viewToggle');
+function getViewButtons() {
+  return document.querySelectorAll('.view-btn[data-view]');
 }
 
 function getAudioWorkletErrorMessage() {
@@ -1971,6 +1972,10 @@ function getModSourceScaledValue(sourceIdx) {
   if (sourceIdx === 3) {
     return -KICK_SC.envelope * 2 * KICK_SC.amount;
   }
+  if (sourceIdx === 4) {
+    const v = TRIG_SC.envelope * 2 * TRIG_SC.amount;
+    return TRIG_SC.invert ? v : -v;
+  }
   return null;
 }
 
@@ -2000,13 +2005,16 @@ function getEffectiveFxValue(id, key, busId = activeBus) {
 
 let modVisualsActive = false; // were modulation visuals showing last frame?
 
+let backStateLastLiveRefresh = 0;
+let modVisualsLastLiveRefresh = 0;
+
 function applyMappedModulationTargets() {
   const hasMappings = lfoMappings.size > 0;
   if (hasMappings) {
     const gens = new Set([...lfoMappings.values()].map((m) => m.genIdx));
     gens.forEach((gi) => {
       if (gi === 2) applyGen3Modulation();
-      else if (gi === 3) applyFxModulation();
+      else if (gi === 3) applyFxModulationMapped();
       else if (gi === 4) applyGen4Modulation();
       else sendParams(gi);
     });
@@ -2014,8 +2022,25 @@ function applyMappedModulationTargets() {
   // Visual refreshes only matter for the panel currently on screen. Skip the
   // front-control mod visuals once there's nothing to show (one extra frame to
   // clear), and only run the back panel's live meter while the back view is up.
-  if (UI_VIEW.mode === 'front' && (hasMappings || modVisualsActive)) refreshModulationVisuals();
-  if (UI_VIEW.mode === 'back') refreshBackPanelState();
+  // The live sweep touches every control's DOM, so cap it at ~30Hz — the
+  // final clear when the last mapping goes away still runs immediately.
+  if (UI_VIEW.mode === 'front' && (hasMappings || modVisualsActive)) {
+    const now = performance.now();
+    if (!hasMappings || now - modVisualsLastLiveRefresh >= 33) {
+      modVisualsLastLiveRefresh = now;
+      refreshModulationVisuals();
+    }
+  }
+  // The back board rewrites every module's subtitles/meters — too heavy to run
+  // each frame alongside the wire loop, so cap this live refresh at ~30Hz.
+  // Event-driven refreshBackPanelState() calls stay immediate.
+  if (UI_VIEW.mode === 'back') {
+    const now = performance.now();
+    if (now - backStateLastLiveRefresh >= 33) {
+      backStateLastLiveRefresh = now;
+      refreshBackPanelState();
+    }
+  }
   modVisualsActive = hasMappings;
 }
 
@@ -2044,9 +2069,27 @@ function applyGen3Modulation() {
 function applyFxModulation() {
   // Each bus owns its own copy of every effect; apply base or modulated value
   // per bus so a wobble set on one instrument stays on that instrument.
+  // Full sweep — run on discrete events (map/unmap, preset load) so removed
+  // mappings settle back to their base values.
   FX_BUS_IDS.forEach((busId) => {
     FX_LFO_PARAMS.forEach(({ id, key }) => {
       applyFx(id, key, getEffectiveFxValue(id, key, busId), busId);
+    });
+  });
+  reconcileFxIdleSplices();
+}
+
+// Per-frame fast path: only write the params that actually have a mapping.
+// The full sweep above is ~120 AudioParam writes; under modulation that ran
+// every frame and flooded the audio thread with automation events.
+function applyFxModulationMapped() {
+  lfoMappings.forEach(({ genIdx, key }) => {
+    if (genIdx !== 3) return;
+    const sep = key.indexOf(':');
+    const id = key.slice(0, sep);
+    const paramKey = key.slice(sep + 1);
+    FX_BUS_IDS.forEach((busId) => {
+      applyFx(id, paramKey, getEffectiveFxValue(id, paramKey, busId), busId);
     });
   });
 }
@@ -2185,7 +2228,7 @@ function refreshLFOMappingUI() {
 }
 
 function setLFOLedState(led, sourceIdx) {
-  led.classList.remove('active', 'lfo-1', 'lfo-2', 'lfo-seq', 'lfo-sc');
+  led.classList.remove('active', 'lfo-1', 'lfo-2', 'lfo-seq', 'lfo-sc', 'lfo-trig');
   led.dataset.lfo = '';
   led.textContent = '';
   led.title = 'Map: unset';
@@ -2202,6 +2245,13 @@ function setLFOLedState(led, sourceIdx) {
     led.dataset.lfo = 'K';
     led.textContent = 'K';
     led.title = 'Map: Kick SC';
+    return;
+  }
+  if (sourceIdx === 4) {
+    led.classList.add('active', 'lfo-trig');
+    led.dataset.lfo = 'T';
+    led.textContent = 'T';
+    led.title = 'Map: Trig SC';
     return;
   }
   led.classList.add('active', `lfo-${sourceIdx + 1}`);
@@ -2517,21 +2567,6 @@ function makeKnob(p, initialValue, onInput) {
     onInput(currentValue);
   });
   svg.addEventListener('pointerup', () => svg.classList.remove('knob--drag'));
-
-  // Scroll wheel — one step per tick
-  svg.addEventListener(
-    'wheel',
-    (e) => {
-      e.preventDefault();
-      const n = clamp01(
-        norm - (Math.sign(e.deltaY) * spec.step) / Math.max(0.0001, spec.max - spec.min),
-      );
-      renderNorm(n);
-      currentValue = toValue(n);
-      onInput(currentValue);
-    },
-    { passive: false },
-  );
 
   // Double-click to reset to initial value
   svg.addEventListener('dblclick', () => {
@@ -4971,7 +5006,7 @@ function applyGen4KitPreset(presetIndex) {
   // Modulation routes: the kit's drum-lane mappings replace any existing ones
   // (clean slate, like the pattern). Non-drum routes are left alone.
   [...lfoMappings.keys()].filter((k) => k.startsWith('4:')).forEach((k) => lfoMappings.delete(k));
-  const KIT_MOD_SOURCES = { lfo1: 0, lfo2: 1, seq: 2, kick: 3 };
+  const KIT_MOD_SOURCES = { lfo1: 0, lfo2: 1, seq: 2, kick: 3, trig: 4 };
   (kit.mods || []).forEach(({ target, source }) => {
     const sourceIdx = KIT_MOD_SOURCES[source];
     const match = typeof target === 'string' && target.match(/^4:([a-z]+):(\w+)$/);
@@ -5028,7 +5063,7 @@ const GEN4 = {
   displayStep: -1,
   nextStepTime: 0,
   schedulerTimer: null,
-  scheduleAheadTime: 0.1,
+  scheduleAheadTime: 0.15,
   scheduleInterval: 25,
   stepCount: 16,
   nodes: null,
@@ -5057,6 +5092,28 @@ const KICK_SC = {
   release: 0.2,
   amount: 1.0,
 };
+
+// Second trigger envelope (mod source 4): like Kick SC, but the drum lane that
+// fires it is selectable, and `invert` flips the polarity — a normal mapping
+// ducks the target on each hit, an inverted one pushes it up (gate-style
+// sidechain: the target only opens while the chosen lane is hitting).
+const TRIG_SC = {
+  envelope: 0,
+  release: 0.2,
+  amount: 1.0,
+  source: 'fm',
+  invert: false,
+};
+const trigScSourceBtns = new Map();
+let trigScInvBtn = null;
+
+function refreshTrigScUI() {
+  trigScSourceBtns.forEach((btn, id) => btn.classList.toggle('active', TRIG_SC.source === id));
+  if (trigScInvBtn) {
+    trigScInvBtn.classList.toggle('active', TRIG_SC.invert);
+    trigScInvBtn.setAttribute('aria-pressed', TRIG_SC.invert ? 'true' : 'false');
+  }
+}
 
 const gen4Schedule = [];
 const gen4StepEls = GEN4_DEFS.map(() => new Array(32).fill(null));
@@ -5153,9 +5210,9 @@ function buildGen4Nodes() {
   const channelDryOuts = GEN4.channels.map((ch) => {
     const gain = ac.createGain();
     gain.gain.value = ch.muted ? 0 : 1;
-    // Dry hits still pass through the drums bus output so instrument-level
-    // solo/mute remains authoritative.
-    gain.connect(fxBuses.gen4.output);
+    // Dry hits skip the reorderable FX but still pass through the drums mixer
+    // strip, so its EQ, pan, gain, solo and mute remain authoritative.
+    gain.connect(fxBuses.gen4.mixerIn);
     return gain;
   });
 
@@ -5518,6 +5575,7 @@ function applyGen4StepNote(ch, p, midi, locks = null) {
 function gen4FireChannel(ci, time, velocity, midi = null, loop = null, locks = null) {
   const ch = GEN4.channels[ci];
   if (ch.muted) return;
+  if (ch.id === TRIG_SC.source) TRIG_SC.envelope = 1.0;
   const p = getEffectiveGen4Params(ci, locks);
   applyGen4StepNote(ch, p, midi, locks);
   const sendToFx = locks && Object.hasOwn(locks, '_fxSend') ? locks._fxSend : ch.fxSend;
@@ -5887,7 +5945,11 @@ function gen4StepConditionMet(pat, ci, step) {
     const cycle = PLAY.mode === 'song' ? SONG.cursor.repeat : GEN4.cycleCount;
     return cycle % cond.b === cond.a - 1;
   }
-  if (cond.fill) return gen4FillState.active;
+  if (cond.fill) {
+    // Manual fill button, or the song entry's auto-fill cycle (the scheduler
+    // resolves that cycle to the cached fill pattern, so identity is the tell).
+    return gen4FillState.active || (!!SONG.cursor.fillPattern && pat === SONG.cursor.fillPattern);
+  }
   if ('pre' in cond) return GEN4.condFired[ci] === cond.pre;
   return true;
 }
@@ -7033,10 +7095,6 @@ function setGen4EditorMode(mode) {
   if (mode === 'notes' && gen4NoteCellEls.every((cells) => cells.size === 0)) {
     renderGen4NoteRoll();
   }
-  if (gen4HintsEl) {
-    gen4HintsEl.innerHTML =
-      '<span class="drum-hint"><span class="drum-hint-key">drag ↕</span> velocity</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">drag ↔</span> timing</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">shift + click</span> probability</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">right-click</span> stutter</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">⌘ + click</span> trig condition</span><span class="drum-hints-sep">·</span><span class="drum-hint"><span class="drum-hint-key">alt + click</span> param-lock step (knobs write to it, Esc deselects)</span>';
-  }
   refreshGen4NoteEditor();
   refreshGen4LockEditor();
 }
@@ -7676,7 +7734,10 @@ function buildDrumPanel() {
     '<span class="drum-hints-sep">·</span>' +
     '<span class="drum-hint"><span class="drum-hint-key">right-click</span> stutter</span>' +
     '<span class="drum-hints-sep">·</span>' +
-    '<span class="drum-hint"><span class="drum-hint-key">⌘ + click</span> trig condition</span>';
+    '<span class="drum-hint"><span class="drum-hint-key">⌘ + click</span> trig condition</span>' +
+    '<span class="drum-hints-sep">·</span>' +
+    '<span class="drum-hint" title="Knobs write to the selected step; Esc deselects">' +
+    '<span class="drum-hint-key">alt + click</span> param-lock</span>';
   panel.appendChild(hints);
   gen4HintsEl = hints;
 
@@ -8339,10 +8400,31 @@ const FX_PRESETS = {
 // edited in the FX column. All bus outputs sum into a single global master limiter.
 const FX_BUS_IDS = ['gen0', 'gen1', 'gen3', 'gen4'];
 const FX_BUS_LABELS = { gen0: 'Granular 1', gen1: 'Granular 2', gen3: 'Synth', gen4: 'Drums' };
+function makeDefaultInstrumentMixState() {
+  return {
+    muted: false,
+    solo: false,
+    gainDb: 0,
+    pan: 0,
+    eqEnabled: true,
+    eqLow: 0,
+    eqLowMid: 0,
+    eqMid: 0,
+    eqPresence: 0,
+    eqHigh: 0,
+  };
+}
 const INSTRUMENT_MIX = Object.fromEntries(
-  FX_BUS_IDS.map((busId) => [busId, { muted: false, solo: false }]),
+  FX_BUS_IDS.map((busId) => [busId, makeDefaultInstrumentMixState()]),
 );
 const instrumentMixButtons = new Map();
+const MIXER = {
+  built: false,
+  strips: new Map(),
+  master: null,
+  meterBuffers: new WeakMap(),
+  raf: null,
+};
 
 function refreshInstrumentMixUI() {
   const hasSolo = FX_BUS_IDS.some((busId) => INSTRUMENT_MIX[busId].solo);
@@ -8354,6 +8436,13 @@ function refreshInstrumentMixUI() {
     buttons?.mute.setAttribute('aria-pressed', mix.muted ? 'true' : 'false');
     buttons?.solo.setAttribute('aria-pressed', mix.solo ? 'true' : 'false');
 
+    const strip = MIXER.strips.get(busId);
+    strip?.mute.classList.toggle('active', mix.muted);
+    strip?.solo.classList.toggle('active', mix.solo);
+    strip?.mute.setAttribute('aria-pressed', mix.muted ? 'true' : 'false');
+    strip?.solo.setAttribute('aria-pressed', mix.solo ? 'true' : 'false');
+    strip?.el.classList.toggle('mixer-channel-silent', mix.muted || (hasSolo && !mix.solo));
+
     const panel = document.querySelector(`#generators [data-bus="${busId}"]`);
     panel?.classList.toggle('instrument-muted', mix.muted);
     panel?.classList.toggle('instrument-soloed', mix.solo);
@@ -8361,19 +8450,80 @@ function refreshInstrumentMixUI() {
   });
 }
 
+function reconnectInstrumentEq(busId) {
+  const bus = fxBuses[busId];
+  const mix = INSTRUMENT_MIX[busId];
+  if (!bus?.mixer || !mix) return;
+  bus.mixer.input.disconnect();
+  bus.mixer.high.disconnect();
+  if (mix.eqEnabled) {
+    bus.mixer.input.connect(bus.mixer.low);
+    bus.mixer.high.connect(bus.mixer.pan);
+  } else {
+    bus.mixer.input.connect(bus.mixer.pan);
+  }
+  bus.mixer.eqEnabled = mix.eqEnabled;
+}
+
 function applyInstrumentMixState() {
   const hasSolo = FX_BUS_IDS.some((busId) => INSTRUMENT_MIX[busId].solo);
   FX_BUS_IDS.forEach((busId) => {
     const mix = INSTRUMENT_MIX[busId];
     const audible = !mix.muted && (!hasSolo || mix.solo);
-    const output = fxBuses[busId]?.output;
-    if (output && audioCtx) {
+    const bus = fxBuses[busId];
+    if (bus && audioCtx) {
+      if (bus.mixer.eqEnabled !== mix.eqEnabled) reconnectInstrumentEq(busId);
       // Drop any ramp frozen by a suspended context before targeting anew.
-      output.gain.cancelScheduledValues(audioCtx.currentTime);
-      output.gain.setTargetAtTime(audible ? 1 : 0, audioCtx.currentTime, 0.01);
+      bus.output.gain.cancelScheduledValues(audioCtx.currentTime);
+      bus.output.gain.setTargetAtTime(
+        audible && mix.gainDb > -59.9 ? dbToLinear(clamp(mix.gainDb, -60, 6)) : 0,
+        audioCtx.currentTime,
+        0.01,
+      );
+      bus.mixer.pan.pan.setTargetAtTime(clamp(mix.pan, -1, 1), audioCtx.currentTime, 0.01);
+      bus.mixer.low.gain.setTargetAtTime(
+        clamp(mix.eqLow, -18, 18),
+        audioCtx.currentTime,
+        0.02,
+      );
+      bus.mixer.lowMid.gain.setTargetAtTime(
+        clamp(mix.eqLowMid, -18, 18),
+        audioCtx.currentTime,
+        0.02,
+      );
+      bus.mixer.mid.gain.setTargetAtTime(
+        clamp(mix.eqMid, -18, 18),
+        audioCtx.currentTime,
+        0.02,
+      );
+      bus.mixer.presence.gain.setTargetAtTime(
+        clamp(mix.eqPresence, -18, 18),
+        audioCtx.currentTime,
+        0.02,
+      );
+      bus.mixer.high.gain.setTargetAtTime(
+        clamp(mix.eqHigh, -18, 18),
+        audioCtx.currentTime,
+        0.02,
+      );
     }
   });
   refreshInstrumentMixUI();
+}
+
+function setInstrumentSolo(busId, solo) {
+  if (!FX_BUS_IDS.includes(busId)) return;
+  if (solo && !SOLO_MODE.additive) {
+    FX_BUS_IDS.forEach((id) => (INSTRUMENT_MIX[id].solo = false));
+  }
+  INSTRUMENT_MIX[busId].solo = solo;
+  applyInstrumentMixState();
+}
+
+function setInstrumentMuted(busId, muted) {
+  if (!FX_BUS_IDS.includes(busId)) return;
+  INSTRUMENT_MIX[busId].muted = muted;
+  applyInstrumentMixState();
 }
 
 function buildInstrumentMixControls(busId) {
@@ -8389,12 +8539,7 @@ function buildInstrumentMixControls(busId) {
   solo.setAttribute('aria-pressed', 'false');
   solo.addEventListener('click', (event) => {
     event.stopPropagation();
-    const next = !INSTRUMENT_MIX[busId].solo;
-    if (next && !SOLO_MODE.additive) {
-      FX_BUS_IDS.forEach((id) => (INSTRUMENT_MIX[id].solo = false));
-    }
-    INSTRUMENT_MIX[busId].solo = next;
-    applyInstrumentMixState();
+    setInstrumentSolo(busId, !INSTRUMENT_MIX[busId].solo);
   });
 
   const mute = document.createElement('button');
@@ -8406,13 +8551,510 @@ function buildInstrumentMixControls(busId) {
   mute.setAttribute('aria-pressed', 'false');
   mute.addEventListener('click', (event) => {
     event.stopPropagation();
-    INSTRUMENT_MIX[busId].muted = !INSTRUMENT_MIX[busId].muted;
-    applyInstrumentMixState();
+    setInstrumentMuted(busId, !INSTRUMENT_MIX[busId].muted);
   });
 
   controls.append(solo, mute);
   instrumentMixButtons.set(busId, { solo, mute });
   return controls;
+}
+
+function formatMixerDb(value) {
+  if (value <= -59.9) return '−∞';
+  return `${value > 0 ? '+' : ''}${value.toFixed(1)} dB`;
+}
+
+function formatMixerPan(value) {
+  if (Math.abs(value) < 0.01) return 'C';
+  return `${value < 0 ? 'L' : 'R'}${Math.round(Math.abs(value) * 100)}`;
+}
+
+function buildMixerKnob(busId, key, label, spec, format) {
+  const group = document.createElement('label');
+  group.className = 'mixer-knob-group';
+  const title = document.createElement('span');
+  title.className = 'mixer-control-label';
+  title.textContent = label;
+  const value = document.createElement('span');
+  value.className = 'mixer-control-value';
+
+  let current = INSTRUMENT_MIX[busId][key];
+  const commit = (next) => {
+    current = next;
+    INSTRUMENT_MIX[busId][key] = next;
+    value.textContent = format(next);
+    knob.setAttribute('aria-valuenow', `${next}`);
+    knob.setAttribute('aria-valuetext', format(next));
+    applyInstrumentMixState();
+  };
+  const knob = makeKnob({ ...spec, resetValue: spec.resetValue }, current, commit);
+  knob.setAttribute('tabindex', '0');
+  knob.setAttribute('role', 'slider');
+  knob.setAttribute('aria-label', `${FX_BUS_LABELS[busId]} ${label}`);
+  knob.setAttribute('aria-valuemin', `${spec.min}`);
+  knob.setAttribute('aria-valuemax', `${spec.max}`);
+  knob.setAttribute('aria-valuenow', `${current}`);
+  knob.setAttribute('aria-valuetext', format(current));
+  knob.addEventListener('keydown', (event) => {
+    let direction = 0;
+    if (event.key === 'ArrowUp' || event.key === 'ArrowRight') direction = 1;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowLeft') direction = -1;
+    if (!direction && event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault();
+    let next = current;
+    if (event.key === 'Home') next = spec.min;
+    else if (event.key === 'End') next = spec.max;
+    else next = clamp(current + direction * spec.step * (event.shiftKey ? 0.1 : 1), spec.min, spec.max);
+    const decimals = (spec.step.toString().split('.')[1] || '').length;
+    next = Number(next.toFixed(decimals));
+    knob.setValue(next);
+    commit(next);
+  });
+
+  value.textContent = format(current);
+  group.append(title, knob, value);
+  return {
+    el: group,
+    setValue(next) {
+      current = next;
+      knob.setValue(next);
+      value.textContent = format(next);
+      knob.setAttribute('aria-valuenow', `${next}`);
+      knob.setAttribute('aria-valuetext', format(next));
+    },
+  };
+}
+
+function buildMixerMeter() {
+  const meter = document.createElement('div');
+  meter.className = 'mixer-meter';
+  const leftTrack = document.createElement('span');
+  const rightTrack = document.createElement('span');
+  leftTrack.className = 'mixer-meter-track';
+  rightTrack.className = 'mixer-meter-track';
+  leftTrack.setAttribute('aria-hidden', 'true');
+  rightTrack.setAttribute('aria-hidden', 'true');
+  const left = document.createElement('span');
+  const right = document.createElement('span');
+  left.className = 'mixer-meter-fill';
+  right.className = 'mixer-meter-fill';
+  const leftHold = document.createElement('span');
+  const rightHold = document.createElement('span');
+  leftHold.className = 'mixer-meter-hold';
+  rightHold.className = 'mixer-meter-hold';
+  leftHold.hidden = true;
+  rightHold.hidden = true;
+  const peak = document.createElement('button');
+  peak.type = 'button';
+  peak.className = 'mixer-meter-peak';
+  peak.textContent = '−∞';
+  peak.title = 'Maximum peak · click to reset';
+  peak.setAttribute('aria-label', 'Maximum channel peak, click to reset');
+  leftTrack.append(left, leftHold);
+  rightTrack.append(right, rightHold);
+  meter.append(leftTrack, rightTrack, peak);
+  const result = {
+    el: meter,
+    left,
+    right,
+    leftHold,
+    rightHold,
+    peak,
+    holdLeftDb: -60,
+    holdRightDb: -60,
+    holdLeftUntil: 0,
+    holdRightUntil: 0,
+    lastPaintAt: 0,
+  };
+  peak.addEventListener('click', () => {
+    result.holdLeftDb = MIXER_METER_FLOOR_DB;
+    result.holdRightDb = MIXER_METER_FLOOR_DB;
+    result.holdLeftUntil = 0;
+    result.holdRightUntil = 0;
+    leftHold.hidden = true;
+    rightHold.hidden = true;
+    peak.textContent = '−∞';
+    peak.classList.remove('over-zero');
+    peak.title = 'Maximum peak · click to reset';
+  });
+  return result;
+}
+
+function buildMixerChannel(busId) {
+  const mix = INSTRUMENT_MIX[busId];
+  const strip = document.createElement('section');
+  strip.className = `mixer-channel mixer-${busId}`;
+  strip.dataset.bus = busId;
+
+  const header = document.createElement('div');
+  header.className = 'mixer-channel-header';
+  const dot = document.createElement('span');
+  dot.className = 'mixer-channel-dot';
+  const name = document.createElement('span');
+  name.className = 'mixer-channel-name';
+  name.textContent = FX_BUS_LABELS[busId];
+  header.append(dot, name);
+
+  const switches = document.createElement('div');
+  switches.className = 'mixer-channel-switches';
+  const solo = document.createElement('button');
+  solo.type = 'button';
+  solo.className = 'instrument-mix-btn instrument-solo-btn';
+  solo.textContent = 'S';
+  solo.title = `Solo ${FX_BUS_LABELS[busId]}`;
+  solo.setAttribute('aria-label', solo.title);
+  solo.addEventListener('click', () => setInstrumentSolo(busId, !mix.solo));
+  const mute = document.createElement('button');
+  mute.type = 'button';
+  mute.className = 'instrument-mix-btn instrument-mute-btn';
+  mute.textContent = 'M';
+  mute.title = `Mute ${FX_BUS_LABELS[busId]}`;
+  mute.setAttribute('aria-label', mute.title);
+  mute.addEventListener('click', () => setInstrumentMuted(busId, !mix.muted));
+  switches.append(solo, mute);
+  header.appendChild(switches);
+
+  const eq = document.createElement('div');
+  eq.className = 'mixer-eq';
+  const eqHeader = document.createElement('div');
+  eqHeader.className = 'mixer-section-header';
+  const eqLabel = document.createElement('span');
+  eqLabel.textContent = 'Channel EQ';
+  const eqToggle = document.createElement('button');
+  eqToggle.type = 'button';
+  eqToggle.className = 'mixer-eq-toggle';
+  eqToggle.textContent = 'EQ';
+  eqToggle.title = `Bypass ${FX_BUS_LABELS[busId]} channel EQ`;
+  eqToggle.setAttribute('aria-label', eqToggle.title);
+  eqToggle.addEventListener('click', () => {
+    mix.eqEnabled = !mix.eqEnabled;
+    applyInstrumentMixState();
+    refreshMixerControls();
+  });
+  eqHeader.append(eqLabel, eqToggle);
+
+  const eqControls = document.createElement('div');
+  eqControls.className = 'mixer-eq-controls';
+  const low = buildMixerKnob(
+    busId,
+    'eqLow',
+    'Low · 100',
+    { min: -18, max: 18, step: 0.5, resetValue: 0 },
+    formatMixerDb,
+  );
+  low.el.title = 'Low shelf · 100 Hz';
+  const lowMid = buildMixerKnob(
+    busId,
+    'eqLowMid',
+    'Low Mid · 300',
+    { min: -18, max: 18, step: 0.5, resetValue: 0 },
+    formatMixerDb,
+  );
+  lowMid.el.title = 'Low-mid bell · 300 Hz';
+  const mid = buildMixerKnob(
+    busId,
+    'eqMid',
+    'Mid · 1k',
+    { min: -18, max: 18, step: 0.5, resetValue: 0 },
+    formatMixerDb,
+  );
+  mid.el.title = 'Mid bell · 1 kHz';
+  const presence = buildMixerKnob(
+    busId,
+    'eqPresence',
+    'Presence · 3.5k',
+    { min: -18, max: 18, step: 0.5, resetValue: 0 },
+    formatMixerDb,
+  );
+  presence.el.title = 'Presence bell · 3.5 kHz';
+  const high = buildMixerKnob(
+    busId,
+    'eqHigh',
+    'High · 10k',
+    { min: -18, max: 18, step: 0.5, resetValue: 0 },
+    formatMixerDb,
+  );
+  high.el.title = 'High shelf · 10 kHz';
+  eqControls.append(low.el, lowMid.el, mid.el, presence.el, high.el);
+  eq.append(eqHeader, eqControls);
+
+  const lower = document.createElement('div');
+  lower.className = 'mixer-channel-lower';
+  const meter = buildMixerMeter();
+  const faderGroup = document.createElement('label');
+  faderGroup.className = 'mixer-fader-group';
+  const faderLabel = document.createElement('span');
+  faderLabel.className = 'mixer-control-label';
+  faderLabel.textContent = 'Gain';
+  const fader = document.createElement('input');
+  fader.type = 'range';
+  fader.className = 'mixer-fader';
+  fader.min = '-60';
+  fader.max = '6';
+  fader.step = '0.5';
+  fader.value = `${mix.gainDb}`;
+  fader.setAttribute('aria-label', `${FX_BUS_LABELS[busId]} gain`);
+  const faderValue = document.createElement('span');
+  faderValue.className = 'mixer-control-value';
+  faderValue.textContent = formatMixerDb(mix.gainDb);
+  fader.addEventListener('input', () => {
+    mix.gainDb = Number(fader.value);
+    faderValue.textContent = formatMixerDb(mix.gainDb);
+    applyInstrumentMixState();
+  });
+  fader.addEventListener('dblclick', () => {
+    mix.gainDb = 0;
+    fader.value = '0';
+    faderValue.textContent = formatMixerDb(0);
+    applyInstrumentMixState();
+  });
+  faderGroup.append(faderLabel, fader, faderValue);
+
+  const right = document.createElement('div');
+  right.className = 'mixer-channel-right';
+  const pan = buildMixerKnob(
+    busId,
+    'pan',
+    'Pan',
+    { min: -1, max: 1, step: 0.01, resetValue: 0 },
+    formatMixerPan,
+  );
+  const fxBtn = document.createElement('button');
+  fxBtn.type = 'button';
+  fxBtn.className = 'mixer-fx-btn';
+  fxBtn.textContent = 'Open FX';
+  fxBtn.title = `Open ${FX_BUS_LABELS[busId]} effects on the front panel`;
+  fxBtn.addEventListener('click', () => {
+    setActiveBus(busId);
+    setPanelView('front');
+  });
+  right.append(pan.el, eq, fxBtn);
+  lower.append(meter.el, faderGroup, right);
+  strip.append(header, lower);
+
+  MIXER.strips.set(busId, {
+    el: strip,
+    solo,
+    mute,
+    eq,
+    eqToggle,
+    low,
+    lowMid,
+    mid,
+    presence,
+    high,
+    pan,
+    fader,
+    faderValue,
+    meter,
+  });
+  return strip;
+}
+
+function buildMixerMasterChannel() {
+  const strip = document.createElement('section');
+  strip.className = 'mixer-channel mixer-master-channel';
+  const header = document.createElement('div');
+  header.className = 'mixer-channel-header';
+  const dot = document.createElement('span');
+  dot.className = 'mixer-channel-dot';
+  const name = document.createElement('span');
+  name.className = 'mixer-channel-name';
+  name.textContent = 'Master';
+  header.append(dot, name);
+
+  const body = document.createElement('div');
+  body.className = 'mixer-master-body';
+  const meter = buildMixerMeter();
+  meter.el.classList.add('mixer-master-meter');
+  const outputGroup = document.createElement('label');
+  outputGroup.className = 'mixer-knob-group mixer-master-output';
+  const outputLabel = document.createElement('span');
+  outputLabel.className = 'mixer-control-label';
+  outputLabel.textContent = 'Output';
+  const outputValue = document.createElement('span');
+  outputValue.className = 'mixer-control-value';
+  const commitOutput = (value) => {
+    LIMITER.output = value;
+    outputValue.textContent = formatMixerDb(20 * Math.log10(value));
+    output.setAttribute('aria-valuenow', `${value}`);
+    applyLimiter('output', value);
+    limiterControls.get('output')?.setValue(value);
+    refreshFxPresetSelection('limiter');
+  };
+  const output = makeKnob(
+    { min: 0.5, max: 1.2, step: 0.01, resetValue: 0.96 },
+    LIMITER.output,
+    commitOutput,
+  );
+  output.setAttribute('tabindex', '0');
+  output.setAttribute('role', 'slider');
+  output.setAttribute('aria-label', 'Master output');
+  output.setAttribute('aria-valuemin', '0.5');
+  output.setAttribute('aria-valuemax', '1.2');
+  output.setAttribute('aria-valuenow', `${LIMITER.output}`);
+  outputValue.textContent = formatMixerDb(20 * Math.log10(LIMITER.output));
+  outputGroup.append(outputLabel, output, outputValue);
+  const reduction = document.createElement('div');
+  reduction.className = 'mixer-limiter-reduction';
+  reduction.innerHTML = '<span>Limiter</span><strong>0.0 dB</strong>';
+  body.append(meter.el, outputGroup, reduction);
+  strip.append(header, body);
+  MIXER.master = { el: strip, meter, output, outputValue, reduction: reduction.querySelector('strong') };
+  return strip;
+}
+
+function buildMixerPanel() {
+  const panel = document.getElementById('mixerPanel');
+  if (!panel || MIXER.built) return;
+  MIXER.built = true;
+  const intro = document.createElement('div');
+  intro.className = 'mixer-heading';
+  const title = document.createElement('div');
+  title.className = 'mixer-title';
+  title.textContent = 'Mixer';
+  const note = document.createElement('div');
+  note.className = 'mixer-note';
+  note.textContent = 'Post-FX channel strips · double-click controls or click a peak value to reset';
+  intro.append(title, note);
+  const channels = document.createElement('div');
+  channels.className = 'mixer-channels';
+  FX_BUS_IDS.forEach((busId) => channels.appendChild(buildMixerChannel(busId)));
+  channels.appendChild(buildMixerMasterChannel());
+  panel.append(intro, channels);
+  refreshMixerControls();
+}
+
+function refreshMixerControls() {
+  if (!MIXER.built) return;
+  FX_BUS_IDS.forEach((busId) => {
+    const mix = INSTRUMENT_MIX[busId];
+    const strip = MIXER.strips.get(busId);
+    if (!strip) return;
+    strip.low.setValue(mix.eqLow);
+    strip.lowMid.setValue(mix.eqLowMid);
+    strip.mid.setValue(mix.eqMid);
+    strip.presence.setValue(mix.eqPresence);
+    strip.high.setValue(mix.eqHigh);
+    strip.pan.setValue(mix.pan);
+    strip.fader.value = `${mix.gainDb}`;
+    strip.faderValue.textContent = formatMixerDb(mix.gainDb);
+    strip.eqToggle.classList.toggle('active', mix.eqEnabled);
+    strip.eqToggle.setAttribute('aria-pressed', mix.eqEnabled ? 'true' : 'false');
+    strip.eq.classList.toggle('mixer-eq-bypassed', !mix.eqEnabled);
+  });
+  if (MIXER.master) {
+    MIXER.master.output.setValue(LIMITER.output);
+    MIXER.master.output.setAttribute('aria-valuenow', `${LIMITER.output}`);
+    MIXER.master.outputValue.textContent = formatMixerDb(20 * Math.log10(LIMITER.output));
+  }
+  refreshInstrumentMixUI();
+}
+
+const MIXER_METER_FLOOR_DB = -60;
+const MIXER_METER_CEILING_DB = 6;
+const MIXER_METER_HOLD_MS = 1500;
+const MIXER_METER_PEAK_FALL_DB_PER_SEC = 20;
+
+function readMixerMeterDb(analyser) {
+  if (!analyser) return MIXER_METER_FLOOR_DB;
+  let data = MIXER.meterBuffers.get(analyser);
+  if (!data || data.length !== analyser.fftSize) {
+    data = new Float32Array(analyser.fftSize);
+    MIXER.meterBuffers.set(analyser, data);
+  }
+  analyser.getFloatTimeDomainData(data);
+  let peak = 0;
+  for (let i = 0; i < data.length; i++) {
+    const sample = Math.abs(data[i]);
+    peak = Math.max(peak, sample);
+  }
+  // A peak meter needs full-scale samples to land exactly on the 0 dB
+  // reference. Values above full scale occupy the visible red +6 dB zone.
+  const level = peak;
+  return 20 * Math.log10(Math.max(level, 0.001));
+}
+
+function mixerMeterLevel(db) {
+  return clamp(
+    (db - MIXER_METER_FLOOR_DB) / (MIXER_METER_CEILING_DB - MIXER_METER_FLOOR_DB),
+    0,
+    1,
+  );
+}
+
+function updateMixerPeakHold(meter, side, currentDb, timestamp, elapsedSeconds) {
+  const dbKey = side === 'left' ? 'holdLeftDb' : 'holdRightDb';
+  const untilKey = side === 'left' ? 'holdLeftUntil' : 'holdRightUntil';
+  if (currentDb >= meter[dbKey]) {
+    meter[dbKey] = currentDb;
+    meter[untilKey] = timestamp + MIXER_METER_HOLD_MS;
+  } else if (timestamp > meter[untilKey]) {
+    meter[dbKey] = Math.max(
+      currentDb,
+      meter[dbKey] - MIXER_METER_PEAK_FALL_DB_PER_SEC * elapsedSeconds,
+    );
+  }
+}
+
+function paintMixerMeter(meter, nodes, timestamp) {
+  const leftDb = readMixerMeterDb(nodes?.left);
+  const rightDb = readMixerMeterDb(nodes?.right);
+  const left = mixerMeterLevel(leftDb);
+  const right = mixerMeterLevel(rightDb);
+  meter.left.style.clipPath = `inset(${(1 - left) * 100}% 0 0)`;
+  meter.right.style.clipPath = `inset(${(1 - right) * 100}% 0 0)`;
+  const elapsedSeconds = meter.lastPaintAt ? Math.max(0, (timestamp - meter.lastPaintAt) / 1000) : 0;
+  meter.lastPaintAt = timestamp;
+  updateMixerPeakHold(meter, 'left', leftDb, timestamp, elapsedSeconds);
+  updateMixerPeakHold(meter, 'right', rightDb, timestamp, elapsedSeconds);
+
+  [
+    [meter.leftHold, meter.holdLeftDb],
+    [meter.rightHold, meter.holdRightDb],
+  ].forEach(([marker, db]) => {
+    marker.hidden = db <= MIXER_METER_FLOOR_DB;
+    marker.style.bottom = `${Math.min(99.4, mixerMeterLevel(db) * 100)}%`;
+    marker.classList.toggle('over-zero', db >= 0);
+  });
+
+  const heldPeakDb = Math.max(meter.holdLeftDb, meter.holdRightDb);
+  if (heldPeakDb <= MIXER_METER_FLOOR_DB) {
+    meter.peak.textContent = '−∞';
+    meter.peak.classList.remove('over-zero');
+    meter.peak.title = 'Maximum peak · click to reset';
+    return;
+  }
+  const label = `${heldPeakDb >= 0 ? '+' : ''}${heldPeakDb.toFixed(1)}`;
+  meter.peak.textContent = label;
+  meter.peak.classList.toggle('over-zero', heldPeakDb >= 0);
+  meter.peak.title = `Held peak ${label} dBFS · click to reset`;
+}
+
+function mixerMeterFrame(timestamp) {
+  if (UI_VIEW.mode !== 'mixer') {
+    MIXER.raf = null;
+    return;
+  }
+  FX_BUS_IDS.forEach((busId) => {
+    const strip = MIXER.strips.get(busId);
+    if (strip) paintMixerMeter(strip.meter, fxBuses[busId]?.mixer?.meter, timestamp);
+  });
+  if (MIXER.master) {
+    paintMixerMeter(MIXER.master.meter, master?.meter, timestamp);
+    const amount = Math.abs(master?.limiter?.comp?.reduction || 0);
+    MIXER.master.reduction.textContent = `${amount.toFixed(1)} dB`;
+  }
+  MIXER.raf = requestAnimationFrame(mixerMeterFrame);
+}
+
+function startMixerMeters() {
+  if (!MIXER.raf) MIXER.raf = requestAnimationFrame(mixerMeterFrame);
+}
+
+function stopMixerMeters() {
+  if (MIXER.raf) cancelAnimationFrame(MIXER.raf);
+  MIXER.raf = null;
 }
 
 // Default per-bus effect state (the limiter is global, not per-bus).
@@ -8641,13 +9283,15 @@ const STEP_SEQ = {
   steps: Array.from({ length: 16 }, () => 0),
   subdivision: 16,
   stepBeats: 0.25,
+  sharedAcrossLoops: false,
   currentStep: 0,
   currentValue: 0,
   elapsed: 0,
 };
 let seqBars = [];
-const seqSubdivisionButtons = new Map();
-const seqStepBeatButtons = new Map();
+let seqSubdivisionSelect = null;
+let seqStepBeatSelect = null;
+let seqShareButton = null;
 // lfoMappings: 'genIdx:paramKey' → { genIdx, key, sourceIdx }
 const lfoMappings = new Map();
 let lfoLastTs = 0,
@@ -8694,12 +9338,16 @@ function refreshSequencerUI() {
     bar.classList.toggle('active', idx === STEP_SEQ.currentStep);
     bar.classList.toggle('inactive', idx >= getSeqActiveStepCount());
   });
-  seqSubdivisionButtons.forEach((btn, subdivision) => {
-    btn.classList.toggle('active', STEP_SEQ.subdivision === subdivision);
-  });
-  seqStepBeatButtons.forEach((btn, stepBeats) => {
-    btn.classList.toggle('active', Math.abs(STEP_SEQ.stepBeats - stepBeats) < 1e-6);
-  });
+  if (seqSubdivisionSelect) seqSubdivisionSelect.value = `${STEP_SEQ.subdivision}`;
+  if (seqStepBeatSelect) seqStepBeatSelect.value = `${STEP_SEQ.stepBeats}`;
+  if (seqShareButton) {
+    seqShareButton.classList.toggle('active', STEP_SEQ.sharedAcrossLoops);
+    seqShareButton.setAttribute('aria-pressed', STEP_SEQ.sharedAcrossLoops ? 'true' : 'false');
+    seqShareButton.textContent = STEP_SEQ.sharedAcrossLoops ? 'Shared' : 'Share';
+    seqShareButton.title = STEP_SEQ.sharedAcrossLoops
+      ? 'Shared across every loop and Song mode · click for per-loop sequences'
+      : 'Use the current sequence across every loop and Song mode';
+  }
 }
 
 function setSequencerStep(stepIdx, value) {
@@ -8718,12 +9366,54 @@ function clearSequencerSteps() {
   applyMappedModulationTargets();
 }
 
+function shareSequencerAcrossLoops(source) {
+  if (!source) return;
+  LOOPS.list.forEach((loop) => {
+    loop.seq.steps = source.steps;
+    loop.seq.subdivision = source.subdivision;
+    loop.seq.stepBeats = source.stepBeats;
+  });
+  STEP_SEQ.steps = source.steps;
+  STEP_SEQ.subdivision = source.subdivision;
+  STEP_SEQ.stepBeats = source.stepBeats;
+}
+
+function setSequencerSharedAcrossLoops(on, { announce = true } = {}) {
+  const next = Boolean(on);
+  if (next === STEP_SEQ.sharedAcrossLoops) {
+    refreshSequencerUI();
+    return;
+  }
+  const editLoop = getEditLoop();
+  if (next) {
+    STEP_SEQ.sharedAcrossLoops = true;
+    shareSequencerAcrossLoops(editLoop?.seq);
+  } else {
+    // Shared mode aliases one steps array. Clone it for every loop when
+    // leaving so subsequent edits are independent again.
+    LOOPS.list.forEach((loop) => {
+      loop.seq.steps = [...loop.seq.steps];
+    });
+    STEP_SEQ.sharedAcrossLoops = false;
+    if (editLoop) STEP_SEQ.steps = editLoop.seq.steps;
+  }
+  STEP_SEQ.currentStep = Math.min(STEP_SEQ.currentStep, getSeqActiveStepCount() - 1);
+  STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
+  refreshSequencerUI();
+  refreshBackPanelState();
+  applyMappedModulationTargets();
+  if (announce) {
+    setStatus(next ? 'sequence shared across all loops' : 'sequence is now per loop');
+  }
+}
+
 // ─── Loops & Song Arrangement ─────────────────────────────────────────────
 //
 // The instrument rack (generator/kit/FX/LFO settings, routings) is global and
 // always live. What is *sequenced* — the drum grid, the chord the OSC row
-// fires, and the mod-sequencer pattern — lives in a Loop. Song mode arranges
-// loops on a timeline of entries (loop × repeats).
+// fires, and normally the mod-sequencer pattern — lives in a Loop. Seq 1 can
+// optionally alias its pattern across every loop. Song mode arranges loops on
+// a timeline of entries (loop × repeats).
 //
 // The edited loop's pattern arrays are bound by reference into GEN4.channels /
 // GEN3.lockedMidis / STEP_SEQ, so all existing editing UI mutates the loop
@@ -8739,19 +9429,35 @@ const LOOPS = {
 };
 
 const SONG = {
-  entries: [], // [{ id, loopId, repeats }]
+  entries: [], // [{ id, loopId, repeats, prob, cond, variation, fill, jump }]
   loop: true, // cycle the arrangement when it reaches the end
   follow: true, // while a song plays, show the loop that is sounding
-  cursor: { entryIdx: 0, repeat: 0 }, // scheduler position (runs ahead of audio)
+  // Scheduler position (runs ahead of audio). variation is the pattern pick
+  // resolved for this visit (-1 = the loop's own); fillPattern caches the
+  // auto-fill generated for the entry's final cycle; jump is the destination
+  // entry id decided when the entry started (null = continue linear).
+  cursor: { entryIdx: 0, repeat: 0, variation: -1, fillPattern: null, jump: null },
   audibleEntryIdx: -1, // entry actually sounding right now
   entryCounter: 0,
+  runtime: new Map(), // entry id → { visits, jumpsTaken }, playback counters
+  lastJump: null, // { from, to } entry ids of the latest jump taken (lane viz)
 };
 
 const SONG_REPEAT_CYCLE = [1, 2, 4, 8, 16];
+// Song-level play conditions, counted per visit to the entry — same idea as
+// step trig conditions, one level up: 1:2 plays the 1st of every 2 visits.
+const SONG_CONDITIONS = [
+  { id: 'always', label: '—' },
+  { id: '1:2', label: '1:2', a: 1, b: 2 },
+  { id: '2:2', label: '2:2', a: 2, b: 2 },
+  { id: '1:4', label: '1:4', a: 1, b: 4 },
+  { id: '4:4', label: '4:4', a: 4, b: 4 },
+];
+const SONG_JUMP_COUNTS = [0, 1, 2, 4, 8]; // 0 = unlimited
 const songBlockEls = new Map(); // entry id → block element
 let songPlayBtnEl = null;
 let songAddBtnEl = null;
-let songPlayheadRendered = { entryIdx: -2, repeat: -2 };
+let songPlayheadRendered = { entryIdx: -2, repeat: -2, cursorIdx: -2 };
 
 function createGen4PatternData(stepCount = 16) {
   return {
@@ -8873,21 +9579,103 @@ function ensureGen4Variations(loop) {
   };
 }
 
+// Move a note to the next in-scale pitch in the given direction; stays put if
+// none within a tritone or the note range.
+function gen4NudgeNoteInScale(midi, dir) {
+  for (let d = 1; d <= 6; d++) {
+    const cand = midi + dir * d;
+    if (cand < GEN4_NOTE_MIN || cand > GEN4_NOTE_MAX) break;
+    if (isMidiInGen4Scale(cand)) return cand;
+  }
+  return midi;
+}
+
+// Variations vary step parameters except timing and stutter — microtime feel
+// and ratchet subdivisions read as tempo changes, so B/C keep them verbatim.
 function generateGen4Variation(source, intensity = 1) {
   const pattern = cloneGen4Pattern(source);
-  pattern.channels.forEach((channel) => {
+  pattern.channels.forEach((channel, ci) => {
+    const def = GEN4_DEFS[ci];
+    const laneInUse = channel.steps.slice(0, pattern.stepCount).some(Boolean);
     for (let si = 0; si < pattern.stepCount; si++) {
-      if (!channel.steps[si]) continue;
+      if (!channel.steps[si]) {
+        // Sparse added hits on lanes already in the groove; kick and osc keep
+        // their programmed skeleton.
+        if (
+          laneInUse &&
+          def.id !== 'kick' &&
+          def.id !== 'osc' &&
+          Math.random() < 0.05 * intensity
+        ) {
+          channel.steps[si] = true;
+          channel.notes[si] = gen4FillNoteFor(channel, si, pattern.stepCount);
+          channel.velocity[si] = clamp(0.5 + Math.random() * 0.35, 0.05, 1);
+          channel.probability[si] = 1;
+          channel.condition[si] = 0;
+          // Full reset: a step toggled off in the past keeps its old timing,
+          // stutter, and locks in the arrays — a generated hit must not
+          // resurrect them.
+          channel.timing[si] = 0;
+          channel.stutter[si] = 1;
+          channel.locks[si] = {};
+        }
+        continue;
+      }
+      // Rarely drop a hit so B/C breathe differently; the kick skeleton and
+      // the downbeat stay.
+      if (
+        def.id !== 'kick' &&
+        def.id !== 'osc' &&
+        si !== 0 &&
+        Math.random() < 0.05 * intensity
+      ) {
+        channel.steps[si] = false;
+        continue;
+      }
       channel.velocity[si] = clamp(
         channel.velocity[si] * (0.82 + Math.random() * 0.26),
         0.05,
         1,
       );
+      if (Number.isFinite(channel.notes[si]) && Math.random() < 0.14 * intensity) {
+        channel.notes[si] = gen4NudgeNoteInScale(
+          channel.notes[si],
+          Math.random() < 0.5 ? -1 : 1,
+        );
+      }
       if (Math.random() < 0.12 * intensity) channel.probability[si] = intensity > 1 ? 0.5 : 0.75;
-      if (Math.random() < 0.08 * intensity) channel.stutter[si] = intensity > 1 ? 3 : 2;
+      // Nudge existing param locks within their bounds for timbral movement.
+      const lockDefs = def.id === 'osc' ? GEN3_PARAM_DEFS : def.paramDefs;
+      Object.keys(channel.locks[si]).forEach((key) => {
+        if (key === '_fxSend') return;
+        const pd = lockDefs.find((p) => p.key === key);
+        if (!pd || Math.random() >= 0.3 * intensity) return;
+        const span = (pd.max - pd.min) * 0.08;
+        const nudged = channel.locks[si][key] + (Math.random() * 2 - 1) * span;
+        channel.locks[si][key] = clamp(
+          Math.round(nudged / pd.step) * pd.step,
+          pd.min,
+          pd.max,
+        );
+      });
     }
   });
   return pattern;
+}
+
+// Nearest programmed note on the lane (searching backward first, wrapping),
+// snapped to the shared scale, so added fill hits stay in key. A lane played
+// without notes returns null and the hit uses the knob pitch as usual.
+function gen4FillNoteFor(channel, si, stepCount) {
+  for (let d = 1; d <= stepCount; d++) {
+    for (const idx of [si - d, si + d]) {
+      const wrapped = ((idx % stepCount) + stepCount) % stepCount;
+      if (channel.steps[wrapped] && Number.isFinite(channel.notes[wrapped])) {
+        return clamp(snapMidiToGen4Scale(channel.notes[wrapped]), GEN4_NOTE_MIN, GEN4_NOTE_MAX);
+      }
+    }
+  }
+  return null;
 }
 
 function generateGen4Fill(source) {
@@ -8896,12 +9684,27 @@ function generateGen4Fill(source) {
   pattern.channels.forEach((channel, ci) => {
     const id = GEN4_DEFS[ci].id;
     if (id === 'kick' || id === 'osc') return;
+    // Only lanes the pattern already uses join the fill — a silent lane firing
+    // at its raw knob defaults reads as noise from outside the groove.
+    if (!channel.steps.slice(0, pattern.stepCount).some(Boolean)) return;
     for (let si = start; si < pattern.stepCount; si++) {
-      if (!channel.steps[si] && Math.random() < 0.62) channel.steps[si] = true;
-      if (!channel.steps[si]) continue;
-      channel.velocity[si] = clamp(0.55 + Math.random() * 0.4, 0.05, 1);
-      channel.timing[si] = Math.floor(Math.random() * 3) - 1;
+      // Programmed steps keep their velocity, timing, and feel untouched.
+      if (channel.steps[si]) continue;
+      // Density and velocity ramp toward the turnaround so it reads as a
+      // build rather than a flat burst.
+      const progress = (si - start + 1) / (pattern.stepCount - start);
+      if (Math.random() >= 0.2 + progress * 0.55) continue;
+      channel.steps[si] = true;
+      channel.notes[si] = gen4FillNoteFor(channel, si, pattern.stepCount);
+      channel.velocity[si] = clamp(0.45 + progress * 0.3 + Math.random() * 0.2, 0.05, 1);
       channel.probability[si] = 1;
+      channel.condition[si] = 0;
+      // Full reset: generated hits never inherit stale timing, stutter, or
+      // locks left behind by a step that was toggled off — and timing is
+      // never randomized by design.
+      channel.timing[si] = 0;
+      channel.stutter[si] = 1;
+      channel.locks[si] = {};
       if (si >= pattern.stepCount - 2 && Math.random() < 0.55) {
         channel.stutter[si] = 2 + Math.floor(Math.random() * 3);
       }
@@ -9119,9 +9922,42 @@ function toggleGen4Fill() {
   refreshGen4VariationUI();
 }
 
+// The variation a song entry asked for, generated on demand. null → the
+// loop's live arrays (what the scheduler reads anyway).
+function songVariationPattern(loop, v) {
+  if (v == null || v < 0 || !loop?.gen4) return null;
+  ensureGen4Variations(loop);
+  if (v === loop.gen4.activeVariation) return null;
+  if (!loop.gen4.variations[v]) {
+    loop.gen4.variations[v] = generateGen4Variation(
+      loop.gen4.variations[0],
+      v === 1 ? 1 : 1.8,
+    );
+  }
+  return loop.gen4.variations[v];
+}
+
 function getGen4PlaybackPattern(loop) {
   if (gen4FillState.active && gen4FillState.loopId === loop?.id && gen4FillState.pattern) {
     return gen4FillState.pattern;
+  }
+  if (PLAY.mode === 'song' && GEN4.playing) {
+    const entry = SONG.entries[SONG.cursor.entryIdx];
+    if (entry && entry.loopId === loop?.id) {
+      const base = songVariationPattern(loop, SONG.cursor.variation) || loop.gen4;
+      if (entry.fill && SONG.cursor.repeat >= Math.max(1, entry.repeats) - 1) {
+        // Transition-aware: the fill announces a change. When the song stays
+        // on the same loop (self-jump, or a neighbouring block of the same
+        // loop), the last cycle plays straight. Song ending counts as change.
+        const nextIdx = songExpectedNextIdx();
+        const changes = nextIdx < 0 || SONG.entries[nextIdx]?.loopId !== entry.loopId;
+        if (changes) {
+          if (!SONG.cursor.fillPattern) SONG.cursor.fillPattern = generateGen4Fill(base);
+          return SONG.cursor.fillPattern;
+        }
+      }
+      return base;
+    }
   }
   return loop?.gen4;
 }
@@ -9303,6 +10139,7 @@ function addLoop({ duplicate = false } = {}) {
     loop = createLoopData(nextLoopName());
   }
   LOOPS.list.push(loop);
+  if (STEP_SEQ.sharedAcrossLoops && src) shareSequencerAcrossLoops(src.seq);
   selectEditLoop(LOOPS.list.length - 1);
   setStatus(
     duplicate && src ? `duplicated "${src.name}" into "${loop.name}"` : `added loop "${loop.name}"`,
@@ -9324,6 +10161,11 @@ async function deleteLoop(index) {
   if (!(await appConfirm(msg, { confirmLabel: 'Delete', danger: true }))) return;
   LOOPS.list.splice(index, 1);
   SONG.entries = SONG.entries.filter((e) => e.loopId !== loop.id);
+  // Jumps aimed at removed entries fall back to linear flow.
+  const songEntryIds = new Set(SONG.entries.map((e) => e.id));
+  SONG.entries.forEach((e) => {
+    if (e.jump && !songEntryIds.has(e.jump.targetId)) e.jump = null;
+  });
   if (index < LOOPS.editIndex) LOOPS.editIndex -= 1;
   LOOPS.editIndex = clamp(LOOPS.editIndex, 0, LOOPS.list.length - 1);
   bindEditLoop();
@@ -9344,23 +10186,115 @@ async function deleteLoop(index) {
 
 // ── Song cursor / playback ──
 
+function songRuntime(entryId) {
+  let rt = SONG.runtime.get(entryId);
+  if (!rt) {
+    rt = { visits: 0, jumpsTaken: 0 };
+    SONG.runtime.set(entryId, rt);
+  }
+  return rt;
+}
+
+// Resolve the pattern-variation pick for this visit, clear the per-visit
+// fill cache, and roll the entry's jump dice up front. Deciding the jump at
+// entry (not at the end) lets the auto-fill react to where the song is headed
+// and lets the lane preview the destination a full block early. All dice roll
+// here, in the scheduler, so audio and display can never disagree.
+function songEnterEntry(entry) {
+  const rt = songRuntime(entry.id);
+  let v = -1;
+  if (entry.variation === 'rnd') v = Math.floor(Math.random() * 3);
+  else if (entry.variation === 'cycle') v = (rt.visits - 1) % 3;
+  else if (Number.isInteger(entry.variation) && entry.variation >= 0) v = entry.variation;
+  SONG.cursor.variation = clamp(v, -1, 2);
+  SONG.cursor.fillPattern = null;
+  SONG.cursor.jump = null;
+  const jump = entry.jump;
+  if (jump?.targetId && SONG.entries.some((e) => e.id === jump.targetId)) {
+    let cap = Math.max(0, Math.round(jump.count || 0)); // 0 = unlimited
+    // A bounce must terminate — unlimited jumps render as 4 takes.
+    if (cap === 0 && BOUNCE.active) cap = 4;
+    if ((cap === 0 || rt.jumpsTaken < cap) && Math.random() < (jump.chance ?? 1)) {
+      rt.jumpsTaken += 1;
+      SONG.cursor.jump = jump.targetId;
+    }
+  }
+}
+
+// Where the song is headed after the current entry: the decided jump target,
+// else the next block down the lane. -1 = the song ends here.
+function songExpectedNextIdx() {
+  if (SONG.cursor.jump) {
+    const t = SONG.entries.findIndex((e) => e.id === SONG.cursor.jump);
+    if (t >= 0) return t;
+  }
+  const next = SONG.cursor.entryIdx + 1;
+  if (next < SONG.entries.length) return next;
+  return SONG.loop && SONG.entries.length ? 0 : -1;
+}
+
+// Walk forward from nextIdx to the first entry whose condition and
+// probability let it play this pass, wrapping when the song loops. If a full
+// scan lands nothing, the first candidate plays anyway — a probabilistic
+// arrangement should thin out, never stall mid-set.
+function songLandOn(nextIdx) {
+  let fallback = -1;
+  for (let guard = 0; guard <= SONG.entries.length; guard++) {
+    if (nextIdx >= SONG.entries.length) {
+      if (!SONG.loop) return false;
+      nextIdx = 0;
+    }
+    const cand = SONG.entries[nextIdx];
+    if (!cand) return false;
+    if (fallback < 0) fallback = nextIdx;
+    const rt = songRuntime(cand.id);
+    rt.visits += 1;
+    const cond = SONG_CONDITIONS[cand.cond || 0];
+    const condOk = !cond?.b || (rt.visits - 1) % cond.b === cond.a - 1;
+    if (condOk && Math.random() < (cand.prob ?? 1)) {
+      SONG.cursor.entryIdx = nextIdx;
+      SONG.cursor.repeat = 0;
+      songEnterEntry(cand);
+      return true;
+    }
+    nextIdx += 1;
+  }
+  SONG.cursor.entryIdx = fallback;
+  SONG.cursor.repeat = 0;
+  songEnterEntry(SONG.entries[fallback]);
+  return true;
+}
+
 function advanceSongCursor() {
   const entry = SONG.entries[SONG.cursor.entryIdx];
   if (!entry) return false;
   SONG.cursor.repeat += 1;
-  if (SONG.cursor.repeat < Math.max(1, entry.repeats)) return true;
-  SONG.cursor.repeat = 0;
-  SONG.cursor.entryIdx += 1;
-  if (SONG.cursor.entryIdx >= SONG.entries.length) {
-    if (!SONG.loop) return false;
-    SONG.cursor.entryIdx = 0;
+  if (SONG.cursor.repeat < Math.max(1, entry.repeats)) {
+    // Re-arm so an auto-fill regenerates fresh when its cycle arrives.
+    SONG.cursor.fillPattern = null;
+    return true;
   }
-  return true;
+  // Entry finished — take the jump decided at entry, else continue linear.
+  let nextIdx = SONG.cursor.entryIdx + 1;
+  if (SONG.cursor.jump) {
+    const tIdx = SONG.entries.findIndex((e) => e.id === SONG.cursor.jump);
+    if (tIdx >= 0) {
+      SONG.lastJump = { from: entry.id, to: SONG.cursor.jump };
+      nextIdx = tIdx;
+    }
+  }
+  return songLandOn(nextIdx);
 }
 
 function resetSongPlayback() {
+  SONG.runtime.clear();
+  SONG.lastJump = null;
   SONG.cursor.entryIdx = 0;
   SONG.cursor.repeat = 0;
+  SONG.cursor.variation = -1;
+  SONG.cursor.fillPattern = null;
+  SONG.cursor.jump = null;
+  if (SONG.entries.length) songLandOn(0);
   SONG.audibleEntryIdx = -1;
   STEP_SEQ.currentStep = 0;
   STEP_SEQ.elapsed = 0;
@@ -9401,13 +10335,25 @@ function updateSongPlayhead(audible) {
 
 function renderSongPlayhead(repeat = -1) {
   const entryIdx = SONG.audibleEntryIdx;
-  if (songPlayheadRendered.entryIdx === entryIdx && songPlayheadRendered.repeat === repeat) return;
-  songPlayheadRendered = { entryIdx, repeat };
+  // The scheduler cursor runs ahead of audio. When it has already moved on,
+  // its block is what plays next; while it still matches the audible block,
+  // the destination is known anyway — jump and landing dice roll at entry.
+  const cursorIdx = GEN4.playing && PLAY.mode === 'song' ? SONG.cursor.entryIdx : -1;
+  const previewIdx =
+    cursorIdx < 0 ? -1 : cursorIdx !== entryIdx ? cursorIdx : songExpectedNextIdx();
+  if (
+    songPlayheadRendered.entryIdx === entryIdx &&
+    songPlayheadRendered.repeat === repeat &&
+    songPlayheadRendered.cursorIdx === previewIdx
+  )
+    return;
+  songPlayheadRendered = { entryIdx, repeat, cursorIdx: previewIdx };
   SONG.entries.forEach((entry, idx) => {
     const el = songBlockEls.get(entry.id);
     if (!el) return;
     const playing = idx === entryIdx;
     el.classList.toggle('playing', playing);
+    el.classList.toggle('upnext', idx === previewIdx && previewIdx !== entryIdx);
     const badge = el.querySelector('.song-block-repeats');
     if (badge) {
       badge.textContent =
@@ -9418,6 +10364,16 @@ function renderSongPlayhead(repeat = -1) {
             : '';
     }
   });
+  // Arc states: taken = the jump that just fired; armed = the current block's
+  // jump has been decided and will fire when the block ends.
+  const arcs = document.querySelector('.song-jump-arcs');
+  if (arcs) {
+    const armedFrom = SONG.cursor.jump ? SONG.entries[cursorIdx]?.id : null;
+    arcs.querySelectorAll('path[data-from]').forEach((p) => {
+      p.classList.toggle('taken', p.dataset.from === SONG.lastJump?.from);
+      p.classList.toggle('armed', p.dataset.from === armedFrom);
+    });
+  }
 }
 
 function isTransportOn() {
@@ -9915,7 +10871,16 @@ function insertSongEntry(loopId, beforeEntryId = null) {
   do {
     SONG.entryCounter += 1;
   } while (SONG.entries.some((e) => e.id === `entry-${SONG.entryCounter}`));
-  const entry = { id: `entry-${SONG.entryCounter}`, loopId, repeats: 1 };
+  const entry = {
+    id: `entry-${SONG.entryCounter}`,
+    loopId,
+    repeats: 1,
+    prob: 1, // chance this entry plays on a given pass (else skipped)
+    cond: 0, // index into SONG_CONDITIONS, counted per visit
+    variation: -1, // -1 inherit · 0/1/2 A/B/C · 'rnd' · 'cycle'
+    fill: false, // auto-fill the entry's final cycle
+    jump: null, // { targetId, chance, count } — taken after the entry ends
+  };
   const idx = beforeEntryId ? SONG.entries.findIndex((e) => e.id === beforeEntryId) : -1;
   if (idx >= 0) {
     SONG.entries.splice(idx, 0, entry);
@@ -9932,6 +10897,9 @@ function removeSongEntry(entryId) {
   const idx = SONG.entries.findIndex((e) => e.id === entryId);
   if (idx < 0) return;
   SONG.entries.splice(idx, 1);
+  SONG.entries.forEach((e) => {
+    if (e.jump?.targetId === entryId) e.jump = null;
+  });
   if (GEN4.playing && PLAY.mode === 'song') {
     if (SONG.entries.length === 0) stopGen4Sequencer();
     else if (idx < SONG.cursor.entryIdx) SONG.cursor.entryIdx -= 1;
@@ -10012,6 +10980,168 @@ function openSongBlockMenu(entryId, x, y) {
   });
   customRow.append(customLabel, customInput);
   menu.appendChild(customRow);
+
+  const sect = (text) => {
+    const t = document.createElement('div');
+    t.className = 'song-block-menu-title';
+    t.textContent = text;
+    return t;
+  };
+
+  // Probability — chance this entry plays on a given pass (else it skips).
+  const probRow = document.createElement('div');
+  probRow.className = 'song-block-menu-custom';
+  const probLabel = document.createElement('span');
+  const probText = () => `prob ${Math.round((entry.prob ?? 1) * 100)}%`;
+  probLabel.textContent = probText();
+  const probInput = document.createElement('input');
+  probInput.type = 'range';
+  probInput.min = '5';
+  probInput.max = '100';
+  probInput.step = '5';
+  probInput.value = String(Math.round((entry.prob ?? 1) * 100));
+  probInput.addEventListener('input', () => {
+    entry.prob = Number(probInput.value) / 100;
+    probLabel.textContent = probText();
+    renderSongLane();
+  });
+  probRow.append(probLabel, probInput);
+  menu.appendChild(probRow);
+
+  // Play condition, counted per visit (1:2 = 1st of every 2 visits).
+  const condRow = document.createElement('div');
+  condRow.className = 'song-block-menu-presets';
+  const condBtns = SONG_CONDITIONS.map((c, idx) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'song-block-menu-preset' + ((entry.cond || 0) === idx ? ' active' : '');
+    b.textContent = c.label;
+    b.title = idx === 0 ? 'Always plays' : `Plays visit ${c.a} of every ${c.b}`;
+    b.addEventListener('click', () => {
+      entry.cond = idx;
+      condBtns.forEach((x, i) => x.classList.toggle('active', i === idx));
+      renderSongLane();
+    });
+    condRow.appendChild(b);
+    return b;
+  });
+  menu.appendChild(condRow);
+
+  // Which pattern variation this entry plays.
+  const varRow = document.createElement('div');
+  varRow.className = 'song-block-menu-presets';
+  const varDefs = [
+    { v: -1, label: '·', title: "Loop's own variation" },
+    { v: 0, label: 'A', title: 'Variation A' },
+    { v: 1, label: 'B', title: 'Variation B' },
+    { v: 2, label: 'C', title: 'Variation C' },
+    { v: 'rnd', label: '?', title: 'Random variation each visit' },
+    { v: 'cycle', label: '↻', title: 'Cycle A→B→C across visits' },
+  ];
+  const varBtns = varDefs.map((d) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className =
+      'song-block-menu-preset' + ((entry.variation ?? -1) === d.v ? ' active' : '');
+    b.textContent = d.label;
+    b.title = d.title;
+    b.addEventListener('click', () => {
+      entry.variation = d.v;
+      varBtns.forEach((x, i) => x.classList.toggle('active', varDefs[i].v === d.v));
+      renderSongLane();
+    });
+    varRow.appendChild(b);
+    return b;
+  });
+  menu.appendChild(varRow);
+
+  const fillBtn = document.createElement('button');
+  fillBtn.type = 'button';
+  fillBtn.className = 'song-block-menu-preset' + (entry.fill ? ' active' : '');
+  fillBtn.textContent = 'fill last cycle';
+  fillBtn.title = 'Auto-generate a drum fill on the final cycle of this entry';
+  fillBtn.addEventListener('click', () => {
+    entry.fill = !entry.fill;
+    fillBtn.classList.toggle('active', entry.fill);
+    renderSongLane();
+  });
+  menu.appendChild(fillBtn);
+
+  // Jump: after this entry ends, go to another block (with odds and a cap)
+  // instead of the next one.
+  menu.appendChild(sect('jump after'));
+  const jumpRow = document.createElement('div');
+  jumpRow.className = 'song-block-menu-custom';
+  const jumpLabel = document.createElement('span');
+  jumpLabel.textContent = 'to';
+  const jumpSel = document.createElement('select');
+  jumpSel.appendChild(new Option('off', ''));
+  SONG.entries.forEach((e, i) => {
+    jumpSel.appendChild(new Option(`${i + 1} · ${getLoopById(e.loopId)?.name ?? '?'}`, e.id));
+  });
+  jumpSel.value = entry.jump?.targetId ?? '';
+  jumpRow.append(jumpLabel, jumpSel);
+  menu.appendChild(jumpRow);
+
+  const jumpChanceRow = document.createElement('div');
+  jumpChanceRow.className = 'song-block-menu-custom';
+  const jumpChanceLabel = document.createElement('span');
+  const jumpChanceText = () => `chance ${Math.round((entry.jump?.chance ?? 1) * 100)}%`;
+  jumpChanceLabel.textContent = jumpChanceText();
+  const jumpChanceInput = document.createElement('input');
+  jumpChanceInput.type = 'range';
+  jumpChanceInput.min = '5';
+  jumpChanceInput.max = '100';
+  jumpChanceInput.step = '5';
+  jumpChanceInput.value = String(Math.round((entry.jump?.chance ?? 1) * 100));
+  jumpChanceInput.addEventListener('input', () => {
+    if (!entry.jump) return;
+    entry.jump.chance = Number(jumpChanceInput.value) / 100;
+    jumpChanceLabel.textContent = jumpChanceText();
+    renderSongLane();
+  });
+  jumpChanceRow.append(jumpChanceLabel, jumpChanceInput);
+  menu.appendChild(jumpChanceRow);
+
+  const jumpCountRow = document.createElement('div');
+  jumpCountRow.className = 'song-block-menu-presets';
+  const jumpCountBtns = SONG_JUMP_COUNTS.map((n) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className =
+      'song-block-menu-preset' + ((entry.jump?.count ?? 0) === n ? ' active' : '');
+    b.textContent = n === 0 ? '∞' : `×${n}`;
+    b.title = n === 0 ? 'Jump every time the odds land' : `Take this jump at most ${n} time${n > 1 ? 's' : ''} per playback`;
+    b.addEventListener('click', () => {
+      if (!entry.jump) return;
+      entry.jump.count = n;
+      jumpCountBtns.forEach((x, i) => x.classList.toggle('active', SONG_JUMP_COUNTS[i] === n));
+      renderSongLane();
+    });
+    jumpCountRow.appendChild(b);
+    return b;
+  });
+  menu.appendChild(jumpCountRow);
+
+  const refreshJumpDisabled = () => {
+    const off = !entry.jump;
+    jumpChanceInput.disabled = off;
+    jumpCountBtns.forEach((b) => (b.disabled = off));
+  };
+  jumpSel.addEventListener('change', () => {
+    if (!jumpSel.value) entry.jump = null;
+    else {
+      entry.jump = {
+        targetId: jumpSel.value,
+        chance: entry.jump?.chance ?? 1,
+        count: entry.jump?.count ?? 0,
+      };
+    }
+    refreshJumpDisabled();
+    renderSongLane();
+  });
+  jumpSel.addEventListener('keydown', (e) => e.stopPropagation());
+  refreshJumpDisabled();
 
   const removeBtn = document.createElement('button');
   removeBtn.type = 'button';
@@ -10220,11 +11350,51 @@ function getSongDragAfterElement(container, x) {
   return closest.element;
 }
 
+// Jump arcs — one SVG overlay inside the blocks strip, redrawn only when the
+// lane re-renders (never per frame). Coordinates are offsets inside the
+// scrolled content, so panning the strip keeps arcs glued to their blocks.
+function drawSongJumpArcs(wrap) {
+  if (!wrap || !wrap.isConnected) return;
+  wrap.querySelector('.song-jump-arcs')?.remove();
+  const jumps = SONG.entries.filter(
+    (e) => e.jump?.targetId && songBlockEls.get(e.jump.targetId) && songBlockEls.get(e.id),
+  );
+  if (!jumps.length) return;
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('class', 'song-jump-arcs');
+  const w = wrap.scrollWidth;
+  const h = wrap.clientHeight || 30;
+  svg.setAttribute('width', String(w));
+  svg.setAttribute('height', String(h));
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  jumps.forEach((e) => {
+    const fromEl = songBlockEls.get(e.id);
+    const toEl = songBlockEls.get(e.jump.targetId);
+    const x1 = fromEl.offsetLeft + fromEl.offsetWidth - 5;
+    const x2 = toEl.offsetLeft + 5;
+    const y = h - 2;
+    const lift = clamp(Math.abs(x2 - x1) * 0.18, h * 0.4, h - 3);
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', `M ${x1} ${y} Q ${(x1 + x2) / 2} ${y - lift} ${x2} ${y}`);
+    path.dataset.from = e.id;
+    if (SONG.lastJump?.from === e.id) path.classList.add('taken');
+    if ((e.jump.chance ?? 1) < 1) path.classList.add('dashed');
+    svg.appendChild(path);
+    const dot = document.createElementNS(ns, 'circle');
+    dot.setAttribute('cx', String(x2));
+    dot.setAttribute('cy', String(y));
+    dot.setAttribute('r', '2');
+    svg.appendChild(dot);
+  });
+  wrap.appendChild(svg);
+}
+
 function renderSongLane() {
   const lane = document.getElementById('songLane');
   if (!lane) return;
   songBlockEls.clear();
-  songPlayheadRendered = { entryIdx: -2, repeat: -2 };
+  songPlayheadRendered = { entryIdx: -2, repeat: -2, cursorIdx: -2 };
   lane.innerHTML = '';
 
   const addBtn = document.createElement('button');
@@ -10297,7 +11467,20 @@ function renderSongLane() {
       commitSongOrderFromDom();
     });
 
-    block.append(name, badge);
+    const mods = document.createElement('span');
+    mods.className = 'song-block-mods';
+    const chips = [];
+    if ((entry.prob ?? 1) < 1) chips.push(`${Math.round((entry.prob ?? 1) * 100)}%`);
+    if (entry.cond) chips.push(SONG_CONDITIONS[entry.cond]?.label ?? '');
+    if (entry.variation === 'rnd') chips.push('V?');
+    else if (entry.variation === 'cycle') chips.push('V↻');
+    else if (Number.isInteger(entry.variation) && entry.variation >= 0)
+      chips.push(`V${'ABC'[entry.variation]}`);
+    if (entry.fill) chips.push('FIL');
+    mods.textContent = chips.join(' ');
+    mods.hidden = chips.length === 0;
+
+    block.append(name, mods, badge);
     songBlockEls.set(entry.id, block);
     blocksWrap.appendChild(block);
   });
@@ -10358,6 +11541,8 @@ function renderSongLane() {
     blocksWrap.appendChild(hint);
   }
 
+  // Arcs need laid-out block offsets — draw once layout settles.
+  requestAnimationFrame(() => drawSongJumpArcs(blocksWrap));
   renderSongPlayhead();
 }
 
@@ -10414,6 +11599,9 @@ function lfoStep(ts) {
   if (KICK_SC.envelope > 0) {
     KICK_SC.envelope = Math.max(0, KICK_SC.envelope - dt / Math.max(0.005, KICK_SC.release));
   }
+  if (TRIG_SC.envelope > 0) {
+    TRIG_SC.envelope = Math.max(0, TRIG_SC.envelope - dt / Math.max(0.005, TRIG_SC.release));
+  }
   applyMappedModulationTargets();
   lfoAnimFrame = requestAnimationFrame(lfoStep);
 }
@@ -10445,7 +11633,11 @@ function stopLFOLoop() {
 function setSequencerSubdivision(subdivision) {
   STEP_SEQ.subdivision = clamp(Math.round(subdivision), 1, STEP_SEQ.steps.length);
   const editLoop = getEditLoop();
-  if (editLoop) editLoop.seq.subdivision = STEP_SEQ.subdivision;
+  if (STEP_SEQ.sharedAcrossLoops) {
+    LOOPS.list.forEach((loop) => (loop.seq.subdivision = STEP_SEQ.subdivision));
+  } else if (editLoop) {
+    editLoop.seq.subdivision = STEP_SEQ.subdivision;
+  }
   STEP_SEQ.currentStep = Math.min(STEP_SEQ.currentStep, getSeqActiveStepCount() - 1);
   STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
   STEP_SEQ.elapsed = 0;
@@ -10457,7 +11649,11 @@ function setSequencerSubdivision(subdivision) {
 function setSequencerStepBeats(stepBeats) {
   STEP_SEQ.stepBeats = clampSequencerStepBeats(stepBeats);
   const editLoop = getEditLoop();
-  if (editLoop) editLoop.seq.stepBeats = STEP_SEQ.stepBeats;
+  if (STEP_SEQ.sharedAcrossLoops) {
+    LOOPS.list.forEach((loop) => (loop.seq.stepBeats = STEP_SEQ.stepBeats));
+  } else if (editLoop) {
+    editLoop.seq.stepBeats = STEP_SEQ.stepBeats;
+  }
   STEP_SEQ.elapsed = 0;
   refreshSequencerUI();
   refreshBackPanelState();
@@ -10480,6 +11676,9 @@ function cycleLFOMap(genIdx, key) {
   } else if (mapping.sourceIdx === 2) {
     mapping.sourceIdx = 3;
     nextSourceIdx = 3;
+  } else if (mapping.sourceIdx === 3) {
+    mapping.sourceIdx = 4;
+    nextSourceIdx = 4;
   } else {
     lfoMappings.delete(mapKey);
     nextSourceIdx = null;
@@ -10585,6 +11784,7 @@ function getModSourceOptions() {
     { idx: 1, label: LFOS[1]?.label || 'LFO 2', ledClass: 'lfo-2' },
     { idx: 2, label: STEP_SEQ.label || 'Seq', ledClass: 'lfo-seq' },
     { idx: 3, label: 'Kick SC', ledClass: 'lfo-sc' },
+    { idx: 4, label: 'Trig SC', ledClass: 'lfo-trig' },
   ];
 }
 
@@ -10609,7 +11809,16 @@ function openModSourceMenu(target, led, x, y) {
 
     const dot = document.createElement('span');
     dot.className = 'mod-source-dot' + (opt.ledClass ? ` active ${opt.ledClass}` : '');
-    dot.textContent = opt.idx === null ? '' : opt.idx === 2 ? 'S' : opt.idx === 3 ? 'K' : `${opt.idx + 1}`;
+    dot.textContent =
+      opt.idx === null
+        ? ''
+        : opt.idx === 2
+          ? 'S'
+          : opt.idx === 3
+            ? 'K'
+            : opt.idx === 4
+              ? 'T'
+              : `${opt.idx + 1}`;
 
     const lbl = document.createElement('span');
     lbl.className = 'mod-source-label';
@@ -11175,6 +12384,143 @@ function buildBackPanel() {
     BACK_PANEL.sourceMeta.set(3, { subtitleEl, valueEl, module });
   })();
 
+  // Trig SC source module (sourceIdx = 4) — like Kick SC, but any drum lane
+  // can drive the envelope and INV flips it into a boost-on-hit gate.
+  (() => {
+    const module = document.createElement('div');
+    module.className = 'back-module back-source-module back-sc-module';
+    const titleEl = document.createElement('div');
+    titleEl.className = 'back-module-title';
+    titleEl.textContent = 'Trig SC';
+    const subtitleEl = document.createElement('div');
+    subtitleEl.className = 'back-module-subtitle';
+    subtitleEl.textContent = 'Sidechain';
+    const body = document.createElement('div');
+    body.className = 'back-source-body';
+
+    const readout = document.createElement('div');
+    readout.className = 'back-source-readout';
+    const readoutLabel = document.createElement('span');
+    readoutLabel.textContent = 'envelope';
+    const valueEl = document.createElement('span');
+    valueEl.textContent = '0.00';
+    readout.append(readoutLabel, valueEl);
+
+    const meter = document.createElement('div');
+    meter.className = 'back-source-meter';
+    const fill = document.createElement('div');
+    fill.className = 'back-source-fill src-4';
+    meter.appendChild(fill);
+
+    const srcRow = document.createElement('div');
+    srcRow.className = 'back-sc-src-row';
+    // Uniform 3-char labels — the full lane names don't fit seven abreast.
+    const TRIG_SRC_LABELS = { kick: 'KCK', snare: 'SNR', hat: 'HAT', perc: 'PRC' };
+    trigScSourceBtns.clear();
+    GEN4_DEFS.forEach((def) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'back-sc-src-btn';
+      btn.textContent = TRIG_SRC_LABELS[def.id] || def.label;
+      btn.title = `Trigger the envelope from the ${def.label} lane`;
+      btn.addEventListener('click', () => {
+        TRIG_SC.source = def.id;
+        refreshTrigScUI();
+        refreshBackPanelState();
+      });
+      trigScSourceBtns.set(def.id, btn);
+      srcRow.appendChild(btn);
+    });
+
+    const invRow = document.createElement('div');
+    invRow.className = 'back-sc-src-row';
+    trigScInvBtn = document.createElement('button');
+    trigScInvBtn.type = 'button';
+    trigScInvBtn.className = 'back-sc-src-btn back-sc-inv-btn';
+    trigScInvBtn.textContent = 'INV';
+    trigScInvBtn.title = 'Invert — each hit pushes the mapped param up instead of ducking it';
+    trigScInvBtn.addEventListener('click', () => {
+      TRIG_SC.invert = !TRIG_SC.invert;
+      refreshTrigScUI();
+      refreshBackPanelState();
+    });
+    invRow.appendChild(trigScInvBtn);
+
+    const buildTrigCtrl = (label, min, max, step, initial, unit, onChange) => {
+      const row = document.createElement('div');
+      row.className = 'back-source-readout';
+      const lbl = document.createElement('span');
+      lbl.textContent = label;
+      const valEl = document.createElement('span');
+      valEl.textContent = `${formatNumericValue(initial, 2)}${unit}`;
+      row.append(lbl, valEl);
+      const sliderRow = document.createElement('div');
+      sliderRow.className = 'back-sc-slider-row';
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.className = 'back-sc-slider';
+      slider.dataset.trigScParam = label;
+      slider.dataset.scUnit = unit;
+      slider.min = `${min}`;
+      slider.max = `${max}`;
+      slider.step = `${step}`;
+      slider.value = `${initial}`;
+      slider.addEventListener('input', () => {
+        const v = parseFloat(slider.value);
+        onChange(v);
+        valEl.textContent = `${formatNumericValue(v, 2)}${unit}`;
+      });
+      sliderRow.appendChild(slider);
+      return [row, sliderRow];
+    };
+
+    const [amtRow, amtSliderRow] = buildTrigCtrl('amount', 0, 1, 0.01, TRIG_SC.amount, '', (v) => {
+      TRIG_SC.amount = v;
+    });
+    const [relRow, relSliderRow] = buildTrigCtrl(
+      'release',
+      0.01,
+      1,
+      0.01,
+      TRIG_SC.release,
+      's',
+      (v) => {
+        TRIG_SC.release = v;
+      },
+    );
+
+    const jackRow = document.createElement('div');
+    jackRow.className = 'back-source-readout';
+    const jackLabel = document.createElement('span');
+    jackLabel.textContent = 'patch';
+    const jack = document.createElement('button');
+    jack.type = 'button';
+    jack.className = 'patch-jack source';
+    jack.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setBackPatchSelection(4);
+    });
+    jackRow.append(jackLabel, jack);
+
+    body.append(
+      readout,
+      meter,
+      srcRow,
+      invRow,
+      amtRow,
+      amtSliderRow,
+      relRow,
+      relSliderRow,
+      jackRow,
+    );
+    module.append(titleEl, subtitleEl, body);
+    sourceColumn.appendChild(module);
+    BACK_PANEL.sourceJacks.set(4, jack);
+    BACK_PANEL.sourceMeters.set(4, fill);
+    BACK_PANEL.sourceMeta.set(4, { subtitleEl, valueEl, module });
+    refreshTrigScUI();
+  })();
+
   const destGrid = document.createElement('div');
   destGrid.className = 'back-dest-grid';
   const destinationGroups = [
@@ -11303,13 +12649,13 @@ function buildBackPanel() {
     const rect = patchfield.getBoundingClientRect();
     BACK_PANEL.pointerX = event.clientX - rect.left;
     BACK_PANEL.pointerY = event.clientY - rect.top;
-    if (UI_VIEW.mode === 'back') requestAnimationFrame(renderBackPanelConnections);
+    queueBackPanelConnections();
   });
   patchfield.addEventListener('pointerleave', () => {
     if (BACK_PANEL.selectedSourceIdx === null) return;
     BACK_PANEL.pointerX = null;
     BACK_PANEL.pointerY = null;
-    if (UI_VIEW.mode === 'back') requestAnimationFrame(renderBackPanelConnections);
+    queueBackPanelConnections();
   });
   patchfield.addEventListener('click', (event) => {
     if (BACK_PANEL.selectedSourceIdx === null) return;
@@ -11441,7 +12787,17 @@ function rebuildBackWireSVG() {
   });
 }
 
+// Single-flight gate for the back-panel connection loop. Several code paths
+// want it running (view entry, pointer moves, every state refresh) — queueing
+// unconditionally stacks extra self-requeuing rAF loops, one more per frame,
+// until the main thread starves and the sequencer's lookahead is missed.
+function queueBackPanelConnections() {
+  if (UI_VIEW.mode !== 'back' || BACK_PANEL.connFrame) return;
+  BACK_PANEL.connFrame = requestAnimationFrame(renderBackPanelConnections);
+}
+
 function renderBackPanelConnections() {
+  BACK_PANEL.connFrame = null;
   if (!BACK_PANEL.built || !BACK_PANEL.routeLayer || UI_VIEW.mode !== 'back') return;
 
   // ── Update wire glow opacity (no layout reads — just CSS vars) ──
@@ -11498,7 +12854,7 @@ function renderBackPanelConnections() {
     BACK_PANEL.limiterFill.style.setProperty('--source-level', `${Math.min(1, reduction / 12)}`);
   }
 
-  if (UI_VIEW.mode === 'back') requestAnimationFrame(renderBackPanelConnections);
+  queueBackPanelConnections();
 }
 
 function refreshBackPanelState() {
@@ -11543,7 +12899,7 @@ function refreshBackPanelState() {
       const routeCount = [...lfoMappings.values()].filter(
         (mapping) => mapping.sourceIdx === 2,
       ).length;
-      meta.subtitleEl.textContent = `${getSeqActiveStepCount()} steps • ${formatSequencerStepBeats(STEP_SEQ.stepBeats)}b/step • step ${STEP_SEQ.currentStep + 1} • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
+      meta.subtitleEl.textContent = `${getSeqActiveStepCount()} steps • ${formatSequencerStepBeats(STEP_SEQ.stepBeats)}b/step${STEP_SEQ.sharedAcrossLoops ? ' • shared' : ''} • step ${STEP_SEQ.currentStep + 1} • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
       meta.valueEl.textContent = `${STEP_SEQ.currentValue >= 0 ? '+' : ''}${formatNumericValue(STEP_SEQ.currentValue, 2)}`;
       meta.module.classList.toggle('active', true);
     })();
@@ -11557,6 +12913,17 @@ function refreshBackPanelState() {
       meta.valueEl.textContent = formatNumericValue(KICK_SC.envelope, 2);
       meta.module.classList.toggle('active', KICK_SC.envelope > 0.01);
     })();
+  BACK_PANEL.sourceMeta.get(4) &&
+    (() => {
+      const meta = BACK_PANEL.sourceMeta.get(4);
+      const routeCount = [...lfoMappings.values()].filter(
+        (mapping) => mapping.sourceIdx === 4,
+      ).length;
+      const laneLabel = GEN4_DEFS.find((def) => def.id === TRIG_SC.source)?.label || '—';
+      meta.subtitleEl.textContent = `${laneLabel}${TRIG_SC.invert ? ' • inverted' : ''} • ${formatNumericValue(TRIG_SC.release, 2)}s release • ${routeCount} route${routeCount === 1 ? '' : 's'}`;
+      meta.valueEl.textContent = formatNumericValue(TRIG_SC.envelope, 2);
+      meta.module.classList.toggle('active', TRIG_SC.envelope > 0.01);
+    })();
 
   [0, 1, 2].forEach((idx) => {
     const fill = BACK_PANEL.sourceMeters.get(idx);
@@ -11569,6 +12936,11 @@ function refreshBackPanelState() {
     const fill = BACK_PANEL.sourceMeters.get(3);
     if (!fill) return;
     fill.style.setProperty('--source-level', `${KICK_SC.envelope}`);
+  })();
+  (() => {
+    const fill = BACK_PANEL.sourceMeters.get(4);
+    if (!fill) return;
+    fill.style.setProperty('--source-level', `${TRIG_SC.envelope}`);
   })();
 
   BACK_PANEL.audioModules.get('input-1') &&
@@ -11686,10 +13058,10 @@ function refreshBackPanelState() {
     BACK_PANEL.targetRows.get(`${genIdx}:${key}`)?.classList.add('mapped', `src-${sourceIdx}`);
   });
 
-  if (UI_VIEW.mode === 'back') requestAnimationFrame(renderBackPanelConnections);
+  queueBackPanelConnections();
 }
 
-// ── Mastering view ── a lazy fourth panel that polishes rendered audio
+// ── Mastering view ── a lazy panel that polishes rendered audio
 // (the song bounce or a loaded WAV). Nothing here touches the live graph:
 // the DOM is built on first entry, preview runs on its own AudioContext
 // (suspended on exit), and the final render happens in an OfflineAudioContext.
@@ -13592,12 +14964,12 @@ function buildMasteringEqSection() {
   const canvas = document.createElement('canvas');
   canvas.className = 'master-eq-canvas';
   canvas.title =
-    'Drag: ↔ frequency, ↕ gain (shift = fine) · wheel: Q · alt-click / double-click: reset band · type exact values below';
+    'Drag: ↔ frequency, ↕ gain (shift = fine) · alt-click / double-click: reset band · type exact values below';
   MASTERING.els.eqCanvas = canvas;
   box.appendChild(canvas);
 
   // Pro-Q-style band strip: colored chips select a band, the value boxes
-  // below edit it by typing (Enter commits, Esc reverts, ↑↓/wheel nudge).
+  // below edit it by typing (Enter commits, Esc reverts, ↑↓ nudge).
   const soloBtn = document.createElement('button');
   soloBtn.type = 'button';
   soloBtn.className = 'master-eq-solo';
@@ -13710,17 +15082,6 @@ function buildMasteringEqSection() {
         input.value = format(get());
       }
     });
-    input.addEventListener(
-      'wheel',
-      (e) => {
-        e.preventDefault();
-        nudge(e.deltaY < 0 ? 1 : -1, e.shiftKey);
-        bandChanged(selectedBand());
-        show();
-      },
-      { passive: false },
-    );
-
     let armed = false; // pressed, not yet decided click-vs-drag
     let dragging = false;
     let dragVal = 0; // unrounded accumulator — keeps sub-step motion smooth
@@ -13809,7 +15170,7 @@ function buildMasteringEqSection() {
     }),
     q: makeValueBox({
       label: 'Q',
-      title: 'Band Q — drag ↕, double-click to type · also: wheel over the curve display',
+      title: 'Band Q — drag ↕, double-click to type',
       get: () => p[selectedBand().qKey],
       set: (v) => {
         p[selectedBand().qKey] = clamp(Math.round(v * 100) / 100, 0.1, 12);
@@ -13939,20 +15300,6 @@ function buildMasteringEqSection() {
     canvas.style.cursor = '';
     drawMasteringEq();
   });
-  canvas.addEventListener(
-    'wheel',
-    (e) => {
-      e.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      const band =
-        bandAtPoint(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height, 24) ||
-        selectedBand();
-      const factor = Math.exp((e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 0.03 : 0.1));
-      p[band.qKey] = clamp(Math.round(p[band.qKey] * factor * 100) / 100, 0.1, 12);
-      bandChanged(band);
-    },
-    { passive: false },
-  );
   canvas.addEventListener('dblclick', (e) => {
     const rect = canvas.getBoundingClientRect();
     const band = bandAtPoint(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
@@ -14343,7 +15690,7 @@ function leaveMasteringView() {
   MASTERING.ctx?.suspend?.();
 }
 
-const PANEL_VIEWS = ['front', 'back', 'visual', 'master'];
+const PANEL_VIEWS = ['front', 'back', 'visual', 'mixer', 'master'];
 
 function setPanelView(mode) {
   UI_VIEW.mode = mode;
@@ -14356,16 +15703,16 @@ function setPanelView(mode) {
     history.replaceState(null, '', url);
   } catch (e) {}
   document.getElementById('loopStrip')?.classList.toggle('hidden-panel', mode !== 'front');
+  document.getElementById('modeToggle')?.classList.toggle('hidden-panel', mode !== 'front');
   getFrontWorkspace()?.classList.toggle('hidden-panel', mode !== 'front');
   getBackPanel()?.classList.toggle('hidden-panel', mode !== 'back');
   document.getElementById('visualPanel')?.classList.toggle('hidden-panel', mode !== 'visual');
+  document.getElementById('mixerPanel')?.classList.toggle('hidden-panel', mode !== 'mixer');
   document.getElementById('masterPanel')?.classList.toggle('hidden-panel', mode !== 'master');
   // Master view swaps the header's transport for the mastering toolbar
   // (settings gear stays) — see body.view-master CSS.
   document.body.classList.toggle('view-master', mode === 'master');
-  getViewToggle()
-    ?.querySelectorAll('.view-btn')
-    .forEach((btn) => btn.classList.toggle('active', btn.dataset.view === mode));
+  getViewButtons().forEach((btn) => btn.classList.toggle('active', btn.dataset.view === mode));
   if (mode === 'master') enterMasteringView();
   else leaveMasteringView();
   // Self-heal the audible state: entering mastering suspends the main
@@ -14376,24 +15723,30 @@ function setPanelView(mode) {
     GEN4.channels.forEach((ch, ci) => gen4SetChannelMuted(ci, ch.muted));
   }
   if (mode === 'back') {
+    if (!BACK_PANEL.built) buildBackPanel();
     refreshBackPanelState();
     rebuildBackWireSVG();
-    requestAnimationFrame(renderBackPanelConnections);
+    queueBackPanelConnections();
   }
   // Mod visuals are skipped per-frame while the front view is hidden; refresh
   // once on entry so the FX/gen controls show the current mapping state.
   if (mode === 'front') refreshModulationVisuals();
+  if (mode === 'mixer') {
+    buildMixerPanel();
+    refreshMixerControls();
+    startMixerMeters();
+  } else {
+    stopMixerMeters();
+  }
   if (mode === 'visual') startViz(); else stopViz();
 }
 
 function initViewToggle() {
-  getViewToggle()
-    ?.querySelectorAll('.view-btn')
-    .forEach((btn) => {
-      btn.addEventListener('click', () => {
-        setPanelView(btn.dataset.view);
-      });
+  getViewButtons().forEach((btn) => {
+    btn.addEventListener('click', () => {
+      setPanelView(btn.dataset.view);
     });
+  });
 }
 
 function createFxSection(label, className = '') {
@@ -14440,12 +15793,17 @@ function createFxSection(label, className = '') {
 
 function buildSequencerSection() {
   const { section, content } = createFxSection(STEP_SEQ.label, 'seq-section');
-  const subdivisionRow = document.createElement('div');
-  subdivisionRow.className = 'fx-mode-row seq-setting-row seq-subdivision-row';
+  const settingsRow = document.createElement('div');
+  settingsRow.className = 'seq-compact-row';
+
+  const subdivisionControl = document.createElement('label');
+  subdivisionControl.className = 'seq-compact-control';
   const subdivisionLabel = document.createElement('span');
   subdivisionLabel.className = 'seq-row-label';
   subdivisionLabel.textContent = 'Steps';
-  subdivisionRow.appendChild(subdivisionLabel);
+  seqSubdivisionSelect = document.createElement('select');
+  seqSubdivisionSelect.className = 'seq-compact-select';
+  seqSubdivisionSelect.title = 'Number of active sequence steps';
   [
     [4, '4'],
     [5, '5'],
@@ -14453,49 +15811,54 @@ function buildSequencerSection() {
     [12, '12'],
     [16, '16'],
   ].forEach(([subdivision, label]) => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'fx-mode-btn';
-    btn.textContent = label;
-    btn.addEventListener('click', () => {
-      setSequencerSubdivision(subdivision);
-    });
-    seqSubdivisionButtons.set(subdivision, btn);
-    subdivisionRow.appendChild(btn);
+    const option = document.createElement('option');
+    option.value = `${subdivision}`;
+    option.textContent = label;
+    seqSubdivisionSelect.appendChild(option);
   });
-  content.appendChild(subdivisionRow);
+  seqSubdivisionSelect.addEventListener('change', () => {
+    setSequencerSubdivision(Number(seqSubdivisionSelect.value));
+  });
+  subdivisionControl.append(subdivisionLabel, seqSubdivisionSelect);
 
-  const stepBeatRow = document.createElement('div');
-  stepBeatRow.className = 'fx-mode-row seq-setting-row seq-step-beat-row';
+  const stepBeatControl = document.createElement('label');
+  stepBeatControl.className = 'seq-compact-control';
   const stepBeatLabel = document.createElement('span');
   stepBeatLabel.className = 'seq-row-label';
-  stepBeatLabel.textContent = 'Beat/step';
-  stepBeatRow.appendChild(stepBeatLabel);
+  stepBeatLabel.textContent = 'Step rate';
+  seqStepBeatSelect = document.createElement('select');
+  seqStepBeatSelect.className = 'seq-compact-select';
+  seqStepBeatSelect.title = 'Beat duration of each sequence step';
   STEP_SEQ_STEP_BEAT_OPTIONS.forEach(({ label, beats }) => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'fx-mode-btn';
-    btn.textContent = label;
-    btn.title = `${label} beat${beats === 1 ? '' : 's'} per step`;
-    btn.addEventListener('click', () => {
-      setSequencerStepBeats(beats);
-    });
-    seqStepBeatButtons.set(beats, btn);
-    stepBeatRow.appendChild(btn);
+    const option = document.createElement('option');
+    option.value = `${beats}`;
+    option.textContent = `${label} beat${beats === 1 ? '' : 's'}`;
+    seqStepBeatSelect.appendChild(option);
   });
-  content.appendChild(stepBeatRow);
+  seqStepBeatSelect.addEventListener('change', () => {
+    setSequencerStepBeats(Number(seqStepBeatSelect.value));
+  });
+  stepBeatControl.append(stepBeatLabel, seqStepBeatSelect);
 
-  const actionRow = document.createElement('div');
-  actionRow.className = 'fx-mode-row seq-action-row';
   const clearBtn = document.createElement('button');
   clearBtn.type = 'button';
   clearBtn.className = 'fx-mode-btn seq-action-btn';
-  clearBtn.textContent = 'Clean';
+  clearBtn.textContent = 'Clear';
+  clearBtn.title = 'Clear every sequence step';
   clearBtn.addEventListener('click', () => {
     clearSequencerSteps();
   });
-  actionRow.appendChild(clearBtn);
-  content.appendChild(actionRow);
+  seqShareButton = document.createElement('button');
+  seqShareButton.type = 'button';
+  seqShareButton.className = 'fx-mode-btn seq-action-btn';
+  seqShareButton.textContent = 'Share';
+  seqShareButton.setAttribute('aria-pressed', 'false');
+  seqShareButton.addEventListener('click', () => {
+    setSequencerSharedAcrossLoops(!STEP_SEQ.sharedAcrossLoops);
+  });
+  settingsRow.append(subdivisionControl, stepBeatControl, clearBtn, seqShareButton);
+  content.appendChild(settingsRow);
+  refreshSequencerUI();
 
   const grid = document.createElement('div');
   grid.className = 'seq-grid';
@@ -14750,10 +16113,28 @@ function buildMaster() {
   limiter.attack.setValueAtTime(LIMITER.attack, ac.currentTime);
   limiter.release.setValueAtTime(LIMITER.release, ac.currentTime);
   const masterOut = ac.createGain();
+  const meterSplit = ac.createChannelSplitter(2);
+  const meterL = ac.createAnalyser();
+  const meterR = ac.createAnalyser();
+  const meterMerge = ac.createChannelMerger(2);
+  [meterL, meterR].forEach((analyser) => {
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.72;
+  });
   masterOut.gain.setValueAtTime(LIMITER.output, ac.currentTime);
   sum.connect(limiter);
   limiter.connect(masterOut);
-  master = { sum, limiter: { comp: limiter, output: masterOut }, output: masterOut };
+  masterOut.connect(meterSplit);
+  meterSplit.connect(meterL, 0);
+  meterSplit.connect(meterR, 1);
+  meterL.connect(meterMerge, 0, 0);
+  meterR.connect(meterMerge, 0, 1);
+  master = {
+    sum,
+    limiter: { comp: limiter, output: masterOut },
+    output: meterMerge,
+    meter: { split: meterSplit, left: meterL, right: meterR, merge: meterMerge },
+  };
   return master;
 }
 
@@ -14764,10 +16145,55 @@ function buildBusFx(busId) {
   const ac = audioCtx;
   const st = fxStates[busId];
 
-  // Stable entry/exit gains: the generator connects to `input` once, `output`
-  // sums into master; the movable effects between them are wired by reconnect.
+  // Stable entry/exit nodes: the generator connects to `input` once, movable
+  // effects end at `mixerIn`, then channel EQ → pan → gain feeds the master.
   const chainIn = ac.createGain();
+  const mixerIn = ac.createGain();
+  const mixLow = ac.createBiquadFilter();
+  mixLow.type = 'lowshelf';
+  mixLow.frequency.setValueAtTime(100, ac.currentTime);
+  const mixLowMid = ac.createBiquadFilter();
+  mixLowMid.type = 'peaking';
+  mixLowMid.frequency.setValueAtTime(300, ac.currentTime);
+  mixLowMid.Q.setValueAtTime(0.8, ac.currentTime);
+  const mixMid = ac.createBiquadFilter();
+  mixMid.type = 'peaking';
+  mixMid.frequency.setValueAtTime(1000, ac.currentTime);
+  mixMid.Q.setValueAtTime(0.8, ac.currentTime);
+  const mixPresence = ac.createBiquadFilter();
+  mixPresence.type = 'peaking';
+  mixPresence.frequency.setValueAtTime(3500, ac.currentTime);
+  mixPresence.Q.setValueAtTime(0.8, ac.currentTime);
+  const mixHigh = ac.createBiquadFilter();
+  mixHigh.type = 'highshelf';
+  mixHigh.frequency.setValueAtTime(10000, ac.currentTime);
+  const mixPan = ac.createStereoPanner();
   const busOut = ac.createGain();
+  const meterSplit = ac.createChannelSplitter(2);
+  const meterL = ac.createAnalyser();
+  const meterR = ac.createAnalyser();
+  const meterMerge = ac.createChannelMerger(2);
+  [meterL, meterR].forEach((analyser) => {
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.72;
+  });
+
+  mixLow.connect(mixLowMid);
+  mixLowMid.connect(mixMid);
+  mixMid.connect(mixPresence);
+  mixPresence.connect(mixHigh);
+  if (INSTRUMENT_MIX[busId].eqEnabled) {
+    mixerIn.connect(mixLow);
+    mixHigh.connect(mixPan);
+  } else {
+    mixerIn.connect(mixPan);
+  }
+  mixPan.connect(busOut);
+  busOut.connect(meterSplit);
+  meterSplit.connect(meterL, 0);
+  meterSplit.connect(meterR, 1);
+  meterL.connect(meterMerge, 0, 0);
+  meterR.connect(meterMerge, 0, 1);
 
   // ─ Beat repeat ─
   const brIn = ac.createGain();
@@ -14990,7 +16416,19 @@ function buildBusFx(busId) {
 
   fxBuses[busId] = {
     input: chainIn,
+    mixerIn,
     output: busOut,
+    mixer: {
+      input: mixerIn,
+      low: mixLow,
+      lowMid: mixLowMid,
+      mid: mixMid,
+      presence: mixPresence,
+      high: mixHigh,
+      pan: mixPan,
+      eqEnabled: INSTRUMENT_MIX[busId].eqEnabled,
+      meter: { split: meterSplit, left: meterL, right: meterR, merge: meterMerge },
+    },
     beatrepeat: { node: brNode, dry: brDry, wet: brWet, in: brIn, out: brOut },
     grainarp: { node: arpNode, dry: arpDry, wet: arpWet, in: arpIn, out: arpOut },
     delay: {
@@ -15032,7 +16470,7 @@ function buildBusFx(busId) {
   };
 
   // This bus's tail sums into the shared master limiter, once and for good.
-  busOut.connect(master.sum);
+  meterMerge.connect(master.sum);
 
   reconnectFxChain(busId);
   applyAllFx(busId);
@@ -15051,19 +16489,53 @@ function buildFxNodes() {
 // pair, so we fully disconnect the movable links and rebuild them. Disabled
 // units are left out of the chain: with no path to the destination the browser
 // skips their whole subgraph (worklets, convolver, oversampled shaper).
+// Stateless units that are safe to silently unplug while inaudible: nothing
+// in them accumulates material a player would expect to still be there when
+// the mix comes back up. Beat repeat, grain arp and delay stay plugged — their
+// capture rings / tail must keep filling while mix sits at 0 so a performance
+// gesture grabs the audio that just played.
+const FX_IDLE_BYPASS = new Set(['filter', 'resonator', 'bitreduce', 'sat', 'reverb']);
+
+// What reconnectFxChain actually spliced in, per bus — lets a mix change
+// detect whether the chain needs a re-splice without rebuilding every time.
+const fxPlugged = { gen0: new Set(), gen1: new Set(), gen3: new Set(), gen4: new Set() };
+
+function fxUnitIdle(busId, id) {
+  if (!FX_IDLE_BYPASS.has(id)) return false;
+  if ((fxStates[busId][id]?.mix ?? 0) > 0) return false;
+  if (lfoMappings.has(`3:${id}:mix`)) return false;
+  return true;
+}
+
+function syncFxIdleSplice(id, busId = activeBus) {
+  if (!FX_IDLE_BYPASS.has(id) || !fxBuses[busId]) return;
+  const should = fxStates[busId][id]?.enabled !== false && !fxUnitIdle(busId, id);
+  if (should !== fxPlugged[busId].has(id)) reconnectFxChain(busId);
+}
+
+function reconcileFxIdleSplices() {
+  FX_BUS_IDS.forEach((busId) => {
+    FX_IDLE_BYPASS.forEach((id) => syncFxIdleSplice(id, busId));
+  });
+}
+
 function reconnectFxChain(busId = activeBus) {
   const bus = fxBuses[busId];
   if (!bus) return;
   bus.input.disconnect();
   fxOrders[busId].forEach((id) => bus[id]?.out.disconnect());
+  fxPlugged[busId].clear();
   let prev = bus.input;
   fxOrders[busId].forEach((id) => {
     const eff = bus[id];
-    if (!eff || fxStates[busId][id]?.enabled === false) return;
+    // Powered-off units are left out, and so are stateless units whose mix is
+    // 0 with no modulation on it — their whole subgraph then costs nothing.
+    if (!eff || fxStates[busId][id]?.enabled === false || fxUnitIdle(busId, id)) return;
+    fxPlugged[busId].add(id);
     prev.connect(eff.in);
     prev = eff.out;
   });
-  prev.connect(bus.output);
+  prev.connect(bus.mixerIn);
 }
 
 function applyFx(id, key, val, busId = activeBus) {
@@ -15165,6 +16637,8 @@ function applyFx(id, key, val, busId = activeBus) {
       fx.reverb.dry.gain.value = 1 - val;
     }
   }
+  // A mix crossing 0 can change whether a stateless unit belongs in the chain.
+  if (key === 'mix') syncFxIdleSplice(id, busId);
 }
 
 // Apply one master-limiter parameter (the limiter is global, not per-bus).
@@ -15240,8 +16714,24 @@ function capturePreset() {
     },
     loops: LOOPS.list.map(serializeLoop),
     activeLoopIndex: LOOPS.editIndex,
+    sequencer: { sharedAcrossLoops: STEP_SEQ.sharedAcrossLoops },
     song: {
-      entries: SONG.entries.map(({ loopId, repeats }) => ({ loopId, repeats })),
+      // Jump targets are stored by entry index — ids regenerate on load.
+      entries: SONG.entries.map(({ loopId, repeats, prob, cond, variation, fill, jump }) => ({
+        loopId,
+        repeats,
+        prob: prob ?? 1,
+        cond: cond || 0,
+        variation: variation ?? -1,
+        fill: !!fill,
+        jump: jump?.targetId
+          ? {
+              target: SONG.entries.findIndex((e) => e.id === jump.targetId),
+              chance: jump.chance ?? 1,
+              count: jump.count || 0,
+            }
+          : null,
+      })),
       loop: SONG.loop,
       follow: SONG.follow,
       mode: PLAY.mode,
@@ -15269,6 +16759,12 @@ function capturePreset() {
       })),
     },
     kickSc: { release: KICK_SC.release, amount: KICK_SC.amount },
+    trigSc: {
+      release: TRIG_SC.release,
+      amount: TRIG_SC.amount,
+      source: TRIG_SC.source,
+      invert: TRIG_SC.invert,
+    },
     scale: { root: GEN4_SCALE.root, scale: GEN4_SCALE.scale },
     mastering: JSON.parse(JSON.stringify(MASTERING.params)),
     mappings: [...lfoMappings.values()].map(({ genIdx, key, sourceIdx }) => ({
@@ -15352,16 +16848,31 @@ function applyPreset(preset, { resetSources = true } = {}) {
 
   FX_BUS_IDS.forEach((busId) => {
     const saved = preset.instrumentMix?.[busId];
-    INSTRUMENT_MIX[busId].muted = saved?.muted === true;
-    INSTRUMENT_MIX[busId].solo = saved?.solo === true;
+    const next = makeDefaultInstrumentMixState();
+    if (saved) {
+      next.muted = saved.muted === true;
+      next.solo = saved.solo === true;
+      if (typeof saved.gainDb === 'number') next.gainDb = clamp(saved.gainDb, -60, 6);
+      if (typeof saved.pan === 'number') next.pan = clamp(saved.pan, -1, 1);
+      if (typeof saved.eqEnabled === 'boolean') next.eqEnabled = saved.eqEnabled;
+      if (typeof saved.eqLow === 'number') next.eqLow = clamp(saved.eqLow, -18, 18);
+      if (typeof saved.eqLowMid === 'number') next.eqLowMid = clamp(saved.eqLowMid, -18, 18);
+      if (typeof saved.eqMid === 'number') next.eqMid = clamp(saved.eqMid, -18, 18);
+      if (typeof saved.eqPresence === 'number')
+        next.eqPresence = clamp(saved.eqPresence, -18, 18);
+      if (typeof saved.eqHigh === 'number') next.eqHigh = clamp(saved.eqHigh, -18, 18);
+    }
+    Object.assign(INSTRUMENT_MIX[busId], next);
   });
   applyInstrumentMixState();
+  refreshMixerControls();
 
   if (preset.limiter) {
     Object.assign(LIMITER, preset.limiter);
     applyLimiterAll();
     limiterControls.forEach((control, key) => control.setValue(LIMITER[key]));
     refreshFxPresetSelection('limiter');
+    refreshMixerControls();
   }
 
   if (preset.activeBus && FX_BUS_IDS.includes(preset.activeBus)) activeBus = preset.activeBus;
@@ -15393,21 +16904,53 @@ function applyPreset(preset, { resetSources = true } = {}) {
   LOOPS.counter = 0;
   loopsData.forEach((data) => LOOPS.list.push(deserializeLoop(data)));
   LOOPS.editIndex = clamp(Math.round(preset.activeLoopIndex) || 0, 0, LOOPS.list.length - 1);
+  STEP_SEQ.sharedAcrossLoops = preset.sequencer?.sharedAcrossLoops === true;
+  if (STEP_SEQ.sharedAcrossLoops) {
+    shareSequencerAcrossLoops(LOOPS.list[LOOPS.editIndex]?.seq);
+  }
   SONG.entries = [];
   SONG.entryCounter = 0;
-  (preset.song?.entries || []).forEach((e) => {
-    if (!getLoopById(e?.loopId)) return;
+  const savedSongEntries = preset.song?.entries || [];
+  // Saved index → rebuilt entry (null when its loop is gone), so jump targets
+  // stored by index survive entries that fail to load.
+  const rebuiltByIdx = savedSongEntries.map((e) => {
+    if (!getLoopById(e?.loopId)) return null;
     SONG.entryCounter += 1;
-    SONG.entries.push({
+    const variation =
+      e.variation === 'rnd' || e.variation === 'cycle'
+        ? e.variation
+        : clamp(Math.round(e.variation ?? -1), -1, 2);
+    const entry = {
       id: `entry-${SONG.entryCounter}`,
       loopId: e.loopId,
       repeats: clamp(Math.round(e.repeats) || 1, 1, 64),
-    });
+      prob: clamp(Number.isFinite(e.prob) ? e.prob : 1, 0.05, 1),
+      cond: clamp(Math.round(e.cond) || 0, 0, SONG_CONDITIONS.length - 1),
+      variation,
+      fill: !!e.fill,
+      jump: null,
+    };
+    SONG.entries.push(entry);
+    return entry;
+  });
+  savedSongEntries.forEach((e, i) => {
+    const built = rebuiltByIdx[i];
+    const target = e?.jump ? rebuiltByIdx[e.jump.target] : null;
+    if (!built || !target) return;
+    built.jump = {
+      targetId: target.id,
+      chance: clamp(Number.isFinite(e.jump.chance) ? e.jump.chance : 1, 0.05, 1),
+      count: clamp(Math.round(e.jump.count) || 0, 0, 64),
+    };
   });
   SONG.loop = preset.song?.loop !== false;
   SONG.follow = preset.song?.follow !== false;
+  SONG.runtime.clear();
+  SONG.lastJump = null;
   SONG.cursor.entryIdx = 0;
   SONG.cursor.repeat = 0;
+  SONG.cursor.variation = -1;
+  SONG.cursor.fillPattern = null;
   SONG.audibleEntryIdx = -1;
   bindEditLoop();
   renderLoopsBar();
@@ -15442,18 +16985,48 @@ function applyPreset(preset, { resetSources = true } = {}) {
     });
   }
 
-  if (preset.kickSc) {
-    document.querySelectorAll('[data-sc-param]').forEach((slider) => {
-      const param = slider.dataset.scParam;
-      if (param === 'amount' && typeof preset.kickSc.amount === 'number') {
-        slider.value = `${clamp(preset.kickSc.amount, 0, 1)}`;
-        slider.dispatchEvent(new Event('input'));
-      } else if (param === 'release' && typeof preset.kickSc.release === 'number') {
-        slider.value = `${clamp(preset.kickSc.release, 0.01, 1)}`;
-        slider.dispatchEvent(new Event('input'));
-      }
-    });
-  }
+  // State first, DOM second: the back panel may not be built yet (it's lazy),
+  // and its sliders read KICK_SC when they are built, so nothing is lost.
+  KICK_SC.amount = clamp(
+    typeof preset.kickSc?.amount === 'number' ? preset.kickSc.amount : 1.0,
+    0,
+    1,
+  );
+  KICK_SC.release = clamp(
+    typeof preset.kickSc?.release === 'number' ? preset.kickSc.release : 0.2,
+    0.01,
+    1,
+  );
+  document.querySelectorAll('[data-sc-param]').forEach((slider) => {
+    const param = slider.dataset.scParam;
+    if (param === 'amount') slider.value = `${KICK_SC.amount}`;
+    else if (param === 'release') slider.value = `${KICK_SC.release}`;
+    slider.dispatchEvent(new Event('input'));
+  });
+
+  // Trig SC: legacy saves lack the field — reset to defaults so a previous
+  // project's inverted boost can't linger into this one.
+  TRIG_SC.amount = clamp(
+    typeof preset.trigSc?.amount === 'number' ? preset.trigSc.amount : 1.0,
+    0,
+    1,
+  );
+  TRIG_SC.release = clamp(
+    typeof preset.trigSc?.release === 'number' ? preset.trigSc.release : 0.2,
+    0.01,
+    1,
+  );
+  TRIG_SC.source = GEN4_DEFS.some((def) => def.id === preset.trigSc?.source)
+    ? preset.trigSc.source
+    : 'fm';
+  TRIG_SC.invert = preset.trigSc?.invert === true;
+  document.querySelectorAll('[data-trig-sc-param]').forEach((slider) => {
+    const param = slider.dataset.trigScParam;
+    if (param === 'amount') slider.value = `${TRIG_SC.amount}`;
+    else if (param === 'release') slider.value = `${TRIG_SC.release}`;
+    slider.dispatchEvent(new Event('input'));
+  });
+  refreshTrigScUI();
 
   // Shared musical scale (drum roll + gen3 keys). Legacy saves lack it → reset
   // to "no scale" so the previous project's choice can't bleed through.
@@ -15479,7 +17052,7 @@ function applyPreset(preset, { resetSources = true } = {}) {
     if (
       (isGranularParam || isGen3Param || isFxParam || isGen4Param) &&
       modSourceIdx >= 0 &&
-      modSourceIdx <= 3
+      modSourceIdx <= 4
     ) {
       lfoMappings.set(`${genIdx}:${key}`, { genIdx, key, sourceIdx: modSourceIdx });
     }
@@ -15887,6 +17460,34 @@ function buildFxPresetSelect(effectId) {
   return select;
 }
 
+// ECO: one gesture that powers off every FX unit currently doing nothing —
+// mix at 0, no modulation on the mix — across all four buses. Unlike the
+// automatic idle bypass (stateless units only), this also unplugs the
+// capture-style units (beat repeat, grain arp, delay), trading their warm
+// rings for CPU; the power switches show exactly what it turned off.
+function ecoizeFx() {
+  let count = 0;
+  FX_BUS_IDS.forEach((busId) => {
+    DEFAULT_FX_ORDER.forEach((id) => {
+      const st = fxStates[busId][id];
+      if (!st || st.enabled === false) return;
+      if ((st.mix ?? 0) > 0 || lfoMappings.has(`3:${id}:mix`)) return;
+      if (id === 'grainarp' && st.hold) return; // latched — actively in use
+      st.enabled = false;
+      count++;
+    });
+  });
+  if (!count) {
+    setStatus('eco: nothing idle to power off');
+    return;
+  }
+  FX_BUS_IDS.forEach((busId) => reconnectFxChain(busId));
+  renderActiveBusFx();
+  refreshBackPanelState();
+  historyCaptureNow();
+  setStatus(`eco: powered off ${count} idle FX unit${count === 1 ? '' : 's'}`);
+}
+
 function buildFxUI() {
   const container = document.getElementById('fx-chain');
 
@@ -15895,6 +17496,15 @@ function buildFxUI() {
   header.className = 'col-header';
   header.innerHTML =
     '<span class="col-title"><span class="col-dot"></span>FX — <span id="fxActiveLabel"></span></span>';
+  const ecoBtn = document.createElement('button');
+  ecoBtn.type = 'button';
+  ecoBtn.id = 'fxEcoBtn';
+  ecoBtn.className = 'fx-eco-btn';
+  ecoBtn.textContent = 'ECO';
+  ecoBtn.title =
+    'Power off every inaudible FX unit (mix at 0, unmodulated) on all instruments — frees CPU';
+  ecoBtn.addEventListener('click', ecoizeFx);
+  header.appendChild(ecoBtn);
   container.appendChild(header);
 
   // LFO modulators + sequencer are global (shared across all buses).
@@ -16690,8 +18300,10 @@ initModeToggle();
 initStripPlayBtn();
 initSettingsMenu();
 initConfirmDialog();
-buildBackPanel();
+// The back panel (hundreds of DOM nodes) is built lazily on first entry to
+// the back view — see setUIView. State restores don't need its DOM anymore.
 buildVisualPanel();
+buildMixerPanel();
 refreshInputDevices();
 initTempoDrag();
 initViewToggle();
@@ -16702,7 +18314,15 @@ defaultProjectSnapshot = capturePreset();
 // Bring back whatever the user was working on last session.
 restoreAutosave();
 initHistory();
-setInterval(writeAutosave, AUTOSAVE_INTERVAL_MS);
+// Autosave serializes the whole workspace — run it in idle time so the write
+// never lands in the middle of a frame the sequencer needs.
+setInterval(() => {
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(() => writeAutosave(), { timeout: 4000 });
+  } else {
+    writeAutosave();
+  }
+}, AUTOSAVE_INTERVAL_MS);
 window.addEventListener('beforeunload', () => {
   writeAutosave();
   flushAutosaveAudio();
