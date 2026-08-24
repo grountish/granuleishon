@@ -131,12 +131,14 @@ main {
 /* ── Header ──────────────────────────────────────────────────── */
 
 .header-bar {
+  --header-control-height: 24px;
+  --header-icon-width: 28px;
   height: 36px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 0 14px;
+  gap: 7px;
+  padding: 0 8px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
@@ -149,7 +151,7 @@ main {
 
 .undo-bar {
   display: flex;
-  gap: 4px;
+  gap: 2px;
 }
 
 /* ── Mastering view ─────────────────────────────────────────── */
@@ -699,7 +701,9 @@ body.view-master .transport > .status {
 }
 
 .undo-btn {
-  padding: 3px 7px;
+  width: var(--header-icon-width);
+  height: var(--header-control-height);
+  padding: 0;
   font-size: 11px;
   line-height: 1;
 }
@@ -708,9 +712,10 @@ body.view-master .transport > .status {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 9px;
+  height: var(--header-control-height);
+  padding: 0 7px;
   font-size: 8px;
-  max-width: 170px;
+  max-width: 140px;
 }
 
 .project-menu-btn .project-caret {
@@ -741,7 +746,7 @@ body.view-master .transport > .status {
 .header-bar > .view-toggle,
 .header-bar > .loop-strip {
   align-self: stretch;
-  padding-right: 14px;
+  padding-right: 7px;
   border-right: 1px solid var(--border);
 }
 
@@ -750,14 +755,16 @@ body.view-master .transport > .status {
   align-self: stretch;
   display: flex;
   align-items: center;
-  padding-left: 10px;
+  padding-left: 6px;
   border-left: 1px solid var(--border);
 }
 
 .view-btn {
   display: grid;
   place-items: center;
-  padding: 4px 8px;
+  min-width: var(--header-icon-width);
+  height: var(--header-control-height);
+  padding: 0 6px;
 }
 
 .view-btn svg {
@@ -786,20 +793,12 @@ body.view-master .transport > .status {
 
 .mixer-view-btn {
   position: relative;
-  margin-left: 5px;
-  padding: 3px 8px;
+  min-width: 62px;
+  margin-left: 0;
+  padding: 0 7px;
   color: #91abc2;
   border-color: #3d5060;
   background: #20292f;
-}
-
-.mixer-view-btn::before {
-  content: '';
-  position: absolute;
-  left: -6px;
-  top: 2px;
-  bottom: 2px;
-  border-left: 1px solid var(--border);
 }
 
 .mixer-view-btn.active {
@@ -935,16 +934,18 @@ body.view-master .transport > .status {
 .transport {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 4px;
   margin-left: auto;
 }
 
 .tempo-box {
   display: flex;
   align-items: center;
-  gap: 6px;
-  height: 24px;
-  padding: 0 7px;
+  justify-content: center;
+  width: 46px;
+  height: var(--header-control-height);
+  box-sizing: border-box;
+  padding: 0 5px;
   border: 1px solid var(--border);
   background: #202020;
   border-radius: 2px;
@@ -1125,7 +1126,11 @@ body.view-master .transport > .status {
 }
 
 .settings-menu-btn {
-  padding: 3px 8px;
+  display: grid;
+  place-items: center;
+  width: var(--header-icon-width);
+  height: var(--header-control-height);
+  padding: 0;
   font-size: 11px;
   line-height: 1;
 }
@@ -1236,6 +1241,11 @@ body.view-master .transport > .status {
 }
 
 .status {
+  width: 126px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 9px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -4243,11 +4253,11 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-right: 4px;
 }
 
 .mode-btn {
-  padding: 3px 8px;
+  height: var(--header-control-height);
+  padding: 0 7px;
   font-size: 8px;
 }
 
@@ -4386,6 +4396,21 @@ button:disabled {
 }
 
 .strip-play-btn {
+  display: grid;
+  place-items: center;
+  width: var(--header-icon-width);
+  height: var(--header-control-height);
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.header-bar .record-btn,
+.header-bar .bounce-btn {
+  display: grid;
+  place-items: center;
+  width: var(--header-icon-width);
+  height: var(--header-control-height);
+  padding: 0;
   flex-shrink: 0;
 }
 
@@ -4437,6 +4462,290 @@ button:disabled {
 
 .song-jump-arcs circle {
   fill: var(--accent-fx-dim);
+}
+
+.song-arc-label {
+  font-size: 8px;
+  /* Lighter + desaturated relative to the arcs so text reads as a separate
+     layer; the bg-colored halo keeps it legible where an arc crosses under. */
+  fill: color-mix(in srgb, var(--accent-fx) 55%, var(--text));
+  letter-spacing: 0.05em;
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+/* ── Song view (first-class panel, sibling to mixer/master) ── */
+
+.song-panel-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.song-expanded-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.song-expanded-title {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--accent-fx);
+}
+
+.song-expanded-add {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.song-expanded-add-btn {
+  padding: 3px 8px;
+  font-size: 8px;
+  font-weight: 700;
+  color: var(--text);
+  border-color: var(--accent-fx-dim);
+}
+
+.song-expanded-close {
+  padding: 3px 8px;
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.song-cards {
+  position: relative; /* anchors the arc overlay + card offsets */
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 10px;
+  padding: 26px 12px 12px; /* headroom for arcs above the first row */
+  overflow-y: auto;
+}
+
+.song-card {
+  width: 172px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: grab;
+  user-select: none;
+}
+
+.song-card.dragging {
+  opacity: 0.4;
+  cursor: grabbing;
+}
+
+.song-card.playing {
+  border-color: var(--accent-fx);
+  background: #34290f;
+}
+
+.song-card.upnext {
+  border-color: var(--accent-fx-dim);
+  border-style: dashed;
+}
+
+.song-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.song-card-pos {
+  font-size: 8px;
+  color: var(--muted);
+  min-width: 10px;
+}
+
+.song-card-name {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.song-card.playing .song-card-name {
+  color: var(--accent-fx);
+}
+
+.song-card-repeats {
+  margin-left: auto;
+  padding: 2px 6px;
+  font-size: 8px;
+  color: var(--muted);
+}
+
+.song-card-cue,
+.song-card-remove {
+  padding: 2px 6px;
+  font-size: 8px;
+  color: var(--muted);
+}
+
+.song-card-remove:hover:not(:disabled) {
+  color: #e05858;
+  border-color: #5a3030;
+}
+
+.song-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* ── Orbit view ── */
+
+.song-expanded-views {
+  display: flex;
+  gap: 3px;
+}
+
+.song-expanded-view-btn {
+  padding: 3px 8px;
+  font-size: 8px;
+  color: var(--muted);
+}
+
+.song-expanded-view-btn.active {
+  border-color: var(--accent-fx-dim);
+  color: var(--accent-fx);
+}
+
+.song-orbit {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.song-orbit-stage {
+  flex: 1;
+  min-width: 0;
+  padding: 8px;
+}
+
+.song-orbit-stage svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.song-orbit-rim {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.song-orbit-flow {
+  fill: var(--border);
+}
+
+.song-orbit-chords path {
+  stroke-width: 1.2;
+}
+
+.song-orbit-node {
+  cursor: pointer;
+}
+
+.song-orbit-node circle {
+  fill: var(--surface-2);
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+
+.song-orbit-node.selected circle {
+  stroke: var(--text);
+}
+
+.song-orbit-node.playing circle {
+  stroke: var(--accent-fx);
+  fill: #34290f;
+}
+
+.song-orbit-node.upnext circle {
+  stroke: var(--accent-fx-dim);
+  stroke-dasharray: 3 2;
+}
+
+.song-orbit-name {
+  font-size: 12px;
+  font-weight: 700;
+  fill: var(--text);
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.song-orbit-node.playing .song-orbit-name {
+  fill: var(--accent-fx);
+}
+
+.song-orbit-idx {
+  font-size: 8px;
+  fill: var(--muted);
+  pointer-events: none;
+}
+
+.song-orbit-opt {
+  font-size: 8px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  fill: color-mix(in srgb, var(--accent-fx) 55%, var(--text));
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+.song-orbit-progress {
+  fill: none;
+  stroke: var(--accent-fx);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.song-orbit-dot {
+  fill: var(--accent-fx);
+}
+
+.song-orbit-empty {
+  font-size: 10px;
+  fill: var(--muted);
+}
+
+.song-orbit-detail {
+  width: 240px;
+  flex-shrink: 0;
+  padding: 10px;
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.song-orbit-detail .song-card {
+  width: auto;
+  cursor: default;
 }
 
 /* The loop/song strips live inside the 36px header — hide the scrollbar
@@ -4633,15 +4942,49 @@ button:disabled {
   border-color: var(--accent-fx-dim);
 }
 
-.song-block-menu-custom input[type='range'] {
-  flex: 1;
-  width: auto;
+.song-block-menu-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.song-block-menu-slider-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 8px;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.song-block-menu-slider-val {
+  color: var(--text);
+  font-size: 9px;
+}
+
+.song-block-menu-slider input[type='range'] {
+  width: 100%;
   padding: 0;
   accent-color: var(--accent-fx);
 }
 
-.song-block-menu-custom input[type='range']:disabled {
+.song-block-menu-slider input[type='range']:disabled {
   opacity: 0.35;
+}
+
+.song-block-menu-fill {
+  padding: 4px 0;
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.song-block-menu-fill.active {
+  background: var(--accent-fx-dim);
+  border-color: var(--accent-fx);
+  color: #ffe9cf;
 }
 
 .song-block-menu-custom select {

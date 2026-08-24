@@ -9693,10 +9693,10 @@ function generateGen4Fill(source) {
       // Density and velocity ramp toward the turnaround so it reads as a
       // build rather than a flat burst.
       const progress = (si - start + 1) / (pattern.stepCount - start);
-      if (Math.random() >= 0.2 + progress * 0.55) continue;
+      if (Math.random() >= 0.12 + progress * 0.35) continue;
       channel.steps[si] = true;
       channel.notes[si] = gen4FillNoteFor(channel, si, pattern.stepCount);
-      channel.velocity[si] = clamp(0.45 + progress * 0.3 + Math.random() * 0.2, 0.05, 1);
+      channel.velocity[si] = clamp(0.35 + progress * 0.22 + Math.random() * 0.15, 0.05, 1);
       channel.probability[si] = 1;
       channel.condition[si] = 0;
       // Full reset: generated hits never inherit stale timing, stutter, or
@@ -9705,8 +9705,8 @@ function generateGen4Fill(source) {
       channel.timing[si] = 0;
       channel.stutter[si] = 1;
       channel.locks[si] = {};
-      if (si >= pattern.stepCount - 2 && Math.random() < 0.55) {
-        channel.stutter[si] = 2 + Math.floor(Math.random() * 3);
+      if (si >= pattern.stepCount - 2 && Math.random() < 0.25) {
+        channel.stutter[si] = 2 + Math.floor(Math.random() * 2);
       }
     }
   });
@@ -10330,6 +10330,7 @@ function updateSongPlayhead(audible) {
     const audibleLoop = getAudibleLoop();
     if (audibleLoop) syncGen3SustainChord(audibleLoop.gen3.lockedMidis);
   }
+  updateSongOrbitProgress(audible);
   renderSongPlayhead(audible.repeat);
 }
 
@@ -10352,8 +10353,19 @@ function renderSongPlayhead(repeat = -1) {
     const el = songBlockEls.get(entry.id);
     if (!el) return;
     const playing = idx === entryIdx;
+    const upnext = idx === previewIdx && previewIdx !== entryIdx;
     el.classList.toggle('playing', playing);
-    el.classList.toggle('upnext', idx === previewIdx && previewIdx !== entryIdx);
+    el.classList.toggle('upnext', upnext);
+    const card = songCardEls.get(entry.id);
+    if (card) {
+      card.classList.toggle('playing', playing);
+      card.classList.toggle('upnext', upnext);
+    }
+    const orbitNode = songOrbitEls?.byId.get(entry.id);
+    if (orbitNode) {
+      orbitNode.g.classList.toggle('playing', playing);
+      orbitNode.g.classList.toggle('upnext', upnext);
+    }
     const badge = el.querySelector('.song-block-repeats');
     if (badge) {
       badge.textContent =
@@ -10364,16 +10376,16 @@ function renderSongPlayhead(repeat = -1) {
             : '';
     }
   });
-  // Arc states: taken = the jump that just fired; armed = the current block's
-  // jump has been decided and will fire when the block ends.
-  const arcs = document.querySelector('.song-jump-arcs');
-  if (arcs) {
-    const armedFrom = SONG.cursor.jump ? SONG.entries[cursorIdx]?.id : null;
+  // Arc states, on the strip's overlay and the expanded editor's alike:
+  // taken = the jump that just fired; armed = the current block's jump has
+  // been decided and will fire when the block ends.
+  const armedFrom = SONG.cursor.jump ? SONG.entries[cursorIdx]?.id : null;
+  document.querySelectorAll('.song-jump-arcs').forEach((arcs) => {
     arcs.querySelectorAll('path[data-from]').forEach((p) => {
       p.classList.toggle('taken', p.dataset.from === SONG.lastJump?.from);
       p.classList.toggle('armed', p.dataset.from === armedFrom);
     });
-  }
+  });
 }
 
 function isTransportOn() {
@@ -10915,6 +10927,188 @@ function setSongEntryRepeats(entryId, repeats) {
   renderSongLane();
 }
 
+// Shared per-entry controls (context menu + expanded editor). refresh(structural)
+// re-renders dependents; slider drags pass structural=false so an open expanded
+// panel is not rebuilt under the pointer mid-drag.
+function appendSongEntryControls(container, entry, refresh) {
+  const sect = (text) => {
+    const t = document.createElement('div');
+    t.className = 'song-block-menu-title';
+    t.textContent = text;
+    return t;
+  };
+
+  // Percent slider with its label + live value on their own line, so narrow
+  // containers never wrap the caption against the track.
+  const sliderRow = (labelText, getPct, setPct) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'song-block-menu-slider';
+    const top = document.createElement('div');
+    top.className = 'song-block-menu-slider-top';
+    const lab = document.createElement('span');
+    lab.textContent = labelText;
+    const val = document.createElement('span');
+    val.className = 'song-block-menu-slider-val';
+    val.textContent = `${getPct()}%`;
+    top.append(lab, val);
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = '5';
+    input.max = '100';
+    input.step = '5';
+    input.value = String(getPct());
+    input.addEventListener('input', () => {
+      setPct(Number(input.value));
+      val.textContent = `${getPct()}%`;
+      refresh(false);
+    });
+    // Release commits a structural refresh so the orbit/card readouts catch
+    // up — mid-drag they are deliberately left alone.
+    input.addEventListener('change', () => refresh(true));
+    wrap.append(top, input);
+    container.appendChild(wrap);
+    return input;
+  };
+
+  // Probability — chance this entry plays on a given pass (else it skips).
+  sliderRow(
+    'probability',
+    () => Math.round((entry.prob ?? 1) * 100),
+    (n) => {
+      entry.prob = n / 100;
+    },
+  );
+
+  // Play condition, counted per visit (1:2 = 1st of every 2 visits).
+  container.appendChild(sect('condition'));
+  const condRow = document.createElement('div');
+  condRow.className = 'song-block-menu-presets';
+  const condBtns = SONG_CONDITIONS.map((c, idx) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'song-block-menu-preset' + ((entry.cond || 0) === idx ? ' active' : '');
+    b.textContent = c.label;
+    b.title = idx === 0 ? 'Always plays' : `Plays visit ${c.a} of every ${c.b}`;
+    b.addEventListener('click', () => {
+      entry.cond = idx;
+      condBtns.forEach((x, i) => x.classList.toggle('active', i === idx));
+      refresh(true);
+    });
+    condRow.appendChild(b);
+    return b;
+  });
+  container.appendChild(condRow);
+
+  // Which pattern variation this entry plays.
+  container.appendChild(sect('variation'));
+  const varRow = document.createElement('div');
+  varRow.className = 'song-block-menu-presets';
+  const varDefs = [
+    { v: -1, label: '·', title: "Loop's own variation" },
+    { v: 0, label: 'A', title: 'Variation A' },
+    { v: 1, label: 'B', title: 'Variation B' },
+    { v: 2, label: 'C', title: 'Variation C' },
+    { v: 'rnd', label: '?', title: 'Random variation each visit' },
+    { v: 'cycle', label: '↻', title: 'Cycle A→B→C across visits' },
+  ];
+  const varBtns = varDefs.map((d) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className =
+      'song-block-menu-preset' + ((entry.variation ?? -1) === d.v ? ' active' : '');
+    b.textContent = d.label;
+    b.title = d.title;
+    b.addEventListener('click', () => {
+      entry.variation = d.v;
+      varBtns.forEach((x, i) => x.classList.toggle('active', varDefs[i].v === d.v));
+      refresh(true);
+    });
+    varRow.appendChild(b);
+    return b;
+  });
+  container.appendChild(varRow);
+
+  const fillBtn = document.createElement('button');
+  fillBtn.type = 'button';
+  fillBtn.className = 'song-block-menu-fill' + (entry.fill ? ' active' : '');
+  fillBtn.textContent = 'fill on change';
+  fillBtn.title =
+    'Auto-generate a drum fill on the final cycle — plays only when the song moves to a different loop';
+  fillBtn.addEventListener('click', () => {
+    entry.fill = !entry.fill;
+    fillBtn.classList.toggle('active', entry.fill);
+    refresh(true);
+  });
+  container.appendChild(fillBtn);
+
+  // Jump: after this entry ends, go to another block (with odds and a cap)
+  // instead of the next one.
+  container.appendChild(sect('jump after'));
+  const jumpRow = document.createElement('div');
+  jumpRow.className = 'song-block-menu-custom';
+  const jumpLabel = document.createElement('span');
+  jumpLabel.textContent = 'to';
+  const jumpSel = document.createElement('select');
+  jumpSel.appendChild(new Option('off', ''));
+  SONG.entries.forEach((e, i) => {
+    jumpSel.appendChild(new Option(`${i + 1} · ${getLoopById(e.loopId)?.name ?? '?'}`, e.id));
+  });
+  jumpSel.value = entry.jump?.targetId ?? '';
+  jumpRow.append(jumpLabel, jumpSel);
+  container.appendChild(jumpRow);
+
+  const jumpChanceInput = sliderRow(
+    'chance',
+    () => Math.round((entry.jump?.chance ?? 1) * 100),
+    (n) => {
+      if (entry.jump) entry.jump.chance = n / 100;
+    },
+  );
+
+  const jumpCountRow = document.createElement('div');
+  jumpCountRow.className = 'song-block-menu-presets';
+  const jumpCountBtns = SONG_JUMP_COUNTS.map((n) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className =
+      'song-block-menu-preset' + ((entry.jump?.count ?? 0) === n ? ' active' : '');
+    b.textContent = n === 0 ? '∞' : `×${n}`;
+    b.title =
+      n === 0
+        ? 'Jump every time the odds land'
+        : `Take this jump at most ${n} time${n > 1 ? 's' : ''} per playback`;
+    b.addEventListener('click', () => {
+      if (!entry.jump) return;
+      entry.jump.count = n;
+      jumpCountBtns.forEach((x, i) => x.classList.toggle('active', SONG_JUMP_COUNTS[i] === n));
+      refresh(true);
+    });
+    jumpCountRow.appendChild(b);
+    return b;
+  });
+  container.appendChild(jumpCountRow);
+
+  const refreshJumpDisabled = () => {
+    const off = !entry.jump;
+    jumpChanceInput.disabled = off;
+    jumpCountBtns.forEach((b) => (b.disabled = off));
+  };
+  jumpSel.addEventListener('change', () => {
+    if (!jumpSel.value) entry.jump = null;
+    else {
+      entry.jump = {
+        targetId: jumpSel.value,
+        chance: entry.jump?.chance ?? 1,
+        count: entry.jump?.count ?? 0,
+      };
+    }
+    refreshJumpDisabled();
+    refresh(true);
+  });
+  jumpSel.addEventListener('keydown', (e) => e.stopPropagation());
+  refreshJumpDisabled();
+}
+
 // ── Song block context menu (cycles / remove) ──
 
 let songBlockMenuEl = null;
@@ -10981,167 +11175,7 @@ function openSongBlockMenu(entryId, x, y) {
   customRow.append(customLabel, customInput);
   menu.appendChild(customRow);
 
-  const sect = (text) => {
-    const t = document.createElement('div');
-    t.className = 'song-block-menu-title';
-    t.textContent = text;
-    return t;
-  };
-
-  // Probability — chance this entry plays on a given pass (else it skips).
-  const probRow = document.createElement('div');
-  probRow.className = 'song-block-menu-custom';
-  const probLabel = document.createElement('span');
-  const probText = () => `prob ${Math.round((entry.prob ?? 1) * 100)}%`;
-  probLabel.textContent = probText();
-  const probInput = document.createElement('input');
-  probInput.type = 'range';
-  probInput.min = '5';
-  probInput.max = '100';
-  probInput.step = '5';
-  probInput.value = String(Math.round((entry.prob ?? 1) * 100));
-  probInput.addEventListener('input', () => {
-    entry.prob = Number(probInput.value) / 100;
-    probLabel.textContent = probText();
-    renderSongLane();
-  });
-  probRow.append(probLabel, probInput);
-  menu.appendChild(probRow);
-
-  // Play condition, counted per visit (1:2 = 1st of every 2 visits).
-  const condRow = document.createElement('div');
-  condRow.className = 'song-block-menu-presets';
-  const condBtns = SONG_CONDITIONS.map((c, idx) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'song-block-menu-preset' + ((entry.cond || 0) === idx ? ' active' : '');
-    b.textContent = c.label;
-    b.title = idx === 0 ? 'Always plays' : `Plays visit ${c.a} of every ${c.b}`;
-    b.addEventListener('click', () => {
-      entry.cond = idx;
-      condBtns.forEach((x, i) => x.classList.toggle('active', i === idx));
-      renderSongLane();
-    });
-    condRow.appendChild(b);
-    return b;
-  });
-  menu.appendChild(condRow);
-
-  // Which pattern variation this entry plays.
-  const varRow = document.createElement('div');
-  varRow.className = 'song-block-menu-presets';
-  const varDefs = [
-    { v: -1, label: '·', title: "Loop's own variation" },
-    { v: 0, label: 'A', title: 'Variation A' },
-    { v: 1, label: 'B', title: 'Variation B' },
-    { v: 2, label: 'C', title: 'Variation C' },
-    { v: 'rnd', label: '?', title: 'Random variation each visit' },
-    { v: 'cycle', label: '↻', title: 'Cycle A→B→C across visits' },
-  ];
-  const varBtns = varDefs.map((d) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className =
-      'song-block-menu-preset' + ((entry.variation ?? -1) === d.v ? ' active' : '');
-    b.textContent = d.label;
-    b.title = d.title;
-    b.addEventListener('click', () => {
-      entry.variation = d.v;
-      varBtns.forEach((x, i) => x.classList.toggle('active', varDefs[i].v === d.v));
-      renderSongLane();
-    });
-    varRow.appendChild(b);
-    return b;
-  });
-  menu.appendChild(varRow);
-
-  const fillBtn = document.createElement('button');
-  fillBtn.type = 'button';
-  fillBtn.className = 'song-block-menu-preset' + (entry.fill ? ' active' : '');
-  fillBtn.textContent = 'fill last cycle';
-  fillBtn.title = 'Auto-generate a drum fill on the final cycle of this entry';
-  fillBtn.addEventListener('click', () => {
-    entry.fill = !entry.fill;
-    fillBtn.classList.toggle('active', entry.fill);
-    renderSongLane();
-  });
-  menu.appendChild(fillBtn);
-
-  // Jump: after this entry ends, go to another block (with odds and a cap)
-  // instead of the next one.
-  menu.appendChild(sect('jump after'));
-  const jumpRow = document.createElement('div');
-  jumpRow.className = 'song-block-menu-custom';
-  const jumpLabel = document.createElement('span');
-  jumpLabel.textContent = 'to';
-  const jumpSel = document.createElement('select');
-  jumpSel.appendChild(new Option('off', ''));
-  SONG.entries.forEach((e, i) => {
-    jumpSel.appendChild(new Option(`${i + 1} · ${getLoopById(e.loopId)?.name ?? '?'}`, e.id));
-  });
-  jumpSel.value = entry.jump?.targetId ?? '';
-  jumpRow.append(jumpLabel, jumpSel);
-  menu.appendChild(jumpRow);
-
-  const jumpChanceRow = document.createElement('div');
-  jumpChanceRow.className = 'song-block-menu-custom';
-  const jumpChanceLabel = document.createElement('span');
-  const jumpChanceText = () => `chance ${Math.round((entry.jump?.chance ?? 1) * 100)}%`;
-  jumpChanceLabel.textContent = jumpChanceText();
-  const jumpChanceInput = document.createElement('input');
-  jumpChanceInput.type = 'range';
-  jumpChanceInput.min = '5';
-  jumpChanceInput.max = '100';
-  jumpChanceInput.step = '5';
-  jumpChanceInput.value = String(Math.round((entry.jump?.chance ?? 1) * 100));
-  jumpChanceInput.addEventListener('input', () => {
-    if (!entry.jump) return;
-    entry.jump.chance = Number(jumpChanceInput.value) / 100;
-    jumpChanceLabel.textContent = jumpChanceText();
-    renderSongLane();
-  });
-  jumpChanceRow.append(jumpChanceLabel, jumpChanceInput);
-  menu.appendChild(jumpChanceRow);
-
-  const jumpCountRow = document.createElement('div');
-  jumpCountRow.className = 'song-block-menu-presets';
-  const jumpCountBtns = SONG_JUMP_COUNTS.map((n) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className =
-      'song-block-menu-preset' + ((entry.jump?.count ?? 0) === n ? ' active' : '');
-    b.textContent = n === 0 ? '∞' : `×${n}`;
-    b.title = n === 0 ? 'Jump every time the odds land' : `Take this jump at most ${n} time${n > 1 ? 's' : ''} per playback`;
-    b.addEventListener('click', () => {
-      if (!entry.jump) return;
-      entry.jump.count = n;
-      jumpCountBtns.forEach((x, i) => x.classList.toggle('active', SONG_JUMP_COUNTS[i] === n));
-      renderSongLane();
-    });
-    jumpCountRow.appendChild(b);
-    return b;
-  });
-  menu.appendChild(jumpCountRow);
-
-  const refreshJumpDisabled = () => {
-    const off = !entry.jump;
-    jumpChanceInput.disabled = off;
-    jumpCountBtns.forEach((b) => (b.disabled = off));
-  };
-  jumpSel.addEventListener('change', () => {
-    if (!jumpSel.value) entry.jump = null;
-    else {
-      entry.jump = {
-        targetId: jumpSel.value,
-        chance: entry.jump?.chance ?? 1,
-        count: entry.jump?.count ?? 0,
-      };
-    }
-    refreshJumpDisabled();
-    renderSongLane();
-  });
-  jumpSel.addEventListener('keydown', (e) => e.stopPropagation());
-  refreshJumpDisabled();
+  appendSongEntryControls(menu, entry, () => renderSongLane());
 
   const removeBtn = document.createElement('button');
   removeBtn.type = 'button';
@@ -11164,11 +11198,8 @@ window.addEventListener('pointerdown', (e) => {
   if (songBlockMenuEl && !songBlockMenuEl.contains(e.target)) closeSongBlockMenu();
 });
 
-function commitSongOrderFromDom() {
-  const wrap = document.querySelector('.song-blocks');
-  if (!wrap) return;
+function commitSongOrder(order) {
   const playingEntryId = SONG.entries[SONG.cursor.entryIdx]?.id ?? null;
-  const order = [...wrap.querySelectorAll('.song-block')].map((el) => el.dataset.entryId);
   const byId = new Map(SONG.entries.map((e) => [e.id, e]));
   const next = order.map((id) => byId.get(id)).filter(Boolean);
   SONG.entries.forEach((e) => {
@@ -11180,6 +11211,12 @@ function commitSongOrderFromDom() {
     if (idx >= 0) SONG.cursor.entryIdx = idx;
   }
   renderSongLane();
+}
+
+function commitSongOrderFromDom() {
+  const wrap = document.querySelector('.song-blocks');
+  if (!wrap) return;
+  commitSongOrder([...wrap.querySelectorAll('.song-block')].map((el) => el.dataset.entryId));
 }
 
 // ── Play mode ──
@@ -11348,6 +11385,556 @@ function getSongDragAfterElement(container, x) {
     if (offset < 0 && offset > closest.offset) closest = { offset, element: child };
   });
   return closest.element;
+}
+
+// ── Expanded song editor ──
+// A full-width overlay with one card per block: every song parameter editable
+// inline, labeled jump arcs, drag reorder, and cue-next. State lives in SONG;
+// this is only a bigger lens on it — the strip stays the compact view.
+
+let songExpandedEl = null;
+// Light edits (slider drags) from inside the panel refresh the strip but must
+// not rebuild the panel under the pointer.
+let songExpandedSyncMuted = false;
+const songCardEls = new Map(); // entry id → card element
+
+let songExpandedView = 'orbit'; // 'orbit' | 'cards'
+let songOrbitEls = null; // { byId: Map(entry id → {g, angle}), progress, dot, R, cx, cy }
+let songOrbitSelectedId = null;
+
+// The song editor is a first-class panel view (#songPanel), sibling to
+// mixer/master — not an overlay. songExpandedEl points at the panel while the
+// view is active, null otherwise; everything downstream keys off that.
+function enterSongView() {
+  songExpandedEl = document.getElementById('songPanel');
+  renderSongExpanded();
+}
+
+function leaveSongView() {
+  if (!songExpandedEl) return;
+  songExpandedEl.innerHTML = '';
+  songExpandedEl = null;
+  songCardEls.clear();
+  songOrbitEls = null;
+}
+
+function closeSongExpanded() {
+  if (UI_VIEW.mode === 'song') setPanelView('front');
+}
+
+function syncSongExpanded() {
+  if (songExpandedEl && !songExpandedSyncMuted) renderSongExpanded();
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && UI_VIEW.mode === 'song') setPanelView('front');
+});
+
+// Cue a block to take over at the next pattern boundary, skipping the dice
+// once. Only meaningful while the song is running.
+function songCueEntry(idx) {
+  const entry = SONG.entries[idx];
+  if (!entry) return;
+  if (!(GEN4.playing && PLAY.mode === 'song')) {
+    setStatus('cue works while the song plays');
+    return;
+  }
+  songRuntime(entry.id).visits += 1;
+  SONG.cursor.entryIdx = idx;
+  SONG.cursor.repeat = -1; // the boundary advance lands on repeat 0
+  songEnterEntry(entry);
+  songPlayheadRendered = { entryIdx: -2, repeat: -2, cursorIdx: -2 };
+  renderSongPlayhead();
+  setStatus(`cued ${getLoopById(entry.loopId)?.name ?? '?'}`);
+}
+
+// Reorder target for the wrapped card grid: first card the pointer sits above
+// or left of within its row.
+function getSongCardAfterElement(container, x, y) {
+  const els = [...container.querySelectorAll('.song-card:not(.dragging)')];
+  return (
+    els.find((el) => {
+      const b = el.getBoundingClientRect();
+      if (y < b.top - 4) return true;
+      return y <= b.bottom + 4 && x < b.left + b.width / 2;
+    }) ?? null
+  );
+}
+
+// Labeled 2D arcs between cards (the grid wraps, so arcs travel both axes).
+function drawSongCardArcs(wrap) {
+  if (!wrap || !wrap.isConnected) return;
+  wrap.querySelector('.song-jump-arcs')?.remove();
+  const jumps = SONG.entries.filter(
+    (e) => e.jump?.targetId && songCardEls.get(e.jump.targetId) && songCardEls.get(e.id),
+  );
+  if (!jumps.length) return;
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('class', 'song-jump-arcs');
+  const w = wrap.scrollWidth;
+  const h = wrap.scrollHeight;
+  svg.setAttribute('width', String(w));
+  svg.setAttribute('height', String(h));
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  jumps.forEach((e) => {
+    const fromEl = songCardEls.get(e.id);
+    const toEl = songCardEls.get(e.jump.targetId);
+    const x1 = fromEl.offsetLeft + fromEl.offsetWidth / 2;
+    const y1 = fromEl.offsetTop + 2;
+    const x2 = toEl.offsetLeft + toEl.offsetWidth / 2;
+    const y2 = toEl.offsetTop + 2;
+    // Cap the lift inside the grid's 26px top padding so arcs never clip.
+    const lift = clamp(Math.abs(x2 - x1) * 0.12 + Math.abs(y2 - y1) * 0.3, 12, 24);
+    const mx = (x1 + x2) / 2;
+    const my = Math.min(y1, y2) - lift;
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', `M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`);
+    path.dataset.from = e.id;
+    if (SONG.lastJump?.from === e.id) path.classList.add('taken');
+    if ((e.jump.chance ?? 1) < 1) path.classList.add('dashed');
+    svg.appendChild(path);
+    const dot = document.createElementNS(ns, 'circle');
+    dot.setAttribute('cx', String(x2));
+    dot.setAttribute('cy', String(y2));
+    dot.setAttribute('r', '2.5');
+    svg.appendChild(dot);
+    const label = document.createElementNS(ns, 'text');
+    label.setAttribute('class', 'song-arc-label');
+    label.setAttribute('x', String(mx));
+    label.setAttribute('y', String(Math.max(8, (my + Math.min(y1, y2)) / 2)));
+    label.setAttribute('text-anchor', 'middle');
+    const cap = e.jump.count || 0;
+    label.textContent = `${Math.round((e.jump.chance ?? 1) * 100)}%${cap ? ` ×${cap}` : ''}`;
+    svg.appendChild(label);
+  });
+  wrap.appendChild(svg);
+}
+
+// ── Orbit view ──
+// The song as the state machine it is: blocks on a circle, linear flow runs
+// clockwise around the rim, jumps cut across as chords. Layout is fully
+// deterministic (angle = index), so nothing about it needs saving.
+
+const SONG_ORBIT_SIZE = 400; // viewBox units, square
+const SONG_ORBIT_R = 142;
+
+function songOrbitPos(angle, radius = SONG_ORBIT_R) {
+  // Angle 0 at 12 o'clock, increasing clockwise (matches SVG sweep=1).
+  return {
+    x: SONG_ORBIT_SIZE / 2 + radius * Math.sin(angle),
+    y: SONG_ORBIT_SIZE / 2 - radius * Math.cos(angle),
+  };
+}
+
+function renderSongOrbit(container) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const stage = document.createElement('div');
+  stage.className = 'song-orbit-stage';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${SONG_ORBIT_SIZE} ${SONG_ORBIT_SIZE}`);
+  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  stage.appendChild(svg);
+
+  const n = SONG.entries.length;
+  const step = (Math.PI * 2) / Math.max(1, n);
+  const byId = new Map();
+
+  const rim = document.createElementNS(ns, 'circle');
+  rim.setAttribute('class', 'song-orbit-rim');
+  rim.setAttribute('cx', String(SONG_ORBIT_SIZE / 2));
+  rim.setAttribute('cy', String(SONG_ORBIT_SIZE / 2));
+  rim.setAttribute('r', String(SONG_ORBIT_R));
+  svg.appendChild(rim);
+
+  // Direction ticks: one arrowhead mid-segment between consecutive blocks.
+  // The wrap-around segment only exists while the song cycles.
+  for (let i = 0; i < n; i++) {
+    if (i === n - 1 && !SONG.loop) break;
+    const mid = i * step + step / 2;
+    const p = songOrbitPos(mid);
+    const tip = songOrbitPos(mid + 0.035);
+    const back1 = songOrbitPos(mid - 0.02, SONG_ORBIT_R + 5);
+    const back2 = songOrbitPos(mid - 0.02, SONG_ORBIT_R - 5);
+    const arrow = document.createElementNS(ns, 'path');
+    arrow.setAttribute('class', 'song-orbit-flow');
+    arrow.setAttribute(
+      'd',
+      `M ${tip.x} ${tip.y} L ${back1.x} ${back1.y} L ${back2.x} ${back2.y} Z`,
+    );
+    svg.appendChild(arrow);
+    if (n === 1) break;
+  }
+
+  // Jump chords, grouped under .song-jump-arcs so the shared armed/taken
+  // playhead pass picks them up like every other arc layer.
+  const chords = document.createElementNS(ns, 'g');
+  chords.setAttribute('class', 'song-jump-arcs song-orbit-chords');
+  SONG.entries.forEach((e, i) => {
+    if (!e.jump?.targetId) return;
+    const tIdx = SONG.entries.findIndex((x) => x.id === e.jump.targetId);
+    if (tIdx < 0) return;
+    const p1 = songOrbitPos(i * step, SONG_ORBIT_R - 18);
+    const p2 = songOrbitPos(tIdx * step, SONG_ORBIT_R - 18);
+    const cx = SONG_ORBIT_SIZE / 2;
+    const mx = (p1.x + p2.x) / 2;
+    const my = (p1.y + p2.y) / 2;
+    // Control point pulled toward the center — chords bow inward.
+    const qx = cx + (mx - cx) * 0.35;
+    const qy = cx + (my - cx) * 0.35;
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', `M ${p1.x} ${p1.y} Q ${qx} ${qy} ${p2.x} ${p2.y}`);
+    path.dataset.from = e.id;
+    if (SONG.lastJump?.from === e.id) path.classList.add('taken');
+    if ((e.jump.chance ?? 1) < 1) path.classList.add('dashed');
+    chords.appendChild(path);
+    const dot = document.createElementNS(ns, 'circle');
+    dot.setAttribute('cx', String(p2.x));
+    dot.setAttribute('cy', String(p2.y));
+    dot.setAttribute('r', '2.5');
+    chords.appendChild(dot);
+    const label = document.createElementNS(ns, 'text');
+    label.setAttribute('class', 'song-arc-label');
+    label.setAttribute('x', String((qx + mx) / 2));
+    label.setAttribute('y', String((qy + my) / 2));
+    label.setAttribute('text-anchor', 'middle');
+    const cap = e.jump.count || 0;
+    label.textContent = `${Math.round((e.jump.chance ?? 1) * 100)}%${cap ? ` ×${cap}` : ''}`;
+    chords.appendChild(label);
+  });
+  svg.appendChild(chords);
+
+  // Block-progress sweep + playhead dot, moved per display frame.
+  const progress = document.createElementNS(ns, 'path');
+  progress.setAttribute('class', 'song-orbit-progress');
+  svg.appendChild(progress);
+  const dot = document.createElementNS(ns, 'circle');
+  dot.setAttribute('class', 'song-orbit-dot');
+  dot.setAttribute('r', '4');
+  dot.setAttribute('opacity', '0');
+  svg.appendChild(dot);
+
+  SONG.entries.forEach((entry, i) => {
+    const loop = getLoopById(entry.loopId);
+    const angle = i * step;
+    const p = songOrbitPos(angle);
+    const g = document.createElementNS(ns, 'g');
+    g.setAttribute('class', 'song-orbit-node');
+    if (entry.id === songOrbitSelectedId) g.classList.add('selected');
+    g.setAttribute('transform', `translate(${p.x} ${p.y})`);
+    const c = document.createElementNS(ns, 'circle');
+    c.setAttribute('r', '15');
+    g.appendChild(c);
+    const name = document.createElementNS(ns, 'text');
+    name.setAttribute('class', 'song-orbit-name');
+    name.setAttribute('text-anchor', 'middle');
+    name.setAttribute('dy', '3.5');
+    name.textContent = loop?.name ?? '?';
+    g.appendChild(name);
+    const idxT = document.createElementNS(ns, 'text');
+    idxT.setAttribute('class', 'song-orbit-idx');
+    idxT.setAttribute('text-anchor', 'middle');
+    idxT.setAttribute('dy', '-20');
+    idxT.textContent = String(i + 1);
+    g.appendChild(idxT);
+    // Room to breathe here — options spell themselves out instead of the
+    // strip's compressed chip codes.
+    const opts = [];
+    if (entry.repeats > 1) opts.push(`${entry.repeats} cycles`);
+    if ((entry.prob ?? 1) < 1) opts.push(`prob ${Math.round(entry.prob * 100)}%`);
+    if (entry.cond) {
+      const c = SONG_CONDITIONS[entry.cond];
+      if (c?.b) opts.push(`plays ${c.a} of ${c.b}`);
+    }
+    if (entry.variation === 'rnd') opts.push('var random');
+    else if (entry.variation === 'cycle') opts.push('var cycle');
+    else if (Number.isInteger(entry.variation) && entry.variation >= 0)
+      opts.push(`var ${'ABC'[entry.variation]}`);
+    if (entry.fill) opts.push('fill on change');
+    opts.forEach((line, li) => {
+      const t = document.createElementNS(ns, 'text');
+      t.setAttribute('class', 'song-orbit-opt');
+      t.setAttribute('text-anchor', 'middle');
+      t.setAttribute('dy', String(30 + li * 11));
+      t.textContent = line;
+      g.appendChild(t);
+    });
+    g.addEventListener('click', () => {
+      songOrbitSelectedId = entry.id;
+      svg.querySelectorAll('.song-orbit-node').forEach((el) => el.classList.remove('selected'));
+      g.classList.add('selected');
+      renderSongOrbitDetail();
+    });
+    g.addEventListener('dblclick', () => songCueEntry(i));
+    g.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      openSongBlockMenu(entry.id, e.clientX, e.clientY);
+    });
+    svg.appendChild(g);
+    byId.set(entry.id, { g, angle });
+  });
+
+  if (!SONG.entries.length) {
+    const empty = document.createElementNS(ns, 'text');
+    empty.setAttribute('class', 'song-orbit-empty');
+    empty.setAttribute('x', String(SONG_ORBIT_SIZE / 2));
+    empty.setAttribute('y', String(SONG_ORBIT_SIZE / 2));
+    empty.setAttribute('text-anchor', 'middle');
+    empty.textContent = 'empty — add loops above';
+    svg.appendChild(empty);
+  }
+
+  songOrbitEls = { byId, progress, dot };
+  container.appendChild(stage);
+
+  const detail = document.createElement('div');
+  detail.className = 'song-orbit-detail';
+  container.appendChild(detail);
+  renderSongOrbitDetail();
+}
+
+// Detail pane: the selected block's full card, docked beside the circle.
+function renderSongOrbitDetail() {
+  const pane = songExpandedEl?.querySelector('.song-orbit-detail');
+  if (!pane) return;
+  pane.innerHTML = '';
+  const idx = SONG.entries.findIndex((e) => e.id === songOrbitSelectedId);
+  if (idx < 0) {
+    const hint = document.createElement('span');
+    hint.className = 'song-empty-hint';
+    hint.textContent = 'click a block to edit · double-click cues it';
+    pane.appendChild(hint);
+    return;
+  }
+  pane.appendChild(buildSongCard(SONG.entries[idx], idx, false));
+}
+
+// Per display frame: sweep the rim between the playing block and its rim
+// successor by block progress, and park the dot at the sweep's tip. One path
+// + one transform — no layout work.
+function updateSongOrbitProgress(audible) {
+  if (!songOrbitEls || !songExpandedEl) return;
+  const { progress, dot, byId } = songOrbitEls;
+  const entry = SONG.entries[audible.entryIdx];
+  const node = entry && byId.get(entry.id);
+  if (!node) {
+    progress.setAttribute('d', '');
+    dot.setAttribute('opacity', '0');
+    return;
+  }
+  const loop = getLoopById(entry.loopId);
+  const stepCount = Math.max(1, loop?.gen4?.stepCount || 16);
+  // Continuous motion: interpolate inside the current step from the audio
+  // clock (the schedule entry carries its exact scheduled time) — stepping by
+  // whole 16ths reads as lag.
+  const secPerStep = 60 / TRANSPORT.bpm / 4;
+  const stepFrac = audioCtx
+    ? clamp((audioCtx.currentTime - audible.time) / secPerStep, 0, 1)
+    : 0;
+  const cycleFrac = clamp((audible.step + stepFrac) / stepCount, 0, 1);
+  const frac = clamp(
+    (Math.max(0, audible.repeat) + cycleFrac) / Math.max(1, entry.repeats),
+    0,
+    0.999,
+  );
+  const span = (Math.PI * 2) / Math.max(1, SONG.entries.length);
+  const a0 = node.angle;
+  const a = a0 + span * frac;
+  const p0 = songOrbitPos(a0);
+  const p = songOrbitPos(a);
+  const large = a - a0 > Math.PI ? 1 : 0;
+  progress.setAttribute(
+    'd',
+    `M ${p0.x} ${p0.y} A ${SONG_ORBIT_R} ${SONG_ORBIT_R} 0 ${large} 1 ${p.x} ${p.y}`,
+  );
+  dot.setAttribute('cx', String(p.x));
+  dot.setAttribute('cy', String(p.y));
+  dot.setAttribute('opacity', '1');
+}
+
+function buildSongCard(entry, idx, draggable = true) {
+  const loop = getLoopById(entry.loopId);
+  const card = document.createElement('div');
+  card.className = 'song-card';
+  card.dataset.entryId = entry.id;
+  card.draggable = draggable;
+
+  const head = document.createElement('div');
+  head.className = 'song-card-head';
+  const pos = document.createElement('span');
+  pos.className = 'song-card-pos';
+  pos.textContent = String(idx + 1);
+  const name = document.createElement('span');
+  name.className = 'song-card-name';
+  name.textContent = loop?.name ?? '?';
+  const repeats = document.createElement('button');
+  repeats.type = 'button';
+  repeats.className = 'song-card-repeats';
+  repeats.textContent = `×${entry.repeats}`;
+  repeats.title = 'Repeats — click to cycle, ⌥ scroll ±1';
+  repeats.addEventListener('click', () => {
+    const p = SONG_REPEAT_CYCLE.indexOf(entry.repeats);
+    setSongEntryRepeats(
+      entry.id,
+      p >= 0 ? SONG_REPEAT_CYCLE[(p + 1) % SONG_REPEAT_CYCLE.length] : SONG_REPEAT_CYCLE[0],
+    );
+  });
+  repeats.addEventListener('wheel', (e) => {
+    if (!e.altKey) return;
+    e.preventDefault();
+    setSongEntryRepeats(entry.id, entry.repeats - Math.sign(e.deltaY));
+  });
+  const cueBtn = document.createElement('button');
+  cueBtn.type = 'button';
+  cueBtn.className = 'song-card-cue';
+  cueBtn.textContent = '⇥';
+  cueBtn.title = 'Cue — play this block next (while the song runs)';
+  cueBtn.addEventListener('click', () => songCueEntry(idx));
+  const rmBtn = document.createElement('button');
+  rmBtn.type = 'button';
+  rmBtn.className = 'song-card-remove';
+  rmBtn.textContent = '✕';
+  rmBtn.title = 'Remove from song';
+  rmBtn.addEventListener('click', () => removeSongEntry(entry.id));
+  head.append(pos, name, repeats, cueBtn, rmBtn);
+  card.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'song-card-body';
+  appendSongEntryControls(body, entry, (structural) => {
+    songExpandedSyncMuted = !structural;
+    renderSongLane();
+    songExpandedSyncMuted = false;
+  });
+  card.appendChild(body);
+
+  card.addEventListener('dragstart', (e) => {
+    card.classList.add('dragging');
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      try {
+        e.dataTransfer.setData('text/plain', entry.id);
+      } catch (_) {}
+    }
+  });
+  card.addEventListener('dragend', () => {
+    card.classList.remove('dragging');
+    const wrap = songExpandedEl?.querySelector('.song-cards');
+    if (wrap) {
+      commitSongOrder([...wrap.querySelectorAll('.song-card')].map((el) => el.dataset.entryId));
+    }
+  });
+
+  songCardEls.set(entry.id, card);
+  return card;
+}
+
+function renderSongExpanded() {
+  const panel = songExpandedEl;
+  if (!panel) return;
+  panel.innerHTML = '';
+  songCardEls.clear();
+
+  const header = document.createElement('div');
+  header.className = 'song-expanded-header';
+  const title = document.createElement('span');
+  title.className = 'song-expanded-title';
+  title.textContent = 'SONG';
+  header.appendChild(title);
+  const addRow = document.createElement('div');
+  addRow.className = 'song-expanded-add';
+  LOOPS.list.forEach((l) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'song-expanded-add-btn';
+    b.textContent = `+ ${l.name}`;
+    b.title = `Append loop ${l.name} to the song`;
+    b.addEventListener('click', () => addSongEntry(l.id));
+    addRow.appendChild(b);
+  });
+  header.appendChild(addRow);
+  // The strip (with its own ⟳/follow) is hidden while this view is up — the
+  // song options live here too, same state underneath.
+  const optRow = document.createElement('div');
+  optRow.className = 'song-expanded-views';
+  const cycleBtn = document.createElement('button');
+  cycleBtn.type = 'button';
+  cycleBtn.className = 'song-opt-btn' + (SONG.loop ? ' active' : '');
+  cycleBtn.textContent = '⟳';
+  cycleBtn.title = 'Cycle the song when it reaches the end';
+  cycleBtn.addEventListener('click', () => {
+    SONG.loop = !SONG.loop;
+    renderSongLane();
+  });
+  const followBtn = document.createElement('button');
+  followBtn.type = 'button';
+  followBtn.className = 'song-opt-btn' + (SONG.follow ? ' active' : '');
+  followBtn.textContent = 'follow';
+  followBtn.title = 'While the song plays, show the loop that is sounding';
+  followBtn.addEventListener('click', () => {
+    SONG.follow = !SONG.follow;
+    renderSongLane();
+  });
+  optRow.append(cycleBtn, followBtn);
+  header.appendChild(optRow);
+  const viewRow = document.createElement('div');
+  viewRow.className = 'song-expanded-views';
+  [
+    ['orbit', 'ORBIT'],
+    ['cards', 'CARDS'],
+  ].forEach(([key, label]) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'song-expanded-view-btn' + (songExpandedView === key ? ' active' : '');
+    b.textContent = label;
+    b.addEventListener('click', () => {
+      if (songExpandedView === key) return;
+      songExpandedView = key;
+      renderSongExpanded();
+    });
+    viewRow.appendChild(b);
+  });
+  header.appendChild(viewRow);
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'song-expanded-close';
+  closeBtn.textContent = '✕';
+  closeBtn.title = 'Close (Esc)';
+  closeBtn.addEventListener('click', closeSongExpanded);
+  header.appendChild(closeBtn);
+  panel.appendChild(header);
+
+  songOrbitEls = null;
+  if (songExpandedView === 'orbit') {
+    const orbitWrap = document.createElement('div');
+    orbitWrap.className = 'song-orbit';
+    renderSongOrbit(orbitWrap);
+    panel.appendChild(orbitWrap);
+  } else {
+    const cardsWrap = document.createElement('div');
+    cardsWrap.className = 'song-cards';
+    SONG.entries.forEach((entry, idx) => cardsWrap.appendChild(buildSongCard(entry, idx)));
+    cardsWrap.addEventListener('dragover', (e) => {
+      const dragging = cardsWrap.querySelector('.song-card.dragging');
+      if (!dragging) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      const after = getSongCardAfterElement(cardsWrap, e.clientX, e.clientY);
+      if (after == null) cardsWrap.appendChild(dragging);
+      else if (after !== dragging) cardsWrap.insertBefore(dragging, after);
+    });
+    if (!SONG.entries.length) {
+      const hint = document.createElement('span');
+      hint.className = 'song-empty-hint';
+      hint.textContent = 'empty — add loops with the buttons above';
+      cardsWrap.appendChild(hint);
+    }
+    panel.appendChild(cardsWrap);
+    requestAnimationFrame(() => drawSongCardArcs(cardsWrap));
+  }
+
+  songPlayheadRendered = { entryIdx: -2, repeat: -2, cursorIdx: -2 };
+  renderSongPlayhead();
 }
 
 // Jump arcs — one SVG overlay inside the blocks strip, redrawn only when the
@@ -11543,6 +12130,7 @@ function renderSongLane() {
 
   // Arcs need laid-out block offsets — draw once layout settles.
   requestAnimationFrame(() => drawSongJumpArcs(blocksWrap));
+  syncSongExpanded();
   renderSongPlayhead();
 }
 
@@ -15690,7 +16278,7 @@ function leaveMasteringView() {
   MASTERING.ctx?.suspend?.();
 }
 
-const PANEL_VIEWS = ['front', 'back', 'visual', 'mixer', 'master'];
+const PANEL_VIEWS = ['front', 'back', 'visual', 'mixer', 'song', 'master'];
 
 function setPanelView(mode) {
   UI_VIEW.mode = mode;
@@ -15708,6 +16296,7 @@ function setPanelView(mode) {
   getBackPanel()?.classList.toggle('hidden-panel', mode !== 'back');
   document.getElementById('visualPanel')?.classList.toggle('hidden-panel', mode !== 'visual');
   document.getElementById('mixerPanel')?.classList.toggle('hidden-panel', mode !== 'mixer');
+  document.getElementById('songPanel')?.classList.toggle('hidden-panel', mode !== 'song');
   document.getElementById('masterPanel')?.classList.toggle('hidden-panel', mode !== 'master');
   // Master view swaps the header's transport for the mastering toolbar
   // (settings gear stays) — see body.view-master CSS.
@@ -15715,6 +16304,10 @@ function setPanelView(mode) {
   getViewButtons().forEach((btn) => btn.classList.toggle('active', btn.dataset.view === mode));
   if (mode === 'master') enterMasteringView();
   else leaveMasteringView();
+  // Song view keeps the transport alive — it is a performance surface, not a
+  // render tool like mastering.
+  if (mode === 'song') enterSongView();
+  else leaveSongView();
   // Self-heal the audible state: entering mastering suspends the main
   // context, which can freeze bus/channel gain ramps mid-flight — re-assert
   // the mix on every view change so nothing stays stuck half-silent.
