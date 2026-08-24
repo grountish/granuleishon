@@ -76,8 +76,10 @@ unfrozen mic buffer is transient by nature and is not saved.
 The Mixer view provides a post-FX channel strip for each granular source, the
 synth, and the drums. Each strip has stereo metering, gain, pan, mute/solo, and
 a bypassable five-band EQ at 100 Hz, 300 Hz, 1 kHz, 3.5 kHz, and 10 kHz. A
-master strip shows the combined output and limiter reduction. Mixer settings are included in
-autosave, named projects, project files, and undo/redo history.
+master strip shows the combined output and limiter reduction. Each channel pan
+can be mapped to LFO 1/2, Seq 1, Kick SC, or Trig SC from its map dot or the
+Back patch panel. Mixer settings and mappings are included in autosave, named
+projects, project files, and undo/redo history.
 
 ## Ideas to extend later
 

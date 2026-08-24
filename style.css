@@ -101,6 +101,51 @@
     radial-gradient(ellipse at 85% -25%, #14203a 0%, var(--bg) 60%);
 }
 
+:root[data-theme='acid-circuit'] {
+  --bg: #070a07;
+  --surface: #0d130e;
+  --surface-2: #151d14;
+  --border: #344426;
+  --text: #e7f7be;
+  --muted: #718058;
+  --accent-0: #b7ff2a;
+  --accent-0-dim: #739f1c;
+  --accent-1: #ff3ec8;
+  --accent-1-dim: #b6288b;
+  --accent-fx: #22e5ff;
+  --accent-fx-dim: #168da0;
+}
+
+:root[data-theme='acid-circuit'] body {
+  background:
+    radial-gradient(circle at 12% -20%, rgba(183, 255, 42, 0.13), transparent 38%),
+    radial-gradient(circle at 92% 0%, rgba(255, 62, 200, 0.11), transparent 34%),
+    repeating-linear-gradient(90deg, rgba(183, 255, 42, 0.018) 0 1px, transparent 1px 48px),
+    var(--bg);
+}
+
+:root[data-theme='solar-ritual'] {
+  --bg: #160b0e;
+  --surface: #211113;
+  --surface-2: #30191b;
+  --border: #5a322f;
+  --text: #ffe8c2;
+  --muted: #98685a;
+  --accent-0: #ffad32;
+  --accent-0-dim: #b86f1f;
+  --accent-1: #a779ff;
+  --accent-1-dim: #7152bd;
+  --accent-fx: #ffd36a;
+  --accent-fx-dim: #b98a34;
+}
+
+:root[data-theme='solar-ritual'] body {
+  background:
+    radial-gradient(circle at 50% -22%, rgba(255, 126, 40, 0.18), transparent 42%),
+    radial-gradient(circle at 90% 20%, rgba(167, 121, 255, 0.1), transparent 38%),
+    linear-gradient(160deg, #1b0c0e 0%, var(--bg) 58%);
+}
+
 *,
 *::before,
 *::after {
@@ -120,6 +165,16 @@ body {
   font-size: 11px;
   background: var(--bg);
   color: var(--text);
+  /* Instrument UI — nothing is prose, dragging should never select text. */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input[type='text'],
+input[type='number'],
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 main {
@@ -771,40 +826,10 @@ body.view-master .transport > .status {
   display: block;
 }
 
-.view-btn-labelled,
-.mixer-view-btn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.view-btn-labelled span,
-.mixer-view-btn span {
-  font-size: 7px;
-  font-weight: 700;
-  letter-spacing: 0.07em;
-}
-
 .view-btn.active {
   background: #35506c;
   border-color: #4e7ca8;
   color: #bdd8f2;
-}
-
-.mixer-view-btn {
-  position: relative;
-  min-width: 62px;
-  margin-left: 0;
-  padding: 0 7px;
-  color: #91abc2;
-  border-color: #3d5060;
-  background: #20292f;
-}
-
-.mixer-view-btn.active {
-  color: #d6e9f8;
-  border-color: #5b8bac;
-  background: #36576e;
 }
 
 .project-menu {
@@ -1577,6 +1602,18 @@ button:disabled {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.mixer-control-heading {
+  min-height: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.mixer-map-led {
+  flex: 0 0 auto;
 }
 
 .mixer-control-value {
@@ -4332,29 +4369,6 @@ button:disabled {
   color: var(--accent-0);
 }
 
-.loop-chip-del {
-  border: none;
-  background: transparent;
-  color: var(--muted);
-  font-size: 9px;
-  padding: 3px 0;
-  width: 0;
-  overflow: hidden;
-  opacity: 0;
-}
-
-.loop-chip:hover .loop-chip-del {
-  opacity: 1;
-  width: auto;
-  padding: 3px 5px 3px 0;
-}
-
-.loop-chip-del:hover:not(:disabled) {
-  border: none;
-  background: transparent;
-  color: #e05858;
-}
-
 .loop-rename-input {
   width: 64px;
   padding: 2px 6px;
@@ -4501,21 +4515,16 @@ button:disabled {
   color: var(--accent-fx);
 }
 
-.song-expanded-add {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
+.song-expanded-spacer {
   flex: 1;
-  min-width: 0;
+  display: flex;
+  justify-content: center;
 }
 
-.song-expanded-add-btn {
-  padding: 3px 8px;
+.song-expanded-length {
   font-size: 8px;
-  font-weight: 700;
-  color: var(--text);
-  border-color: var(--accent-fx-dim);
+  letter-spacing: 0.05em;
+  color: var(--muted);
 }
 
 .song-expanded-close {
@@ -4524,45 +4533,11 @@ button:disabled {
   color: var(--muted);
 }
 
-.song-cards {
-  position: relative; /* anchors the arc overlay + card offsets */
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  gap: 10px;
-  padding: 26px 12px 12px; /* headroom for arcs above the first row */
-  overflow-y: auto;
-}
-
 .song-card {
-  width: 172px;
-  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 7px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  cursor: grab;
   user-select: none;
-}
-
-.song-card.dragging {
-  opacity: 0.4;
-  cursor: grabbing;
-}
-
-.song-card.playing {
-  border-color: var(--accent-fx);
-  background: #34290f;
-}
-
-.song-card.upnext {
-  border-color: var(--accent-fx-dim);
-  border-style: dashed;
 }
 
 .song-card-head {
@@ -4596,6 +4571,7 @@ button:disabled {
   color: var(--muted);
 }
 
+.song-card-move,
 .song-card-cue,
 .song-card-remove {
   padding: 2px 6px;
@@ -4621,17 +4597,6 @@ button:disabled {
   gap: 3px;
 }
 
-.song-expanded-view-btn {
-  padding: 3px 8px;
-  font-size: 8px;
-  color: var(--muted);
-}
-
-.song-expanded-view-btn.active {
-  border-color: var(--accent-fx-dim);
-  color: var(--accent-fx);
-}
-
 .song-orbit {
   flex: 1;
   display: flex;
@@ -4640,6 +4605,7 @@ button:disabled {
 }
 
 .song-orbit-stage {
+  position: relative; /* anchors the centered detail card */
   flex: 1;
   min-width: 0;
   padding: 8px;
@@ -4666,7 +4632,15 @@ button:disabled {
 }
 
 .song-orbit-node {
-  cursor: pointer;
+  cursor: grab;
+}
+
+.song-orbit-node.dragging {
+  cursor: grabbing;
+}
+
+.song-orbit-node.dragging circle {
+  stroke: var(--accent-fx);
 }
 
 .song-orbit-node circle {
@@ -4730,22 +4704,55 @@ button:disabled {
   fill: var(--accent-fx);
 }
 
-.song-orbit-empty {
-  font-size: 10px;
+/* Rim "+" node — add a loop from the circle itself. */
+.song-orbit-add {
+  cursor: pointer;
+}
+
+.song-orbit-add circle {
+  fill: var(--surface-2);
+  stroke: var(--muted);
+  stroke-width: 1.2;
+  stroke-dasharray: 3 2;
+}
+
+.song-orbit-add text {
+  font-size: 12px;
   fill: var(--muted);
+  pointer-events: none;
 }
 
-.song-orbit-detail {
-  width: 240px;
-  flex-shrink: 0;
-  padding: 10px;
-  border-left: 1px solid var(--border);
+.song-orbit-add:hover circle {
+  stroke: var(--accent-fx);
+}
+
+.song-orbit-add:hover text {
+  fill: var(--accent-fx);
+}
+
+/* Selected block's controls, floating in the circle's dead center. */
+.song-orbit-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 232px;
+  max-height: 62%;
   overflow-y: auto;
+  padding: 10px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  backdrop-filter: blur(3px);
 }
 
-.song-orbit-detail .song-card {
+.song-orbit-center.idle {
   width: auto;
-  cursor: default;
+  background: transparent;
+  border: none;
+  backdrop-filter: none;
+  overflow: visible;
+  text-align: center;
 }
 
 /* The loop/song strips live inside the 36px header — hide the scrollbar
@@ -4888,6 +4895,10 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 3px;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
+.loop-chip-menu {
+  width: 140px;
 }
 
 .song-block-menu-title {
@@ -5291,6 +5302,390 @@ button:disabled {
   border-color: #e49abc;
   background: #e49abc;
   color: #281921;
+}
+
+/* ── Acid Circuit theme ────────────────────────────────────── */
+
+:root[data-theme='acid-circuit'] button,
+:root[data-theme='acid-circuit'] input,
+:root[data-theme='acid-circuit'] select {
+  border-color: #344b24;
+  background-color: #10170f;
+  color: #e7f7be;
+}
+
+:root[data-theme='acid-circuit'] button:hover:not(:disabled),
+:root[data-theme='acid-circuit'] select:hover,
+:root[data-theme='acid-circuit'] input:hover:not(:disabled) {
+  border-color: #b7ff2a;
+  background-color: #1a2616;
+  box-shadow: 0 0 8px rgba(183, 255, 42, 0.16);
+}
+
+:root[data-theme='acid-circuit'] button.active:not(.record-btn):not(.instrument-mute-btn):not(.lfo-led),
+:root[data-theme='acid-circuit'] .fx-mode-btn.active,
+:root[data-theme='acid-circuit'] .source-mode-btn.active {
+  border-color: #d5ff7b;
+  background: #b7ff2a;
+  color: #091006;
+  box-shadow: 0 0 10px rgba(183, 255, 42, 0.32);
+}
+
+:root[data-theme='acid-circuit'] .header-bar,
+:root[data-theme='acid-circuit'] .col-header,
+:root[data-theme='acid-circuit'] .fx-section-label,
+:root[data-theme='acid-circuit'] .mixer-channel-header {
+  border-color: #3f572a;
+  background: linear-gradient(90deg, #111b0f, #17131a 76%, #1c101a);
+}
+
+:root[data-theme='acid-circuit'] .project-menu,
+:root[data-theme='acid-circuit'] .settings-modal,
+:root[data-theme='acid-circuit'] .mod-source-menu,
+:root[data-theme='acid-circuit'] .song-block-menu {
+  border-color: #668d32;
+  background: linear-gradient(145deg, #182315, #101311 62%, #1b1019);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.7), 0 0 16px rgba(183, 255, 42, 0.08);
+}
+
+:root[data-theme='acid-circuit'] .workspace,
+:root[data-theme='acid-circuit'] .back-panel,
+:root[data-theme='acid-circuit'] .mixer-panel,
+:root[data-theme='acid-circuit'] .song-panel-view,
+:root[data-theme='acid-circuit'] .master-panel {
+  background:
+    linear-gradient(rgba(183, 255, 42, 0.018) 1px, transparent 1px) 0 0 / 32px 32px,
+    linear-gradient(90deg, rgba(183, 255, 42, 0.018) 1px, transparent 1px) 0 0 / 32px 32px,
+    radial-gradient(circle at 10% 0%, rgba(183, 255, 42, 0.07), transparent 36%),
+    radial-gradient(circle at 92% 8%, rgba(255, 62, 200, 0.06), transparent 30%),
+    var(--bg);
+}
+
+:root[data-theme='acid-circuit'] .generator,
+:root[data-theme='acid-circuit'] #fx-chain,
+:root[data-theme='acid-circuit'] .drum-grid,
+:root[data-theme='acid-circuit'] .drum-note-editor,
+:root[data-theme='acid-circuit'] .mixer-channel,
+:root[data-theme='acid-circuit'] .mixer-eq,
+:root[data-theme='acid-circuit'] .master-section,
+:root[data-theme='acid-circuit'] .master-leveler,
+:root[data-theme='acid-circuit'] .song-card,
+:root[data-theme='acid-circuit'] .song-orbit-center {
+  border-color: #344b24;
+  background: linear-gradient(155deg, rgba(23, 34, 20, 0.98), rgba(9, 13, 9, 0.98));
+  box-shadow: inset 0 1px rgba(220, 255, 147, 0.035), 0 8px 22px rgba(0, 0, 0, 0.22);
+}
+
+:root[data-theme='acid-circuit'] .control:hover,
+:root[data-theme='acid-circuit'] .fx-section-label:hover {
+  background: rgba(183, 255, 42, 0.07);
+}
+
+:root[data-theme='acid-circuit'] .drum-step,
+:root[data-theme='acid-circuit'] .drum-note-cell,
+:root[data-theme='acid-circuit'] .seq-step {
+  border-color: #344b24;
+  background: #0c120c;
+}
+
+:root[data-theme='acid-circuit'] .drum-note-lanes,
+:root[data-theme='acid-circuit'] .drum-note-label,
+:root[data-theme='acid-circuit'] .drum-note-step-header,
+:root[data-theme='acid-circuit'] .drum-note-step-number {
+  background: #121b11;
+}
+
+:root[data-theme='acid-circuit'] .drum-note-row.black-key,
+:root[data-theme='acid-circuit'] .drum-note-row.black-key .drum-note-cell,
+:root[data-theme='acid-circuit'] .drum-note-row.black-key .drum-note-label {
+  background: #090d09;
+}
+
+:root[data-theme='acid-circuit'] .loop-chip,
+:root[data-theme='acid-circuit'] .song-block {
+  border-color: #344b24;
+  background: #10170f;
+}
+
+:root[data-theme='acid-circuit'] .loop-chip.active,
+:root[data-theme='acid-circuit'] .song-block.playing {
+  border-color: #22e5ff;
+  background: #102226;
+  box-shadow: 0 0 8px rgba(34, 229, 255, 0.18);
+}
+
+:root[data-theme='acid-circuit'] .back-module {
+  border-color: #46642b;
+  background:
+    repeating-linear-gradient(180deg, rgba(183, 255, 42, 0.86) 0 2px, transparent 2px 8px) left 4px top 14px / 5px calc(100% - 28px) no-repeat,
+    repeating-linear-gradient(180deg, rgba(255, 62, 200, 0.72) 0 2px, transparent 2px 8px) right 4px top 14px / 5px calc(100% - 28px) no-repeat,
+    linear-gradient(145deg, #152112, #080c09 74%);
+  box-shadow: inset 0 1px rgba(220, 255, 147, 0.06), 0 0 14px rgba(183, 255, 42, 0.06), 0 10px 24px rgba(0, 0, 0, 0.38);
+}
+
+:root[data-theme='acid-circuit'] .back-module::after {
+  border-color: rgba(183, 255, 42, 0.1);
+}
+
+:root[data-theme='acid-circuit'] .back-module-title {
+  border-color: rgba(183, 255, 42, 0.16);
+  color: #e7f7be;
+}
+
+:root[data-theme='acid-circuit'] .patch-jack {
+  border-color: #789b39;
+  box-shadow: 0 0 7px rgba(183, 255, 42, 0.12);
+}
+
+:root[data-theme='acid-circuit'] .mixer-gen3 {
+  --gen-accent: #22e5ff;
+}
+
+:root[data-theme='acid-circuit'] .mixer-gen4 {
+  --gen-accent: #ff5b45;
+}
+
+:root[data-theme='acid-circuit'] .mixer-meter,
+:root[data-theme='acid-circuit'] .mixer-meter-track {
+  border-color: #26331d;
+  background: #050805;
+}
+
+:root[data-theme='acid-circuit'] .mixer-meter-peak,
+:root[data-theme='acid-circuit'] .mixer-meter-peak:hover,
+:root[data-theme='acid-circuit'] .mixer-meter-peak:focus-visible {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+:root[data-theme='acid-circuit'] .mixer-meter-fill {
+  background: linear-gradient(to top, #b7ff2a 0 72%, #22e5ff 84%, #22e5ff 90.9%, #ff3ec8 90.9% 100%);
+  box-shadow: 0 0 7px rgba(183, 255, 42, 0.42);
+}
+
+:root[data-theme='acid-circuit'] .mixer-meter-track::after,
+:root[data-theme='acid-circuit'] .mixer-meter-hold {
+  background: #dcff9c;
+  box-shadow: 0 0 4px rgba(183, 255, 42, 0.9);
+}
+
+:root[data-theme='acid-circuit'] .mixer-meter-peak.over-zero {
+  color: #ff3ec8;
+}
+
+:root[data-theme='acid-circuit'] .mixer-meter-hold.over-zero {
+  background: #ff3ec8;
+  box-shadow: 0 0 5px rgba(255, 62, 200, 0.9);
+}
+
+:root[data-theme='acid-circuit'] .instrument-solo-btn.active {
+  border-color: #b7ff2a;
+  background: #b7ff2a;
+  color: #091006;
+}
+
+:root[data-theme='acid-circuit'] .instrument-mute-btn.active,
+:root[data-theme='acid-circuit'] .record-btn.active {
+  border-color: #ff3ec8;
+  background: #ff3ec8;
+  color: #190813;
+  box-shadow: 0 0 9px rgba(255, 62, 200, 0.35);
+}
+
+/* ── Solar Ritual theme ────────────────────────────────────── */
+
+:root[data-theme='solar-ritual'] button,
+:root[data-theme='solar-ritual'] input,
+:root[data-theme='solar-ritual'] select {
+  border-color: #5a322f;
+  background-color: #281416;
+  color: #ffe8c2;
+}
+
+:root[data-theme='solar-ritual'] button:hover:not(:disabled),
+:root[data-theme='solar-ritual'] select:hover,
+:root[data-theme='solar-ritual'] input:hover:not(:disabled) {
+  border-color: #ffad32;
+  background-color: #3a1d1b;
+  box-shadow: 0 0 9px rgba(255, 173, 50, 0.14);
+}
+
+:root[data-theme='solar-ritual'] button.active:not(.record-btn):not(.instrument-mute-btn):not(.lfo-led),
+:root[data-theme='solar-ritual'] .fx-mode-btn.active,
+:root[data-theme='solar-ritual'] .source-mode-btn.active {
+  border-color: #ffd36a;
+  background: linear-gradient(180deg, #ffc04b, #ee8b27);
+  color: #2a1009;
+  box-shadow: 0 0 11px rgba(255, 173, 50, 0.3);
+}
+
+:root[data-theme='solar-ritual'] .header-bar,
+:root[data-theme='solar-ritual'] .col-header,
+:root[data-theme='solar-ritual'] .fx-section-label,
+:root[data-theme='solar-ritual'] .mixer-channel-header {
+  border-color: #6a3930;
+  background: linear-gradient(90deg, #351817, #271416 58%, #22132d);
+}
+
+:root[data-theme='solar-ritual'] .project-menu,
+:root[data-theme='solar-ritual'] .settings-modal,
+:root[data-theme='solar-ritual'] .mod-source-menu,
+:root[data-theme='solar-ritual'] .song-block-menu {
+  border-color: #8a4c37;
+  background: linear-gradient(145deg, #3b1d1a, #251215 62%, #2b1736);
+  box-shadow: 0 14px 34px rgba(7, 2, 3, 0.72), 0 0 18px rgba(255, 142, 38, 0.07);
+}
+
+:root[data-theme='solar-ritual'] .workspace,
+:root[data-theme='solar-ritual'] .back-panel,
+:root[data-theme='solar-ritual'] .mixer-panel,
+:root[data-theme='solar-ritual'] .song-panel-view,
+:root[data-theme='solar-ritual'] .master-panel {
+  background:
+    radial-gradient(circle at 50% -18%, rgba(255, 173, 50, 0.11), transparent 38%),
+    radial-gradient(circle at 92% 82%, rgba(167, 121, 255, 0.06), transparent 30%),
+    linear-gradient(150deg, #1c0c0f, #12090b 72%);
+}
+
+:root[data-theme='solar-ritual'] .generator,
+:root[data-theme='solar-ritual'] #fx-chain,
+:root[data-theme='solar-ritual'] .drum-grid,
+:root[data-theme='solar-ritual'] .drum-note-editor,
+:root[data-theme='solar-ritual'] .mixer-channel,
+:root[data-theme='solar-ritual'] .mixer-eq,
+:root[data-theme='solar-ritual'] .master-section,
+:root[data-theme='solar-ritual'] .master-leveler,
+:root[data-theme='solar-ritual'] .song-card,
+:root[data-theme='solar-ritual'] .song-orbit-center {
+  border-color: #62352f;
+  border-radius: 6px;
+  background: linear-gradient(150deg, rgba(52, 26, 24, 0.98), rgba(28, 13, 16, 0.98));
+  box-shadow: inset 0 1px rgba(255, 232, 194, 0.04), 0 9px 24px rgba(5, 1, 2, 0.28);
+}
+
+:root[data-theme='solar-ritual'] .control:hover,
+:root[data-theme='solar-ritual'] .fx-section-label:hover {
+  background: rgba(255, 173, 50, 0.07);
+}
+
+:root[data-theme='solar-ritual'] .drum-step,
+:root[data-theme='solar-ritual'] .drum-note-cell,
+:root[data-theme='solar-ritual'] .seq-step {
+  border-color: #5a322f;
+  background: #211013;
+}
+
+:root[data-theme='solar-ritual'] .drum-note-lanes,
+:root[data-theme='solar-ritual'] .drum-note-label,
+:root[data-theme='solar-ritual'] .drum-note-step-header,
+:root[data-theme='solar-ritual'] .drum-note-step-number {
+  background: #32191a;
+}
+
+:root[data-theme='solar-ritual'] .drum-note-row.black-key,
+:root[data-theme='solar-ritual'] .drum-note-row.black-key .drum-note-cell,
+:root[data-theme='solar-ritual'] .drum-note-row.black-key .drum-note-label {
+  background: #190c0f;
+}
+
+:root[data-theme='solar-ritual'] .loop-chip,
+:root[data-theme='solar-ritual'] .song-block {
+  border-color: #67372f;
+  border-radius: 5px;
+  background: #2b1517;
+}
+
+:root[data-theme='solar-ritual'] .loop-chip.active,
+:root[data-theme='solar-ritual'] .song-block.playing {
+  border-color: #ffd36a;
+  background: #4a2818;
+  box-shadow: 0 0 9px rgba(255, 173, 50, 0.17);
+}
+
+:root[data-theme='solar-ritual'] .song-orbit-node.playing circle {
+  fill: #4a2818;
+}
+
+:root[data-theme='solar-ritual'] .back-module {
+  border-color: #784332;
+  border-radius: 7px;
+  background:
+    repeating-linear-gradient(180deg, rgba(255, 173, 50, 0.8) 0 3px, transparent 3px 10px) left 4px top 14px / 6px calc(100% - 28px) no-repeat,
+    repeating-linear-gradient(180deg, rgba(167, 121, 255, 0.65) 0 3px, transparent 3px 10px) right 4px top 14px / 6px calc(100% - 28px) no-repeat,
+    radial-gradient(circle at 50% 0%, rgba(255, 173, 50, 0.09), transparent 45%),
+    linear-gradient(160deg, #361a17, #160b0e 76%);
+  box-shadow: inset 0 1px rgba(255, 232, 194, 0.07), 0 0 16px rgba(255, 173, 50, 0.045), 0 12px 26px rgba(7, 2, 3, 0.42);
+}
+
+:root[data-theme='solar-ritual'] .back-module::after {
+  border-color: rgba(255, 211, 106, 0.1);
+}
+
+:root[data-theme='solar-ritual'] .back-module-title {
+  border-color: rgba(255, 173, 50, 0.18);
+  color: #ffe8c2;
+}
+
+:root[data-theme='solar-ritual'] .patch-jack {
+  border-color: #a9663d;
+  box-shadow: 0 0 7px rgba(255, 173, 50, 0.12);
+}
+
+:root[data-theme='solar-ritual'] .mixer-gen3 {
+  --gen-accent: #ff6f3c;
+}
+
+:root[data-theme='solar-ritual'] .mixer-gen4 {
+  --gen-accent: #a779ff;
+}
+
+:root[data-theme='solar-ritual'] .mixer-meter,
+:root[data-theme='solar-ritual'] .mixer-meter-track {
+  border-color: #48251f;
+  background: #100708;
+}
+
+:root[data-theme='solar-ritual'] .mixer-meter-peak,
+:root[data-theme='solar-ritual'] .mixer-meter-peak:hover,
+:root[data-theme='solar-ritual'] .mixer-meter-peak:focus-visible {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+:root[data-theme='solar-ritual'] .mixer-meter-fill {
+  background: linear-gradient(to top, #ffd36a 0 72%, #ff9b35 84%, #ff9b35 90.9%, #a779ff 90.9% 100%);
+  box-shadow: 0 0 7px rgba(255, 173, 50, 0.4);
+}
+
+:root[data-theme='solar-ritual'] .mixer-meter-track::after,
+:root[data-theme='solar-ritual'] .mixer-meter-hold {
+  background: #fff0bc;
+  box-shadow: 0 0 4px rgba(255, 211, 106, 0.9);
+}
+
+:root[data-theme='solar-ritual'] .mixer-meter-peak.over-zero {
+  color: #c29aff;
+}
+
+:root[data-theme='solar-ritual'] .mixer-meter-hold.over-zero {
+  background: #a779ff;
+  box-shadow: 0 0 5px rgba(167, 121, 255, 0.92);
+}
+
+:root[data-theme='solar-ritual'] .instrument-solo-btn.active {
+  border-color: #ffd36a;
+  background: #ffd36a;
+  color: #2a1009;
+}
+
+:root[data-theme='solar-ritual'] .instrument-mute-btn.active,
+:root[data-theme='solar-ritual'] .record-btn.active {
+  border-color: #a779ff;
+  background: #a779ff;
+  color: #180d28;
+  box-shadow: 0 0 9px rgba(167, 121, 255, 0.35);
 }
 
 /* Keep sequenced notes legible regardless of theme surface overrides. */

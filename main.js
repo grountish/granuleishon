@@ -1,7 +1,16 @@
 // grnsh — main thread: mic capture, worklet setup, UI wiring.
 
 const THEME_STORAGE_KEY = 'grnsh-theme-v1';
-const APP_THEMES = new Set(['original', 'sober', 'slate-arrangement', 'slate-session', 'neon-flux', 'aurora']);
+const APP_THEMES = new Set([
+  'original',
+  'sober',
+  'slate-arrangement',
+  'slate-session',
+  'neon-flux',
+  'aurora',
+  'acid-circuit',
+  'solar-ritual',
+]);
 const LEGACY_THEME_NAMES = {
   ableton: 'slate-arrangement',
   'ableton-session': 'slate-session',
@@ -970,6 +979,9 @@ function stopStemTaps({ save = false, baseName = 'grnsh' } = {}) {
 // exact-length.
 
 const BOUNCE_TAIL_MS = 2000;
+// Jumps can loop the song; a 100%-chance ∞ jump would render forever. The
+// bounce stops (and saves) once it runs this far past the written length.
+const BOUNCE_CAP_FACTOR = 4;
 const BOUNCE = {
   active: false,
   muted: false,
@@ -978,6 +990,8 @@ const BOUNCE = {
   tailTimer: null,
   phase: 'idle',
   songSeconds: 0,
+  capSeconds: 0,
+  renderedSeconds: 0,
   tailStartedAt: 0,
   prevMode: 'loop',
   prevSongLoop: true,
@@ -990,6 +1004,51 @@ function getBounceSongSeconds() {
     if (!loop) return seconds;
     return seconds + loop.gen4.stepCount * Math.max(1, entry.repeats) * secPerStep;
   }, 0);
+}
+
+// Written length from the playing cursor onward, assuming a straight run to
+// the end. Recomputed per progress tick, so every jump, skipped block, or
+// condition re-aims the estimate instead of leaving the bar stuck on the
+// original linear guess.
+function getBounceRemainingSeconds() {
+  const secPerStep = 60 / TRANSPORT.bpm / 4;
+  let seconds = 0;
+  SONG.entries.forEach((entry, i) => {
+    if (i < SONG.cursor.entryIdx) return;
+    const loop = getLoopById(entry.loopId);
+    if (!loop) return;
+    let cycles = Math.max(1, entry.repeats);
+    if (i === SONG.cursor.entryIdx) {
+      cycles = Math.max(1, cycles - Math.max(0, SONG.cursor.repeat));
+    }
+    seconds += loop.gen4.stepCount * cycles * secPerStep;
+  });
+  return seconds;
+}
+
+function formatSongClock(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// Approximate song length for the header/bounce readouts. Expected weighs
+// each entry by its probability and drops entries whose condition skips the
+// first visit; jumps are flagged as open-ended rather than modeled.
+function getSongLengthEstimate() {
+  const secPerStep = 60 / TRANSPORT.bpm / 4;
+  let written = 0;
+  let expected = 0;
+  let openEnded = false;
+  SONG.entries.forEach((entry) => {
+    const loop = getLoopById(entry.loopId);
+    if (!loop) return;
+    const len = loop.gen4.stepCount * Math.max(1, entry.repeats) * secPerStep;
+    written += len;
+    const cond = SONG_CONDITIONS[entry.cond || 0];
+    if (!cond?.b || cond.a === 1) expected += len * (entry.prob ?? 1);
+    if (entry.jump?.targetId && (entry.jump.chance ?? 1) > 0) openEnded = true;
+  });
+  return { written, expected, openEnded };
 }
 
 function setBounceProgress(progress) {
@@ -1014,19 +1073,24 @@ function refreshBounceProgress() {
     return;
   }
   const tailSeconds = BOUNCE_TAIL_MS / 1000;
-  const totalSeconds = Math.max(0.001, BOUNCE.songSeconds + tailSeconds);
-  const songShare = BOUNCE.songSeconds / totalSeconds;
   if (BOUNCE.phase === 'preparing') {
     setBounceProgress(0);
     return;
   }
   if (BOUNCE.phase === 'tail') {
+    const done = BOUNCE.renderedSeconds;
+    const total = Math.max(0.001, done + tailSeconds);
     const tailElapsed = Math.max(0, performance.now() - BOUNCE.tailStartedAt) / 1000;
-    setBounceProgress(songShare + clamp(tailElapsed / tailSeconds, 0, 1) * (1 - songShare));
+    setBounceProgress(
+      (done + clamp(tailElapsed, 0, tailSeconds)) / total,
+    );
     return;
   }
-  const renderedSeconds = audioCtx ? REC.sampleCount / audioCtx.sampleRate : 0;
-  setBounceProgress(clamp(renderedSeconds / Math.max(0.001, BOUNCE.songSeconds), 0, 1) * songShare);
+  // elapsed / (elapsed + live remaining): honest under jumps — the bar dips
+  // when a jump throws the song backward instead of pinning at 100%.
+  const elapsed = audioCtx ? REC.sampleCount / audioCtx.sampleRate : 0;
+  const total = Math.max(0.001, elapsed + getBounceRemainingSeconds() + tailSeconds);
+  setBounceProgress(clamp(elapsed / total, 0, 1));
 }
 
 async function bounceSong(opts = {}) {
@@ -1050,6 +1114,12 @@ async function bounceSong(opts = {}) {
   BOUNCE.active = true;
   BOUNCE.phase = 'preparing';
   BOUNCE.songSeconds = getBounceSongSeconds();
+  const userCap = Number(BOUNCE_CAP.value);
+  BOUNCE.capSeconds =
+    Number.isFinite(userCap) && userCap > 0
+      ? userCap
+      : Math.max(BOUNCE.songSeconds * BOUNCE_CAP_FACTOR, BOUNCE.songSeconds + 30);
+  BOUNCE.renderedSeconds = 0;
   BOUNCE.tailStartedAt = 0;
   refreshBounceUI();
   try {
@@ -1072,12 +1142,23 @@ async function bounceSong(opts = {}) {
     BOUNCE.phase = 'rendering';
     BOUNCE.progressTimer = setInterval(refreshBounceProgress, 100);
     refreshBounceProgress();
-    setStatus('bouncing song…');
+    setStatus(
+      `bouncing song… ≈ ${formatSongClock(BOUNCE.songSeconds)} (cap ${formatSongClock(BOUNCE.capSeconds)})`,
+    );
     BOUNCE.pollTimer = setInterval(() => {
+      const elapsed = audioCtx ? REC.sampleCount / audioCtx.sampleRate : 0;
+      if (GEN4.playing && elapsed > BOUNCE.capSeconds) {
+        // Runaway jump cycle — keep what rendered and say why it stopped.
+        finishBounce(
+          `bounce stopped at ${Math.round(BOUNCE.capSeconds)}s safety cap — check ∞ jumps`,
+        );
+        return;
+      }
       if (!GEN4.playing && !BOUNCE.tailTimer) {
         clearInterval(BOUNCE.pollTimer);
         BOUNCE.pollTimer = null;
         BOUNCE.phase = 'tail';
+        BOUNCE.renderedSeconds = elapsed;
         BOUNCE.tailStartedAt = performance.now();
         refreshBounceProgress();
         BOUNCE.tailTimer = setTimeout(() => finishBounce(), BOUNCE_TAIL_MS);
@@ -2003,6 +2084,21 @@ function getEffectiveFxValue(id, key, busId = activeBus) {
   );
 }
 
+const MIXER_PAN_PARAM = { min: -1, max: 1, step: 0.01, unit: '' };
+
+function getEffectiveMixerPan(busId) {
+  const base = INSTRUMENT_MIX[busId]?.pan ?? 0;
+  const mapping = lfoMappings.get(`5:${busId}:pan`);
+  if (!mapping) return base;
+  const scaled = getModSourceScaledValue(mapping.sourceIdx);
+  if (scaled === null) return base;
+  return clamp(
+    base + getModOffset(mapping.sourceIdx, scaled, MIXER_PAN_PARAM),
+    MIXER_PAN_PARAM.min,
+    MIXER_PAN_PARAM.max,
+  );
+}
+
 let modVisualsActive = false; // were modulation visuals showing last frame?
 
 let backStateLastLiveRefresh = 0;
@@ -2010,12 +2106,13 @@ let modVisualsLastLiveRefresh = 0;
 
 function applyMappedModulationTargets() {
   const hasMappings = lfoMappings.size > 0;
+  const gens = hasMappings ? new Set([...lfoMappings.values()].map((m) => m.genIdx)) : new Set();
   if (hasMappings) {
-    const gens = new Set([...lfoMappings.values()].map((m) => m.genIdx));
     gens.forEach((gi) => {
       if (gi === 2) applyGen3Modulation();
       else if (gi === 3) applyFxModulationMapped();
       else if (gi === 4) applyGen4Modulation();
+      else if (gi === 5) applyMixerPanModulationMapped();
       else sendParams(gi);
     });
   }
@@ -2039,6 +2136,13 @@ function applyMappedModulationTargets() {
     if (now - backStateLastLiveRefresh >= 33) {
       backStateLastLiveRefresh = now;
       refreshBackPanelState();
+    }
+  }
+  if (UI_VIEW.mode === 'mixer' && gens.has(5)) {
+    const now = performance.now();
+    if (now - mixerModVisualsLastRefresh >= 33) {
+      mixerModVisualsLastRefresh = now;
+      refreshMixerPanModulationVisuals();
     }
   }
   modVisualsActive = hasMappings;
@@ -2091,6 +2195,20 @@ function applyFxModulationMapped() {
     FX_BUS_IDS.forEach((busId) => {
       applyFx(id, paramKey, getEffectiveFxValue(id, paramKey, busId), busId);
     });
+  });
+}
+
+function applyMixerPanModulationMapped() {
+  if (!audioCtx) return;
+  lfoMappings.forEach(({ genIdx, key }) => {
+    if (genIdx !== 5) return;
+    const [busId, param] = key.split(':');
+    if (param !== 'pan' || !FX_BUS_IDS.includes(busId)) return;
+    fxBuses[busId]?.mixer?.pan.pan.setTargetAtTime(
+      getEffectiveMixerPan(busId),
+      audioCtx.currentTime,
+      0.01,
+    );
   });
 }
 
@@ -2223,6 +2341,7 @@ function refreshLFOMappingUI() {
       ctrlMap.get(pd.key)?.setMapLFO(mapping ? mapping.sourceIdx : null);
     });
   });
+  refreshMixerMappingUI();
   refreshModulationVisuals();
   refreshBackPanelState();
 }
@@ -8425,6 +8544,7 @@ const MIXER = {
   meterBuffers: new WeakMap(),
   raf: null,
 };
+let mixerModVisualsLastRefresh = 0;
 
 function refreshInstrumentMixUI() {
   const hasSolo = FX_BUS_IDS.some((busId) => INSTRUMENT_MIX[busId].solo);
@@ -8480,7 +8600,7 @@ function applyInstrumentMixState() {
         audioCtx.currentTime,
         0.01,
       );
-      bus.mixer.pan.pan.setTargetAtTime(clamp(mix.pan, -1, 1), audioCtx.currentTime, 0.01);
+      bus.mixer.pan.pan.setTargetAtTime(getEffectiveMixerPan(busId), audioCtx.currentTime, 0.01);
       bus.mixer.low.gain.setTargetAtTime(
         clamp(mix.eqLow, -18, 18),
         audioCtx.currentTime,
@@ -8569,8 +8689,8 @@ function formatMixerPan(value) {
   return `${value < 0 ? 'L' : 'R'}${Math.round(Math.abs(value) * 100)}`;
 }
 
-function buildMixerKnob(busId, key, label, spec, format) {
-  const group = document.createElement('label');
+function buildMixerKnob(busId, key, label, spec, format, modTarget = null) {
+  const group = document.createElement('div');
   group.className = 'mixer-knob-group';
   const title = document.createElement('span');
   title.className = 'mixer-control-label';
@@ -8595,6 +8715,27 @@ function buildMixerKnob(busId, key, label, spec, format) {
   knob.setAttribute('aria-valuemax', `${spec.max}`);
   knob.setAttribute('aria-valuenow', `${current}`);
   knob.setAttribute('aria-valuetext', format(current));
+  let mapLed = null;
+  if (modTarget) {
+    mapLed = document.createElement('button');
+    mapLed.type = 'button';
+    mapLed.className = 'lfo-led mixer-map-led';
+    setLFOLedState(mapLed, null);
+    mapLed.addEventListener('click', (event) => {
+      event.stopPropagation();
+      setLFOLedState(mapLed, cycleLFOMap(modTarget.genIdx, modTarget.key));
+    });
+    mapLed.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openModSourceMenu(modTarget, mapLed, event.clientX, event.clientY);
+    });
+    knob.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openModSourceMenu(modTarget, mapLed, event.clientX, event.clientY);
+    });
+  }
   knob.addEventListener('keydown', (event) => {
     let direction = 0;
     if (event.key === 'ArrowUp' || event.key === 'ArrowRight') direction = 1;
@@ -8612,7 +8753,14 @@ function buildMixerKnob(busId, key, label, spec, format) {
   });
 
   value.textContent = format(current);
-  group.append(title, knob, value);
+  if (mapLed) {
+    const heading = document.createElement('div');
+    heading.className = 'mixer-control-heading';
+    heading.append(title, mapLed);
+    group.append(heading, knob, value);
+  } else {
+    group.append(title, knob, value);
+  }
   return {
     el: group,
     setValue(next) {
@@ -8621,6 +8769,12 @@ function buildMixerKnob(busId, key, label, spec, format) {
       value.textContent = format(next);
       knob.setAttribute('aria-valuenow', `${next}`);
       knob.setAttribute('aria-valuetext', format(next));
+    },
+    setMapLFO(sourceIdx) {
+      if (mapLed) setLFOLedState(mapLed, sourceIdx);
+    },
+    setModValue(next) {
+      knob.setModValue?.(next);
     },
   };
 }
@@ -8818,6 +8972,7 @@ function buildMixerChannel(busId) {
     'Pan',
     { min: -1, max: 1, step: 0.01, resetValue: 0 },
     formatMixerPan,
+    { genIdx: 5, key: `${busId}:pan`, label: `${FX_BUS_LABELS[busId]} Pan` },
   );
   const fxBtn = document.createElement('button');
   fxBtn.type = 'button';
@@ -8948,7 +9103,29 @@ function refreshMixerControls() {
     MIXER.master.output.setAttribute('aria-valuenow', `${LIMITER.output}`);
     MIXER.master.outputValue.textContent = formatMixerDb(20 * Math.log10(LIMITER.output));
   }
+  refreshMixerMappingUI();
   refreshInstrumentMixUI();
+}
+
+function refreshMixerPanModulationVisuals() {
+  if (!MIXER.built) return;
+  FX_BUS_IDS.forEach((busId) => {
+    const pan = MIXER.strips.get(busId)?.pan;
+    if (!pan) return;
+    const mapped = lfoMappings.has(`5:${busId}:pan`);
+    pan.setModValue(mapped ? getEffectiveMixerPan(busId) : null);
+  });
+}
+
+function refreshMixerMappingUI() {
+  if (!MIXER.built) return;
+  FX_BUS_IDS.forEach((busId) => {
+    const pan = MIXER.strips.get(busId)?.pan;
+    if (!pan) return;
+    const mapping = lfoMappings.get(`5:${busId}:pan`);
+    pan.setMapLFO(mapping?.sourceIdx ?? null);
+  });
+  refreshMixerPanModulationVisuals();
 }
 
 const MIXER_METER_FLOOR_DB = -60;
@@ -10462,6 +10639,16 @@ function setBounceRenderStems(on) {
   localStorage.setItem(BOUNCE_RENDER_STORAGE_KEY, on ? 'on' : 'off');
 }
 
+// ── Bounce length cap ── 'auto' = 4× the written song length; otherwise a
+// hard cut in seconds. Jump cycles can hold a bounce forever without one.
+const BOUNCE_CAP_STORAGE_KEY = 'grnsh-bounce-cap-v1';
+const BOUNCE_CAP = { value: localStorage.getItem(BOUNCE_CAP_STORAGE_KEY) || 'auto' };
+
+function setBounceCap(value) {
+  BOUNCE_CAP.value = value;
+  localStorage.setItem(BOUNCE_CAP_STORAGE_KEY, value);
+}
+
 // ── Solo mode ── additive (default): solos stack. Exclusive: soloing an
 // instrument clears every other solo so it sounds alone.
 const SOLO_MODE_STORAGE_KEY = 'grnsh-solo-additive-v1';
@@ -10779,6 +10966,15 @@ function initSettingsMenu() {
     bounceModeSelect.addEventListener('change', () =>
       setBounceRenderStems(bounceModeSelect.value === 'stems'),
     );
+  }
+  const bounceCapSelect = document.getElementById('bounceCapSelect');
+  if (bounceCapSelect) {
+    bounceCapSelect.value = [...bounceCapSelect.options].some(
+      (o) => o.value === BOUNCE_CAP.value,
+    )
+      ? BOUNCE_CAP.value
+      : 'auto';
+    bounceCapSelect.addEventListener('change', () => setBounceCap(bounceCapSelect.value));
   }
   const soloAdditiveEnable = document.getElementById('soloAdditiveEnable');
   if (soloAdditiveEnable) {
@@ -11119,6 +11315,38 @@ function closeSongBlockMenu() {
   songBlockMenuEl = null;
 }
 
+function openLoopChipMenu(loopId, x, y) {
+  closeSongBlockMenu();
+  const loop = getLoopById(loopId);
+  if (!loop) return;
+
+  const menu = document.createElement('div');
+  menu.className = 'song-block-menu loop-chip-menu';
+  songBlockMenuEl = menu;
+
+  const title = document.createElement('div');
+  title.className = 'song-block-menu-title';
+  title.textContent = `Loop · ${loop.name}`;
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.className = 'song-block-menu-remove';
+  deleteBtn.textContent = 'delete loop';
+  deleteBtn.disabled = LOOPS.list.length <= 1;
+  deleteBtn.title = deleteBtn.disabled ? 'The last loop cannot be deleted' : `Delete loop ${loop.name}`;
+  deleteBtn.addEventListener('click', () => {
+    const index = LOOPS.list.findIndex((item) => item.id === loopId);
+    closeSongBlockMenu();
+    if (index >= 0) deleteLoop(index);
+  });
+
+  menu.append(title, deleteBtn);
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+}
+
 function openSongBlockMenu(entryId, x, y) {
   closeSongBlockMenu();
   const entry = SONG.entries.find((e) => e.id === entryId);
@@ -11338,21 +11566,16 @@ function renderLoopsBar() {
     nameBtn.type = 'button';
     nameBtn.className = 'loop-chip-name';
     nameBtn.textContent = loop.name;
-    nameBtn.title = 'Click to edit this loop · double-click to rename';
+    nameBtn.title = 'Click to edit · double-click to rename · right-click for actions';
     nameBtn.addEventListener('click', () => selectEditLoop(idx));
     nameBtn.addEventListener('dblclick', () => startLoopRename(chip, loop));
-
-    const delBtn = document.createElement('button');
-    delBtn.type = 'button';
-    delBtn.className = 'loop-chip-del';
-    delBtn.textContent = '×';
-    delBtn.title = 'Delete loop';
-    delBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      deleteLoop(idx);
+    chip.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openLoopChipMenu(loop.id, event.clientX, event.clientY);
     });
 
-    chip.append(nameBtn, delBtn);
+    chip.appendChild(nameBtn);
     bar.appendChild(chip);
   });
 
@@ -11398,7 +11621,6 @@ let songExpandedEl = null;
 let songExpandedSyncMuted = false;
 const songCardEls = new Map(); // entry id → card element
 
-let songExpandedView = 'orbit'; // 'orbit' | 'cards'
 let songOrbitEls = null; // { byId: Map(entry id → {g, angle}), progress, dot, R, cx, cy }
 let songOrbitSelectedId = null;
 
@@ -11448,67 +11670,49 @@ function songCueEntry(idx) {
   setStatus(`cued ${getLoopById(entry.loopId)?.name ?? '?'}`);
 }
 
-// Reorder target for the wrapped card grid: first card the pointer sits above
-// or left of within its row.
-function getSongCardAfterElement(container, x, y) {
-  const els = [...container.querySelectorAll('.song-card:not(.dragging)')];
-  return (
-    els.find((el) => {
-      const b = el.getBoundingClientRect();
-      if (y < b.top - 4) return true;
-      return y <= b.bottom + 4 && x < b.left + b.width / 2;
-    }) ?? null
-  );
+// Swap an entry with its neighbor — the orbit's angle-per-index layout makes
+// this the whole reorder story.
+function moveSongEntry(entryId, dir) {
+  const order = SONG.entries.map((e) => e.id);
+  const i = order.indexOf(entryId);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= order.length) return;
+  [order[i], order[j]] = [order[j], order[i]];
+  commitSongOrder(order);
 }
 
-// Labeled 2D arcs between cards (the grid wraps, so arcs travel both axes).
-function drawSongCardArcs(wrap) {
-  if (!wrap || !wrap.isConnected) return;
-  wrap.querySelector('.song-jump-arcs')?.remove();
-  const jumps = SONG.entries.filter(
-    (e) => e.jump?.targetId && songCardEls.get(e.jump.targetId) && songCardEls.get(e.id),
-  );
-  if (!jumps.length) return;
-  const ns = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(ns, 'svg');
-  svg.setAttribute('class', 'song-jump-arcs');
-  const w = wrap.scrollWidth;
-  const h = wrap.scrollHeight;
-  svg.setAttribute('width', String(w));
-  svg.setAttribute('height', String(h));
-  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
-  jumps.forEach((e) => {
-    const fromEl = songCardEls.get(e.id);
-    const toEl = songCardEls.get(e.jump.targetId);
-    const x1 = fromEl.offsetLeft + fromEl.offsetWidth / 2;
-    const y1 = fromEl.offsetTop + 2;
-    const x2 = toEl.offsetLeft + toEl.offsetWidth / 2;
-    const y2 = toEl.offsetTop + 2;
-    // Cap the lift inside the grid's 26px top padding so arcs never clip.
-    const lift = clamp(Math.abs(x2 - x1) * 0.12 + Math.abs(y2 - y1) * 0.3, 12, 24);
-    const mx = (x1 + x2) / 2;
-    const my = Math.min(y1, y2) - lift;
-    const path = document.createElementNS(ns, 'path');
-    path.setAttribute('d', `M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`);
-    path.dataset.from = e.id;
-    if (SONG.lastJump?.from === e.id) path.classList.add('taken');
-    if ((e.jump.chance ?? 1) < 1) path.classList.add('dashed');
-    svg.appendChild(path);
-    const dot = document.createElementNS(ns, 'circle');
-    dot.setAttribute('cx', String(x2));
-    dot.setAttribute('cy', String(y2));
-    dot.setAttribute('r', '2.5');
-    svg.appendChild(dot);
-    const label = document.createElementNS(ns, 'text');
-    label.setAttribute('class', 'song-arc-label');
-    label.setAttribute('x', String(mx));
-    label.setAttribute('y', String(Math.max(8, (my + Math.min(y1, y2)) / 2)));
-    label.setAttribute('text-anchor', 'middle');
-    const cap = e.jump.count || 0;
-    label.textContent = `${Math.round((e.jump.chance ?? 1) * 100)}%${cap ? ` ×${cap}` : ''}`;
-    svg.appendChild(label);
+// Loop picker for the rim's "+" node. Appends and selects, so the center
+// card is immediately editable.
+function openSongAddMenu(x, y) {
+  closeSongBlockMenu();
+  const menu = document.createElement('div');
+  menu.className = 'song-block-menu';
+  songBlockMenuEl = menu;
+  const title = document.createElement('div');
+  title.className = 'song-block-menu-title';
+  title.textContent = 'add loop';
+  menu.appendChild(title);
+  const row = document.createElement('div');
+  row.className = 'song-block-menu-presets';
+  LOOPS.list.forEach((l) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'song-block-menu-preset';
+    b.textContent = l.name;
+    b.title = `Append loop ${l.name} to the song`;
+    b.addEventListener('click', () => {
+      closeSongBlockMenu();
+      addSongEntry(l.id);
+      songOrbitSelectedId = SONG.entries[SONG.entries.length - 1]?.id ?? null;
+      syncSongExpanded();
+    });
+    row.appendChild(b);
   });
-  wrap.appendChild(svg);
+  menu.appendChild(row);
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
 }
 
 // ── Orbit view ──
@@ -11525,6 +11729,56 @@ function songOrbitPos(angle, radius = SONG_ORBIT_R) {
     x: SONG_ORBIT_SIZE / 2 + radius * Math.sin(angle),
     y: SONG_ORBIT_SIZE / 2 - radius * Math.cos(angle),
   };
+}
+
+// Drag a node around the rim to reorder. A plain click (under the 6px
+// threshold) falls through to the node's own click-to-select.
+function beginOrbitNodeDrag(e, entryId, g) {
+  if (e.button !== 0) return;
+  const svg = g.ownerSVGElement;
+  const n = SONG.entries.length;
+  if (!svg || n < 2) return;
+  const step = (Math.PI * 2) / n;
+  const startX = e.clientX;
+  const startY = e.clientY;
+  let dragging = false;
+  const toAngle = (ev) => {
+    const pt = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(
+      svg.getScreenCTM().inverse(),
+    );
+    return Math.atan2(pt.x - SONG_ORBIT_SIZE / 2, SONG_ORBIT_SIZE / 2 - pt.y);
+  };
+  const move = (ev) => {
+    if (!dragging) {
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 6) return;
+      dragging = true;
+      g.classList.add('dragging');
+      // Capture so the release lands on the node even off the circle, and the
+      // ensuing click doesn't hit the svg background (which would deselect).
+      try {
+        g.setPointerCapture(e.pointerId);
+      } catch (_) {}
+    }
+    const p = songOrbitPos(toAngle(ev));
+    g.setAttribute('transform', `translate(${p.x} ${p.y})`);
+  };
+  const up = (ev) => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    if (!dragging) return;
+    g.dataset.dragged = '1'; // swallow the click that follows the release
+    const norm = ((toAngle(ev) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    const target = Math.round(norm / step) % n;
+    const order = SONG.entries.map((x) => x.id);
+    const from = order.indexOf(entryId);
+    if (from < 0) return;
+    order.splice(from, 1);
+    order.splice(target, 0, entryId);
+    // Re-renders the orbit either way, snapping the node onto its slot.
+    commitSongOrder(order);
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
 }
 
 function renderSongOrbit(container) {
@@ -11659,13 +11913,29 @@ function renderSongOrbit(container) {
       t.textContent = line;
       g.appendChild(t);
     });
+    g.addEventListener('pointerdown', (e) => beginOrbitNodeDrag(e, entry.id, g));
     g.addEventListener('click', () => {
+      if (g.dataset.dragged) {
+        delete g.dataset.dragged;
+        return;
+      }
       songOrbitSelectedId = entry.id;
       svg.querySelectorAll('.song-orbit-node').forEach((el) => el.classList.remove('selected'));
       g.classList.add('selected');
       renderSongOrbitDetail();
     });
-    g.addEventListener('dblclick', () => songCueEntry(i));
+    // Double-click: leave the song view and edit this block's loop (cueing
+    // stays on the center card's ⇥ button). A fixed variation on the entry
+    // opens the grid on that variation — the pattern that actually sounds.
+    g.addEventListener('dblclick', () => {
+      const li = LOOPS.list.findIndex((l) => l.id === entry.loopId);
+      if (li < 0) return;
+      selectEditLoop(li);
+      if (Number.isInteger(entry.variation) && entry.variation >= 0) {
+        setGen4Variation(entry.variation);
+      }
+      setPanelView('front');
+    });
     g.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       openSongBlockMenu(entry.id, e.clientX, e.clientY);
@@ -11674,39 +11944,57 @@ function renderSongOrbit(container) {
     byId.set(entry.id, { g, angle });
   });
 
-  if (!SONG.entries.length) {
-    const empty = document.createElementNS(ns, 'text');
-    empty.setAttribute('class', 'song-orbit-empty');
-    empty.setAttribute('x', String(SONG_ORBIT_SIZE / 2));
-    empty.setAttribute('y', String(SONG_ORBIT_SIZE / 2));
-    empty.setAttribute('text-anchor', 'middle');
-    empty.textContent = 'empty — add loops above';
-    svg.appendChild(empty);
-  }
+  // Ghost "+" node on the rim, in the gap where the song wraps around —
+  // adding a loop happens on the circle itself, not in a toolbar.
+  const addPos = songOrbitPos(n ? (n - 0.5) * step : 0);
+  const addG = document.createElementNS(ns, 'g');
+  addG.setAttribute('class', 'song-orbit-add');
+  addG.setAttribute('transform', `translate(${addPos.x} ${addPos.y})`);
+  const addC = document.createElementNS(ns, 'circle');
+  addC.setAttribute('r', '11');
+  addG.appendChild(addC);
+  const addT = document.createElementNS(ns, 'text');
+  addT.setAttribute('text-anchor', 'middle');
+  addT.setAttribute('dy', '3.5');
+  addT.textContent = '+';
+  addG.appendChild(addT);
+  addG.addEventListener('click', (e) => openSongAddMenu(e.clientX, e.clientY));
+  svg.appendChild(addG);
+
+  // Clicking empty canvas drops the selection back to the song-level hint.
+  svg.addEventListener('click', (e) => {
+    if (e.target !== svg && e.target !== rim) return;
+    songOrbitSelectedId = null;
+    svg.querySelectorAll('.song-orbit-node').forEach((el) => el.classList.remove('selected'));
+    renderSongOrbitDetail();
+  });
 
   songOrbitEls = { byId, progress, dot };
+  const center = document.createElement('div');
+  center.className = 'song-orbit-center';
+  stage.appendChild(center);
   container.appendChild(stage);
-
-  const detail = document.createElement('div');
-  detail.className = 'song-orbit-detail';
-  container.appendChild(detail);
-  renderSongOrbitDetail();
 }
 
-// Detail pane: the selected block's full card, docked beside the circle.
+// Detail: the selected block's controls live in the circle's center — the
+// orbit is the whole editor, nothing docks beside it.
 function renderSongOrbitDetail() {
-  const pane = songExpandedEl?.querySelector('.song-orbit-detail');
+  const pane = songExpandedEl?.querySelector('.song-orbit-center');
   if (!pane) return;
   pane.innerHTML = '';
   const idx = SONG.entries.findIndex((e) => e.id === songOrbitSelectedId);
   if (idx < 0) {
+    pane.classList.add('idle');
     const hint = document.createElement('span');
     hint.className = 'song-empty-hint';
-    hint.textContent = 'click a block to edit · double-click cues it';
+    hint.textContent = SONG.entries.length
+      ? 'click a block to edit · drag to reorder · double-click opens its loop'
+      : 'empty — press + on the circle to add loops';
     pane.appendChild(hint);
     return;
   }
-  pane.appendChild(buildSongCard(SONG.entries[idx], idx, false));
+  pane.classList.remove('idle');
+  pane.appendChild(buildSongCard(SONG.entries[idx], idx));
 }
 
 // Per display frame: sweep the rim between the playing block and its rim
@@ -11752,12 +12040,11 @@ function updateSongOrbitProgress(audible) {
   dot.setAttribute('opacity', '1');
 }
 
-function buildSongCard(entry, idx, draggable = true) {
+function buildSongCard(entry, idx) {
   const loop = getLoopById(entry.loopId);
   const card = document.createElement('div');
   card.className = 'song-card';
   card.dataset.entryId = entry.id;
-  card.draggable = draggable;
 
   const head = document.createElement('div');
   head.className = 'song-card-head';
@@ -11784,6 +12071,20 @@ function buildSongCard(entry, idx, draggable = true) {
     e.preventDefault();
     setSongEntryRepeats(entry.id, entry.repeats - Math.sign(e.deltaY));
   });
+  const moveL = document.createElement('button');
+  moveL.type = 'button';
+  moveL.className = 'song-card-move';
+  moveL.textContent = '◂';
+  moveL.title = 'Move earlier in the song';
+  moveL.disabled = idx === 0;
+  moveL.addEventListener('click', () => moveSongEntry(entry.id, -1));
+  const moveR = document.createElement('button');
+  moveR.type = 'button';
+  moveR.className = 'song-card-move';
+  moveR.textContent = '▸';
+  moveR.title = 'Move later in the song';
+  moveR.disabled = idx === SONG.entries.length - 1;
+  moveR.addEventListener('click', () => moveSongEntry(entry.id, 1));
   const cueBtn = document.createElement('button');
   cueBtn.type = 'button';
   cueBtn.className = 'song-card-cue';
@@ -11796,7 +12097,7 @@ function buildSongCard(entry, idx, draggable = true) {
   rmBtn.textContent = '✕';
   rmBtn.title = 'Remove from song';
   rmBtn.addEventListener('click', () => removeSongEntry(entry.id));
-  head.append(pos, name, repeats, cueBtn, rmBtn);
+  head.append(pos, name, moveL, moveR, repeats, cueBtn, rmBtn);
   card.appendChild(head);
 
   const body = document.createElement('div');
@@ -11807,23 +12108,6 @@ function buildSongCard(entry, idx, draggable = true) {
     songExpandedSyncMuted = false;
   });
   card.appendChild(body);
-
-  card.addEventListener('dragstart', (e) => {
-    card.classList.add('dragging');
-    if (e.dataTransfer) {
-      e.dataTransfer.effectAllowed = 'move';
-      try {
-        e.dataTransfer.setData('text/plain', entry.id);
-      } catch (_) {}
-    }
-  });
-  card.addEventListener('dragend', () => {
-    card.classList.remove('dragging');
-    const wrap = songExpandedEl?.querySelector('.song-cards');
-    if (wrap) {
-      commitSongOrder([...wrap.querySelectorAll('.song-card')].map((el) => el.dataset.entryId));
-    }
-  });
 
   songCardEls.set(entry.id, card);
   return card;
@@ -11841,18 +12125,18 @@ function renderSongExpanded() {
   title.className = 'song-expanded-title';
   title.textContent = 'SONG';
   header.appendChild(title);
-  const addRow = document.createElement('div');
-  addRow.className = 'song-expanded-add';
-  LOOPS.list.forEach((l) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'song-expanded-add-btn';
-    b.textContent = `+ ${l.name}`;
-    b.title = `Append loop ${l.name} to the song`;
-    b.addEventListener('click', () => addSongEntry(l.id));
-    addRow.appendChild(b);
-  });
-  header.appendChild(addRow);
+  const spacer = document.createElement('div');
+  spacer.className = 'song-expanded-spacer';
+  if (SONG.entries.length) {
+    const est = getSongLengthEstimate();
+    const lengthEl = document.createElement('span');
+    lengthEl.className = 'song-expanded-length';
+    lengthEl.textContent = `≈ ${formatSongClock(est.expected)} · ${formatSongClock(est.written)} written${est.openEnded ? ' · jumps may extend' : ''}`;
+    lengthEl.title =
+      'Approximate bounce length at the current tempo: ≈ weighs each block by its probability and play condition; "written" is every block played in full. Jumps can run past both — the bounce cap (⚙ settings) cuts a runaway render.';
+    spacer.appendChild(lengthEl);
+  }
+  header.appendChild(spacer);
   // The strip (with its own ⟳/follow) is hidden while this view is up — the
   // song options live here too, same state underneath.
   const optRow = document.createElement('div');
@@ -11877,24 +12161,6 @@ function renderSongExpanded() {
   });
   optRow.append(cycleBtn, followBtn);
   header.appendChild(optRow);
-  const viewRow = document.createElement('div');
-  viewRow.className = 'song-expanded-views';
-  [
-    ['orbit', 'ORBIT'],
-    ['cards', 'CARDS'],
-  ].forEach(([key, label]) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'song-expanded-view-btn' + (songExpandedView === key ? ' active' : '');
-    b.textContent = label;
-    b.addEventListener('click', () => {
-      if (songExpandedView === key) return;
-      songExpandedView = key;
-      renderSongExpanded();
-    });
-    viewRow.appendChild(b);
-  });
-  header.appendChild(viewRow);
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
   closeBtn.className = 'song-expanded-close';
@@ -11905,33 +12171,12 @@ function renderSongExpanded() {
   panel.appendChild(header);
 
   songOrbitEls = null;
-  if (songExpandedView === 'orbit') {
-    const orbitWrap = document.createElement('div');
-    orbitWrap.className = 'song-orbit';
-    renderSongOrbit(orbitWrap);
-    panel.appendChild(orbitWrap);
-  } else {
-    const cardsWrap = document.createElement('div');
-    cardsWrap.className = 'song-cards';
-    SONG.entries.forEach((entry, idx) => cardsWrap.appendChild(buildSongCard(entry, idx)));
-    cardsWrap.addEventListener('dragover', (e) => {
-      const dragging = cardsWrap.querySelector('.song-card.dragging');
-      if (!dragging) return;
-      e.preventDefault();
-      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-      const after = getSongCardAfterElement(cardsWrap, e.clientX, e.clientY);
-      if (after == null) cardsWrap.appendChild(dragging);
-      else if (after !== dragging) cardsWrap.insertBefore(dragging, after);
-    });
-    if (!SONG.entries.length) {
-      const hint = document.createElement('span');
-      hint.className = 'song-empty-hint';
-      hint.textContent = 'empty — add loops with the buttons above';
-      cardsWrap.appendChild(hint);
-    }
-    panel.appendChild(cardsWrap);
-    requestAnimationFrame(() => drawSongCardArcs(cardsWrap));
-  }
+  const orbitWrap = document.createElement('div');
+  orbitWrap.className = 'song-orbit';
+  renderSongOrbit(orbitWrap);
+  panel.appendChild(orbitWrap);
+  // Only now can the detail find .song-orbit-center through songExpandedEl.
+  renderSongOrbitDetail();
 
   songPlayheadRendered = { entryIdx: -2, repeat: -2, cursorIdx: -2 };
   renderSongPlayhead();
@@ -12274,9 +12519,11 @@ function cycleLFOMap(genIdx, key) {
   if (genIdx === 2) applyGen3Modulation();
   else if (genIdx === 3) applyFxModulation();
   else if (genIdx === 4) applyGen4Modulation();
+  else if (genIdx === 5) applyInstrumentMixState();
   else sendParams(genIdx);
   rebuildBackWireSVG();
   refreshBackPanelState();
+  refreshMixerMappingUI();
   return nextSourceIdx;
 }
 
@@ -12287,10 +12534,12 @@ function setLFOMapSource(genIdx, key, sourceIdx) {
   if (genIdx === 2) applyGen3Modulation();
   else if (genIdx === 3) applyFxModulation();
   else if (genIdx === 4) applyGen4Modulation();
+  else if (genIdx === 5) applyInstrumentMixState();
   else sendParams(genIdx);
   rebuildBackWireSVG();
   refreshBackPanelState();
   refreshModulationVisuals();
+  refreshMixerMappingUI();
   return sourceIdx;
 }
 
@@ -12735,6 +12984,9 @@ function getBackTargetValue(routeKey) {
     const spec = getFxParamDef(a, b);
     return formatBackValue(spec, getEffectiveFxValue(a, b));
   }
+  if (group === '5' && b === 'pan' && FX_BUS_IDS.includes(a)) {
+    return formatMixerPan(getEffectiveMixerPan(a));
+  }
   return 'n/a';
 }
 
@@ -12742,7 +12994,7 @@ function parseBackRouteKey(routeKey) {
   const [group, a, b] = routeKey.split(':');
   const genIdx = Number(group);
   if (!Number.isFinite(genIdx)) return null;
-  if (genIdx === 3 || genIdx === 4) {
+  if (genIdx === 3 || genIdx === 4 || genIdx === 5) {
     if (!a || !b) return null;
     return { genIdx, key: `${a}:${b}` };
   }
@@ -12775,6 +13027,7 @@ function applyModulationTargetUpdate(genIdx) {
   if (genIdx === 2) applyGen3Modulation();
   else if (genIdx === 3) applyFxModulation();
   else if (genIdx === 4) applyGen4Modulation();
+  else if (genIdx === 5) applyInstrumentMixState();
   else sendParams(genIdx);
 }
 
@@ -13128,6 +13381,14 @@ function buildBackPanel() {
       params: GEN3_LFO_PARAMS.map((p) => ({
         routeKey: `2:${p.key}`,
         label: getGen3ParamLabel(p.key),
+      })),
+    },
+    {
+      title: 'Mix Pan',
+      subtitle: 'Channel placement',
+      params: FX_BUS_IDS.map((busId) => ({
+        routeKey: `5:${busId}:pan`,
+        label: FX_BUS_LABELS[busId],
       })),
     },
     {
@@ -16278,7 +16539,8 @@ function leaveMasteringView() {
   MASTERING.ctx?.suspend?.();
 }
 
-const PANEL_VIEWS = ['front', 'back', 'visual', 'mixer', 'song', 'master'];
+const PANEL_VIEWS = ['front', 'back', 'mixer', 'song', 'visual', 'master'];
+const TAB_PANEL_VIEWS = ['front', 'back', 'mixer', 'song'];
 
 function setPanelView(mode) {
   UI_VIEW.mode = mode;
@@ -17641,9 +17903,15 @@ function applyPreset(preset, { resetSources = true } = {}) {
         const [chId, paramKey] = typeof key === 'string' ? key.split(':') : [];
         return GEN4_DEFS.some((d) => d.id === chId && d.paramDefs.some((p) => p.key === paramKey));
       })();
+    const isMixerPan =
+      genIdx === 5 &&
+      (() => {
+        const [busId, paramKey] = typeof key === 'string' ? key.split(':') : [];
+        return FX_BUS_IDS.includes(busId) && paramKey === 'pan';
+      })();
     const modSourceIdx = typeof sourceIdx === 'number' ? sourceIdx : lfoIdx;
     if (
-      (isGranularParam || isGen3Param || isFxParam || isGen4Param) &&
+      (isGranularParam || isGen3Param || isFxParam || isGen4Param || isMixerPan) &&
       modSourceIdx >= 0 &&
       modSourceIdx <= 4
     ) {
@@ -17659,6 +17927,7 @@ function applyPreset(preset, { resetSources = true } = {}) {
   sendParams(1);
   applyGen3Modulation();
   applyFxModulation();
+  applyInstrumentMixState();
   applyMasteringPreset(preset.mastering || null);
   refreshBackPanelState();
 }
@@ -18951,7 +19220,15 @@ window.addEventListener('keydown', (event) => {
   }
   if (event.key === 'Tab' && !event.target.closest('input, textarea, select')) {
     event.preventDefault();
-    setPanelView(UI_VIEW.mode === 'front' ? 'back' : 'front');
+    const currentIndex = TAB_PANEL_VIEWS.indexOf(UI_VIEW.mode);
+    if (currentIndex < 0) {
+      setPanelView('front');
+    } else {
+      const direction = event.shiftKey ? -1 : 1;
+      const nextIndex =
+        (currentIndex + direction + TAB_PANEL_VIEWS.length) % TAB_PANEL_VIEWS.length;
+      setPanelView(TAB_PANEL_VIEWS[nextIndex]);
+    }
   }
   if (event.code === 'Space' && !event.target.closest('input, textarea, select')) {
     // preventDefault also swallows the "space clicks the focused button"
