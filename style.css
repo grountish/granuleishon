@@ -1311,7 +1311,12 @@ button:disabled {
   background: #c44a4a;
   border-color: #c44a4a;
   color: #210909;
+  width: 68px;
+  padding: 0 7px;
+  font-size: 8px;
   font-weight: 700;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
 }
 
 .record-btn.active:hover {
@@ -2594,6 +2599,10 @@ button:disabled {
 .gen-0 .gen-viz,
 .gen-1 .gen-viz {
   cursor: ew-resize;
+}
+
+.gen-viz.capture-live {
+  cursor: pointer;
 }
 
 .gen-viz.dragging {
@@ -4426,6 +4435,11 @@ button:disabled {
   height: var(--header-control-height);
   padding: 0;
   flex-shrink: 0;
+}
+
+.header-bar .record-btn.active {
+  width: 68px;
+  padding: 0 7px;
 }
 
 .strip-play-btn.active {

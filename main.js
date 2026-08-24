@@ -260,8 +260,10 @@ function refreshRecordButton() {
   const btn = getRecordBtn();
   if (!btn) return;
   btn.classList.toggle('active', REC.isRecording);
-  btn.textContent = '●';
-  btn.title = REC.isRecording ? 'Stop recording' : 'Record';
+  btn.textContent = REC.isRecording ? '■ STOP REC' : '●';
+  btn.title = REC.isRecording ? 'Stop and save recording' : 'Start recording';
+  btn.setAttribute('aria-label', REC.isRecording ? 'Stop and save recording' : 'Start recording');
+  btn.setAttribute('aria-pressed', String(REC.isRecording));
 }
 
 function mergeFloat32(chunks, sampleCount) {
@@ -866,7 +868,7 @@ async function startRecording() {
   REC.sink = sink;
   REC.isRecording = true;
   refreshRecordButton();
-  setStatus('recording');
+  setStatus('recording — press STOP REC to finish');
 }
 
 function stopRecording() {
@@ -1353,6 +1355,27 @@ function drawGenParamFeedback(c, gi, W, H, cx, sw) {
   c.restore();
 }
 
+function drawGenCaptureHint(c, gi, W, H, frozen = state[gi]?.freeze) {
+  if (gi > 1 || frozen || !started || getSourceState(gi)?.mode !== 'mic') return;
+  const label = '● LIVE BUFFER · CLICK TO STOP';
+
+  c.save();
+  c.font = '700 9px ui-monospace, monospace';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  const labelWidth = Math.ceil(c.measureText(label).width) + 18;
+  const x = Math.round((W - labelWidth) / 2);
+  const y = 8;
+  c.fillStyle = 'rgba(9, 18, 12, 0.88)';
+  c.fillRect(x, y, labelWidth, 20);
+  c.strokeStyle = `${GEN_VIZ[gi].line}b8`;
+  c.lineWidth = 1;
+  c.strokeRect(x + 0.5, y + 0.5, labelWidth - 1, 19);
+  c.fillStyle = GEN_VIZ[gi].line;
+  c.fillText(label, W / 2, y + 10.5);
+  c.restore();
+}
+
 function drawGenVizEmpty(gi) {
   const c = genVizCtxs[gi],
     W = genVizW[gi],
@@ -1380,9 +1403,10 @@ function drawGenVizEmpty(gi) {
   if (!started) {
     c.fillStyle = '#5a5a5a';
     c.font = '500 9px ui-monospace, monospace';
-    c.fillText('click to start', W / 2, H / 2 + 27);
+    c.fillText('press play to start', W / 2, H / 2 + 27);
   }
   c.restore();
+  drawGenCaptureHint(c, gi, W, H);
 }
 
 // Static waveform of a loaded file buffer, drawn straight from the main-thread
@@ -1455,6 +1479,8 @@ function drawGenVizStatic(gi) {
   c.globalAlpha = 0.9;
   c.fillText(label, 8, 6);
   c.restore();
+
+  drawGenCaptureHint(c, gi, W, H);
 
   return true;
 }
@@ -1685,12 +1711,7 @@ function renderGenViz(gi) {
     c.stroke();
   }
 
-  // FROZEN label
-  if (state.frozen) {
-    c.fillStyle = 'rgba(120,150,230,0.75)';
-    c.font = 'bold 8px ui-monospace, monospace';
-    c.fillText('FROZEN', W - 47, 11);
-  }
+  drawGenCaptureHint(c, gi, W, H, state.frozen);
 }
 
 function genVizLoop() {
@@ -1734,13 +1755,13 @@ const PARAMS = [
 // Slightly different defaults for gen 1 so independence is immediately audible.
 const GEN_DEFAULTS = [
   {
-    grainSizeMs: 120,
+    grainSizeMs: 308,
     density: 20,
-    positionSec: 0.5,
+    positionSec: 0.51,
     spraySec: 0.05,
     pitch: 0,
     pitchJitter: 0,
-    spread: 0.5,
+    spread: 0.63,
     gain: 0.8,
     reverse: false,
     envType: 'hann',
@@ -1753,14 +1774,14 @@ const GEN_DEFAULTS = [
   {
     grainSizeMs: 80,
     density: 15,
-    positionSec: 1.2,
-    spraySec: 0.1,
-    pitch: 7,
-    pitchJitter: 2,
-    spread: 0.7,
-    gain: 0.6,
-    reverse: false,
-    envType: 'hann',
+    positionSec: 3.26,
+    spraySec: 0.03,
+    pitch: 0,
+    pitchJitter: 0,
+    spread: 1,
+    gain: 0.34,
+    reverse: true,
+    envType: 'soft',
     freeze: false,
     grainSizeSync: false,
     grainSizeSyncIndex: 2,
@@ -1894,7 +1915,7 @@ function clearFreezeStates({ send = true } = {}) {
   for (let genIdx = 0; genIdx < 2; genIdx++) {
     state[genIdx].freeze = false;
     setGenFrozenData(genIdx, null);
-    genFreezeButtons[genIdx]?.classList.remove('active');
+    refreshGeneratorCaptureUI(genIdx);
     if (send) sendParams(genIdx);
   }
 }
@@ -1905,6 +1926,52 @@ function anyMicSourceSelected() {
 
 function canFreezeGenerator(genIdx) {
   return started && getSourceState(genIdx)?.mode === 'mic';
+}
+
+function refreshGeneratorCaptureUI(genIdx) {
+  const frozen = !!state[genIdx]?.freeze;
+  const isMic = getSourceState(genIdx)?.mode === 'mic';
+  const captureStopped = isMic && frozen;
+  const canFreeze = canFreezeGenerator(genIdx);
+  const freezeBtn = genFreezeButtons[genIdx];
+  const canvas = genVizCanvases[genIdx];
+
+  if (freezeBtn) {
+    freezeBtn.disabled = !canFreeze;
+    freezeBtn.classList.toggle('active', captureStopped);
+    freezeBtn.textContent = captureStopped ? 'Resume ▶' : 'Freeze ❄︎';
+    freezeBtn.title = captureStopped
+      ? 'Resume this granular live buffer'
+      : 'Stop this granular live buffer';
+  }
+
+  if (canvas) {
+    canvas.classList.toggle('capture-live', isMic && canFreeze && !captureStopped);
+    canvas.classList.remove('capture-frozen');
+    canvas.title = !isMic
+      ? 'Drag to choose the playback position'
+      : captureStopped
+        ? 'Capture stopped; use Resume above to restart it, or drag to choose the playback position'
+        : canFreeze
+          ? 'Click to stop this granular live buffer; drag to choose the playback position'
+          : 'The live buffer starts with playback';
+  }
+}
+
+function toggleGeneratorFreeze(genIdx) {
+  if (!canFreezeGenerator(genIdx)) return;
+  const frozen = !state[genIdx].freeze;
+  state[genIdx].freeze = frozen;
+  // On freeze the worklet answers with a persisted frozen-dump. Resuming
+  // drops that take and returns this generator to its rolling live buffer.
+  if (!frozen) setGenFrozenData(genIdx, null);
+  refreshGeneratorCaptureUI(genIdx);
+  sendParams(genIdx);
+  setStatus(
+    frozen
+      ? `granular ${genIdx + 1} capture stopped — press Resume to restart`
+      : `granular ${genIdx + 1} live capture resumed`,
+  );
 }
 
 function getGranularStatusText() {
@@ -1927,6 +1994,7 @@ function refreshSourceModeUI(genIdx) {
     btn.classList.toggle('active', mode === key);
     btn.classList.toggle('loaded', key === 'file' && !!getSourceState(genIdx).bufferData);
   });
+  refreshGeneratorCaptureUI(genIdx);
   refreshBackPanelState();
 }
 
@@ -2309,10 +2377,7 @@ function refreshGeneratorUI(genIdx) {
   });
   refreshGenGrainSizeSyncUI(genIdx);
   refreshGenDensitySyncUI(genIdx);
-  genFreezeButtons[genIdx]?.classList.toggle('active', !!state[genIdx].freeze);
-  if (genFreezeButtons[genIdx]) {
-    genFreezeButtons[genIdx].disabled = !canFreezeGenerator(genIdx);
-  }
+  refreshGeneratorCaptureUI(genIdx);
   genReverseButtons[genIdx]?.classList.toggle('active', !!state[genIdx].reverse);
   genEnvButtons[genIdx].forEach((btn, envType) => {
     btn.classList.toggle('active', state[genIdx].envType === envType);
@@ -2751,14 +2816,7 @@ function buildGeneratorPanel(genIdx) {
   freezeBtn.className = 'gen-freeze';
   freezeBtn.textContent = 'Freeze ❄︎';
   freezeBtn.disabled = true;
-  freezeBtn.addEventListener('click', () => {
-    state[genIdx].freeze = !state[genIdx].freeze;
-    freezeBtn.classList.toggle('active', state[genIdx].freeze);
-    // On freeze the worklet answers with a 'frozen-dump' that gets persisted;
-    // on unfreeze the stored take is dropped.
-    if (!state[genIdx].freeze) setGenFrozenData(genIdx, null);
-    sendParams(genIdx);
-  });
+  freezeBtn.addEventListener('click', () => toggleGeneratorFreeze(genIdx));
   genFreezeButtons[genIdx] = freezeBtn;
 
   const headerActions = document.createElement('div');
@@ -2790,22 +2848,47 @@ function buildGeneratorPanel(genIdx) {
     const next = bounds.min + (1 - normX) * (bounds.max - bounds.min);
     setGeneratorParam(genIdx, 'positionSec', next);
   };
+  let vizGesture = null;
   vizCanvas.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     vizCanvas.setPointerCapture(e.pointerId);
-    vizCanvas.classList.add('dragging');
-    updatePositionFromPointer(e.clientX);
+    vizGesture = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      dragging: false,
+    };
   });
   vizCanvas.addEventListener('pointermove', (e) => {
-    if (!vizCanvas.hasPointerCapture(e.pointerId)) return;
+    if (!vizCanvas.hasPointerCapture(e.pointerId) || vizGesture?.pointerId !== e.pointerId) return;
+    if (!vizGesture.dragging) {
+      const distance = Math.hypot(e.clientX - vizGesture.startX, e.clientY - vizGesture.startY);
+      if (distance < 5) return;
+      vizGesture.dragging = true;
+      vizCanvas.classList.add('dragging');
+    }
     updatePositionFromPointer(e.clientX);
   });
-  const endDrag = (e) => {
+  const endVizGesture = (e, { cancelled = false } = {}) => {
+    const wasDragging = !!vizGesture?.dragging;
     if (vizCanvas.hasPointerCapture(e.pointerId)) vizCanvas.releasePointerCapture(e.pointerId);
     vizCanvas.classList.remove('dragging');
+    vizGesture = null;
+    if (cancelled) return;
+    if (wasDragging) {
+      updatePositionFromPointer(e.clientX);
+    } else if (
+      getSourceState(genIdx).mode === 'mic' &&
+      canFreezeGenerator(genIdx) &&
+      !state[genIdx].freeze
+    ) {
+      toggleGeneratorFreeze(genIdx);
+    } else {
+      updatePositionFromPointer(e.clientX);
+    }
   };
-  vizCanvas.addEventListener('pointerup', endDrag);
-  vizCanvas.addEventListener('pointercancel', endDrag);
+  vizCanvas.addEventListener('pointerup', (e) => endVizGesture(e));
+  vizCanvas.addEventListener('pointercancel', (e) => endVizGesture(e, { cancelled: true }));
   panel.appendChild(vizCanvas);
 
   const dropOverlay = document.createElement('div');
