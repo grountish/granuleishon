@@ -529,6 +529,23 @@ body.view-master .transport > .status {
   align-self: flex-start;
 }
 
+/* Input leveler left, raw-A/B leveler right. The active one follows the
+   bypass state: chain on → input leveler; bypass on → raw leveler. */
+.master-leveler-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.master-raw-leveler {
+  opacity: 0.45;
+}
+
+.master-panel.chain-bypassed .master-raw-leveler {
+  opacity: 1;
+}
+
 .master-leveler .master-section-label {
   cursor: default;
 }
@@ -681,6 +698,19 @@ body.view-master .transport > .status {
   width: auto;
   min-width: 30px;
   padding: 0 5px;
+}
+
+.master-hq-btn {
+  width: auto;
+  padding: 0 6px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.master-hq-btn.active {
+  color: var(--accent-fx);
+  border-color: var(--accent-fx);
 }
 
 .bounce-btn.active {

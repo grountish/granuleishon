@@ -279,9 +279,11 @@ function mergeFloat32(chunks, sampleCount) {
   return merged;
 }
 
-function encodeWav(left, right, sampleRate) {
+// PCM WAV. 16-bit gets 1-LSB TPDF dither (plain truncation distorts fades);
+// 24-bit (the master export) needs none in practice.
+function encodeWav(left, right, sampleRate, bits = 16) {
   const frameCount = Math.min(left.length, right.length);
-  const bytesPerSample = 2;
+  const bytesPerSample = bits / 8;
   const blockAlign = 2 * bytesPerSample;
   const dataSize = frameCount * blockAlign;
   const buffer = new ArrayBuffer(44 + dataSize);
@@ -301,7 +303,7 @@ function encodeWav(left, right, sampleRate) {
   view.setUint32(24, sampleRate, true);
   view.setUint32(28, sampleRate * blockAlign, true);
   view.setUint16(32, blockAlign, true);
-  view.setUint16(34, 16, true);
+  view.setUint16(34, bits, true);
   writeString(36, 'data');
   view.setUint32(40, dataSize, true);
 
@@ -309,9 +311,24 @@ function encodeWav(left, right, sampleRate) {
   for (let i = 0; i < frameCount; i++) {
     const l = Math.max(-1, Math.min(1, left[i]));
     const r = Math.max(-1, Math.min(1, right[i]));
-    view.setInt16(offset, l < 0 ? l * 0x8000 : l * 0x7fff, true);
-    view.setInt16(offset + 2, r < 0 ? r * 0x8000 : r * 0x7fff, true);
-    offset += 4;
+    if (bits === 24) {
+      const vl = Math.max(-8388608, Math.min(8388607, Math.round(l * 8388607)));
+      const vr = Math.max(-8388608, Math.min(8388607, Math.round(r * 8388607)));
+      view.setUint8(offset, vl & 0xff);
+      view.setUint8(offset + 1, (vl >> 8) & 0xff);
+      view.setUint8(offset + 2, (vl >> 16) & 0xff);
+      view.setUint8(offset + 3, vr & 0xff);
+      view.setUint8(offset + 4, (vr >> 8) & 0xff);
+      view.setUint8(offset + 5, (vr >> 16) & 0xff);
+    } else {
+      const dl = Math.random() - Math.random(); // TPDF, ±1 LSB
+      const dr = Math.random() - Math.random();
+      const vl = Math.max(-32768, Math.min(32767, Math.round(l * 32767 + dl)));
+      const vr = Math.max(-32768, Math.min(32767, Math.round(r * 32767 + dr)));
+      view.setInt16(offset, vl, true);
+      view.setInt16(offset + 2, vr, true);
+    }
+    offset += blockAlign;
   }
 
   return new Blob([buffer], { type: 'audio/wav' });
@@ -14532,9 +14549,16 @@ function refreshBackPanelState() {
 // (suspended on exit), and the final render happens in an OfflineAudioContext.
 // While the view is closed the feature costs zero CPU.
 
+const MASTERING_HQ_STORAGE_KEY = 'grnsh-master-hq-v1';
+
 const MASTERING = {
   built: false,
+  // HQ render: chain runs offline at 2× rate, then downsamples. Slower
+  // render, cleaner nonlinear stages, true-peak metering. Preview untouched.
+  renderHq: localStorage.getItem(MASTERING_HQ_STORAGE_KEY) === 'on',
   source: null, // { left, right, sampleRate, name }
+  sourceLufs: null, // integrated LUFS of the raw source (bypass loudness match)
+  renderedLufs: null, // integrated LUFS of the last render (bypass loudness match)
   params: {
     lowGain: 0,
     lowFreq: 120,
@@ -14588,6 +14612,7 @@ const MASTERING = {
     subAmount: 0,
     subMix: 0,
     levelerGain: 0, // input trim — always the first thing the signal meets
+    rawLevelerGain: 0, // bypass-path makeup gain (raw A/B leveler); never renders
     width: 1,
     widthBassFreq: 0, // 0 = full-range; raise it to keep lows mono when widening
     enabled: { eq: true, opto: true, comp: true, ott: true, tape: true, sub: true, exciter: true, width: true, limit: true },
@@ -14641,6 +14666,9 @@ function setMasteringSource(left, right, sampleRate, name) {
   MASTERING.source = { left, right, sampleRate, name: name || 'audio' };
   MASTERING.previewBuffer = null;
   MASTERING.renderedPeaks = null; // stale — belongs to the previous source
+  MASTERING.renderedLufs = null;
+  // Dry loudness, measured once per source — the bypass match needs it.
+  MASTERING.sourceLufs = measureIntegratedLufs(left, right, sampleRate);
   MASTERING.playheadSec = 0;
   MASTERING.loopMode = 'off';
   MASTERING.loopSelection = null;
@@ -14656,6 +14684,8 @@ function clearMasteringSource() {
   MASTERING.source = null;
   MASTERING.previewBuffer = null;
   MASTERING.renderedPeaks = null;
+  MASTERING.renderedLufs = null;
+  MASTERING.sourceLufs = null;
   MASTERING.playheadSec = 0;
   MASTERING.loopMode = 'off';
   MASTERING.loopSelection = null;
@@ -14906,8 +14936,8 @@ function buildMasteringChain(ctx, { eqSolo = MASTERING.eqSolo, bypassAll = MASTE
   const out = ctx.createGain();
   const chainIn = ctx.createGain();
   // True bypass: disabled modules are left out of the path entirely. Global
-  // bypass short-circuits everything — leveler included (chainIn stays at
-  // unity via applyMasteringParams).
+  // bypass short-circuits everything — leveler included; chainIn then carries
+  // only the loudness-match makeup gain (applyMasteringParams).
   const active = bypassAll
     ? []
     : getMasteringOrder().filter((id) => MASTERING.params.enabled?.[id] !== false);
@@ -15016,11 +15046,25 @@ function getMasteringClipCurve() {
   return masteringClipCurve;
 }
 
+// Loudness-matched bypass: the bypassed path carries nothing but makeup gain,
+// sized from measured LUFS (last render vs raw source), so A/B compares the
+// chain's character instead of "louder wins". 0 until a render calibrates it.
+function masteringBypassMatchDb() {
+  const processed = MASTERING.renderedLufs;
+  const dry = MASTERING.sourceLufs;
+  if (!Number.isFinite(processed) || !Number.isFinite(dry)) return 0;
+  return clamp(processed - dry, -24, 24);
+}
+
 function applyMasteringParams(chain) {
   if (!chain) return;
   const p = MASTERING.params;
   const n = chain.nodes;
-  if (n.chainIn) n.chainIn.gain.value = chain.bypassAll ? 1 : dbToLin(p.levelerGain);
+  if (n.chainIn) {
+    n.chainIn.gain.value = chain.bypassAll
+      ? dbToLin(clamp(p.rawLevelerGain || 0, -24, 24))
+      : dbToLin(p.levelerGain);
+  }
   if (n.dynEq) {
     n.dynEq.port.postMessage({
       bands: MASTERING_EQ_BANDS.map((band, bi) => ({
@@ -15284,6 +15328,7 @@ function createMasteringMeter(ctx, chainOutput) {
     blocks: [], // { ms, corr, dur } newest-last, ~3s kept
     framePeakL: 0,
     framePeakR: 0,
+    maxPeak: 0, // session max (linear) — highest sample since preview start
     dispL: METER_FLOOR_DB,
     dispR: METER_FLOOR_DB,
     holdL: { db: METER_FLOOR_DB, until: 0 },
@@ -15324,6 +15369,7 @@ function createMasteringMeter(ctx, chainOutput) {
     }
     meter.framePeakL = Math.max(meter.framePeakL, peakL);
     meter.framePeakR = Math.max(meter.framePeakR, peakR);
+    meter.maxPeak = Math.max(meter.maxPeak, peakL, peakR);
     const denom = Math.sqrt(sumL2 * sumR2);
     meter.blocks.push({
       ms: sumK / inL.length,
@@ -15495,6 +15541,13 @@ function drawMasteringMeters(pv) {
   g.fillText(`CORR ${meter.corr >= 0 ? '+' : ''}${meter.corr.toFixed(2)}`, 190, 12);
   g.fillStyle = gr < -0.5 ? accentFx : mutedCol;
   g.fillText(`GR ${gr.toFixed(1)} dB`, 280, 12);
+  const maxDb = meter.maxPeak > 0 ? 20 * Math.log10(meter.maxPeak) : -Infinity;
+  g.fillStyle = maxDb > -1 ? '#d05050' : mutedCol;
+  g.fillText(
+    `PK ${Number.isFinite(maxDb) ? `${maxDb.toFixed(1)} dB` : '−∞'}`,
+    370,
+    12,
+  );
 
   // ── Stereo peak bars with scale + hold ticks ──
   updatePeakBallistics(meter, 'dispL', 'holdL', meter.framePeakL, dt, now);
@@ -15704,9 +15757,17 @@ async function renderMastering() {
     setStatus('no audio in mastering — bounce the song or load a wav');
     return;
   }
-  setStatus('rendering master…');
+  const hq = MASTERING.renderHq;
+  setStatus(hq ? 'rendering master (HQ 2×)…' : 'rendering master…');
   const tail = Math.round(s.sampleRate * 0.05);
-  const oc = new OfflineAudioContext(2, s.left.length + tail, s.sampleRate);
+  const frames = s.left.length + tail;
+  // HQ: run the whole chain at 2× the source rate — alias products from the
+  // nonlinear stages (OTT, tape, exciter, limiter drive) land above the
+  // audible band and are filtered by the downsample. The source buffer keeps
+  // its own rate; the buffer source resamples it into the render context.
+  const renderRate = Math.min(192000, s.sampleRate * (hq ? 2 : 1));
+  const ratio = renderRate / s.sampleRate;
+  const oc = new OfflineAudioContext(2, Math.round(frames * ratio), renderRate);
   await ensureMasteringEqModule(oc);
   const buf = oc.createBuffer(2, s.left.length, s.sampleRate);
   buf.getChannelData(0).set(s.left);
@@ -15721,9 +15782,10 @@ async function renderMastering() {
   chain.output.connect(oc.destination);
   srcNode.start();
   const rendered = await oc.startRendering();
-  const L = rendered.getChannelData(0);
-  const R = rendered.getChannelData(1);
-  const lufs = measureIntegratedLufs(L, R, s.sampleRate);
+  let L = rendered.getChannelData(0);
+  let R = rendered.getChannelData(1);
+  // Peak from the oversampled run approximates true peak (inter-sample
+  // overs are visible at 2×); at 1× it is plain sample peak.
   let peak = 0;
   for (let i = 0; i < L.length; i++) {
     const a = Math.abs(L[i]);
@@ -15731,15 +15793,30 @@ async function renderMastering() {
     if (a > peak) peak = a;
     if (b > peak) peak = b;
   }
+  if (renderRate !== s.sampleRate) {
+    const dc = new OfflineAudioContext(2, frames, s.sampleRate);
+    const db = dc.createBuffer(2, L.length, renderRate);
+    db.getChannelData(0).set(L);
+    db.getChannelData(1).set(R);
+    const downSrc = dc.createBufferSource();
+    downSrc.buffer = db;
+    downSrc.connect(dc.destination);
+    downSrc.start();
+    const down = await dc.startRendering();
+    L = down.getChannelData(0);
+    R = down.getChannelData(1);
+  }
+  const lufs = measureIntegratedLufs(L, R, s.sampleRate);
+  MASTERING.renderedLufs = lufs; // calibrates the loudness-matched bypass
   const peakDb = peak > 0 ? 20 * Math.log10(peak) : -Infinity;
   if (MASTERING.els.meters) {
-    MASTERING.els.meters.textContent = `${Number.isFinite(lufs) ? lufs.toFixed(1) : '−∞'} LUFS · peak ${Number.isFinite(peakDb) ? peakDb.toFixed(2) : '−∞'} dBFS`;
+    MASTERING.els.meters.textContent = `${Number.isFinite(lufs) ? lufs.toFixed(1) : '−∞'} LUFS · peak ${Number.isFinite(peakDb) ? peakDb.toFixed(2) : '−∞'} ${hq ? 'dBTP' : 'dBFS'}`;
   }
   MASTERING.renderedPeaks = buildMasteringPeaks(L, R);
   drawMasteringWave();
   REC.downloadName = `${(s.name || 'grnsh').replace(/\.wav$/i, '').replace(/[^\w.-]+/g, '_')}-master.wav`;
-  downloadRecording(encodeWav(L, R, s.sampleRate));
-  setStatus('master rendered');
+  downloadRecording(encodeWav(L, R, s.sampleRate, 24));
+  setStatus(hq ? 'master rendered — HQ 2×, 24-bit' : 'master rendered — 24-bit');
 }
 
 // Integrated loudness per ITU-R BS.1770: K-weighting (RBJ biquads at the
@@ -16081,21 +16158,8 @@ function rbjPeaking(sr, f0, gainDb, q) {
   return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
 }
 
-function rbjHighpass(sr, f0, q) {
-  const w0 = (2 * Math.PI * f0) / sr;
-  const alpha = Math.sin(w0) / (2 * Math.max(0.05, q));
-  const cosw = Math.cos(w0);
-  const b0 = (1 + cosw) / 2;
-  const b1 = -(1 + cosw);
-  const b2 = (1 + cosw) / 2;
-  const a0 = 1 + alpha;
-  const a1 = -2 * cosw;
-  const a2 = 1 - alpha;
-  return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
-}
-
 // The low band doubles as a low-cut: same freq/Q handles, gain and dynamics
-// dormant while cut.
+// dormant while cut. (rbjHighpass lives with the LUFS meter's biquads.)
 function masteringLowIsCut() {
   return MASTERING.params.lowType === 'cut';
 }
@@ -17148,7 +17212,8 @@ function buildMasterPanel() {
   bypassBtn.type = 'button';
   bypassBtn.className = 'master-bypass-btn master-tool-btn';
   bypassBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 1.4v4.2"/><path d="M3.4 3.2a4.3 4.3 0 1 0 5.2 0"/></svg>';
-  bypassBtn.title = 'A/B: hear the raw source — whole chain and leveler out of the path (export still renders processed)';
+  bypassBtn.title =
+    'A/B: raw source — the bypassed path carries only the RAW leveler gain, so you can match levels and compare character (export still renders processed)';
   bypassBtn.classList.toggle('active', !!MASTERING.bypassAll);
   bypassBtn.addEventListener('click', () => {
     MASTERING.bypassAll = !MASTERING.bypassAll;
@@ -17157,7 +17222,14 @@ function buildMasterPanel() {
       .getElementById('masterPanel')
       ?.classList.toggle('chain-bypassed', MASTERING.bypassAll);
     rebuildMasteringPreviewChain();
-    setStatus(MASTERING.bypassAll ? 'mastering bypassed — raw source' : 'mastering chain active');
+    if (MASTERING.bypassAll) {
+      const g = MASTERING.params.rawLevelerGain || 0;
+      setStatus(
+        `bypass — raw ${g >= 0 ? '+' : ''}${g.toFixed(1)} dB (RAW box levels it; alt-click RAW to match LUFS)`,
+      );
+    } else {
+      setStatus('mastering chain active');
+    }
   });
   MASTERING.els.bypassBtn = bypassBtn;
 
@@ -17205,11 +17277,25 @@ function buildMasterPanel() {
   });
   MASTERING.els.loopAllBtn = loopAllBtn;
 
+  const hqBtn = document.createElement('button');
+  hqBtn.type = 'button';
+  hqBtn.className = 'master-tool-btn master-hq-btn';
+  hqBtn.textContent = 'HQ';
+  hqBtn.classList.toggle('active', MASTERING.renderHq);
+  hqBtn.title =
+    'HQ render — process the chain at 2× sample rate, then downsample: cleaner OTT/tape/limiter (less aliasing) and true-peak metering. Render takes ~2× longer; preview playback is unaffected';
+  hqBtn.addEventListener('click', () => {
+    MASTERING.renderHq = !MASTERING.renderHq;
+    localStorage.setItem(MASTERING_HQ_STORAGE_KEY, MASTERING.renderHq ? 'on' : 'off');
+    hqBtn.classList.toggle('active', MASTERING.renderHq);
+  });
+
   const renderBtn = document.createElement('button');
   renderBtn.type = 'button';
   renderBtn.className = 'master-tool-btn';
   renderBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 1.5v6M3.5 5 6 7.5 8.5 5"/><path d="M1.5 10.5h9"/></svg>';
-  renderBtn.title = 'Render & export WAV — offline render through the chain, measures LUFS/peak, downloads the wav';
+  renderBtn.title =
+    'Render & export 24-bit WAV — offline render through the chain, measures LUFS/peak, downloads the wav';
   renderBtn.addEventListener('click', renderMastering);
 
   const meters = document.createElement('span');
@@ -17229,6 +17315,7 @@ function buildMasterPanel() {
     positionBox,
     loopSectionBtn,
     loopAllBtn,
+    hqBtn,
     renderBtn,
     meters,
   );
@@ -17302,8 +17389,14 @@ function buildMasterPanel() {
   const meterCanvas = document.createElement('canvas');
   meterCanvas.className = 'master-meters-canvas';
   meterCanvas.title =
-    'Output metering — momentary/short-term LUFS (K-weighted), stereo peaks with hold, phase correlation, comp gain reduction, spectrum';
+    'Output metering — momentary/short-term LUFS (K-weighted), stereo peaks with hold, phase correlation, comp gain reduction, session max peak (PK), spectrum · click the readout row to reset PK';
   MASTERING.els.meterCanvas = meterCanvas;
+  meterCanvas.addEventListener('click', (e) => {
+    const rect = meterCanvas.getBoundingClientRect();
+    if (e.clientY - rect.top > 16 || !MASTERING.meter) return;
+    MASTERING.meter.maxPeak = 0;
+    setStatus('max peak reset');
+  });
   meterCanvas.addEventListener('pointermove', (e) => {
     const rect = meterCanvas.getBoundingClientRect();
     MASTERING.meterHover = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -17332,7 +17425,44 @@ function buildMasterPanel() {
     },
   );
   leveler.append(levelerLabel, levelerRow);
-  panel.appendChild(leveler);
+
+  // Raw leveler — the bypass A/B's makeup gain. Same compound as the input
+  // leveler but outside the chain: it only sounds while bypass is engaged,
+  // so the raw side can be brought to the chain's loudness for a fair A/B.
+  const rawLeveler = document.createElement('div');
+  rawLeveler.className = 'master-leveler master-raw-leveler';
+  const rawLabel = document.createElement('span');
+  rawLabel.className = 'master-section-label';
+  rawLabel.textContent = 'Leveler · raw A/B';
+  rawLeveler.title =
+    'Gain on the bypassed (raw) path only — match loudness, then A/B character with the ⏻ button. Alt-click: set from the measured LUFS difference (render once first)';
+  const rawRow = makeControlRow(
+    { key: 'rawLevelerGain', label: 'Gain', min: -24, max: 24, step: 0.5, unit: 'dB' },
+    MASTERING.params.rawLevelerGain,
+    (v) => {
+      MASTERING.params.rawLevelerGain = v;
+      applyMasteringParams(MASTERING.preview?.chain);
+    },
+  );
+  rawLeveler.addEventListener('click', (e) => {
+    if (!e.altKey) return;
+    e.preventDefault();
+    if (!Number.isFinite(MASTERING.renderedLufs) || !Number.isFinite(MASTERING.sourceLufs)) {
+      setStatus('render once first — the LUFS match needs a processed measurement');
+      return;
+    }
+    const match = masteringBypassMatchDb();
+    MASTERING.params.rawLevelerGain = match;
+    rawRow.setValue(match);
+    applyMasteringParams(MASTERING.preview?.chain);
+    setStatus(`raw leveler set to ${match >= 0 ? '+' : ''}${match.toFixed(1)} dB (LUFS match)`);
+  });
+  rawLeveler.append(rawLabel, rawRow);
+
+  const levelerRowWrap = document.createElement('div');
+  levelerRowWrap.className = 'master-leveler-row';
+  levelerRowWrap.append(leveler, rawLeveler);
+  panel.appendChild(levelerRowWrap);
 
   const controls = document.createElement('div');
   controls.className = 'master-controls';
