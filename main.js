@@ -1,6 +1,21 @@
 // grnsh — main thread: mic capture, worklet setup, UI wiring.
 
 const THEME_STORAGE_KEY = 'grnsh-theme-v1';
+const AUDIO_LATENCY_STORAGE_KEY = 'grnsh-audio-latency-v1';
+const AUDIO_LATENCY_HINTS = {
+  low: 'interactive',
+  balanced: 0.04,
+  stable: 'playback',
+};
+let audioLatencyMode = 'low';
+
+try {
+  const savedAudioLatencyMode = localStorage.getItem(AUDIO_LATENCY_STORAGE_KEY);
+  if (Object.prototype.hasOwnProperty.call(AUDIO_LATENCY_HINTS, savedAudioLatencyMode)) {
+    audioLatencyMode = savedAudioLatencyMode;
+  }
+} catch (_) {}
+
 const APP_THEMES = new Set([
   'original',
   'sober',
@@ -49,6 +64,7 @@ let bitReducerModulePromise = null;
 let beatRepeatModulePromise = null;
 let resonatorModulePromise = null;
 let grainArpModulePromise = null;
+let pitchTremoloModulePromise = null;
 const LIVE_SOURCE_SECONDS = 10;
 const MAX_DELAY_SECONDS = 16;
 const INPUT_SOURCE = {
@@ -253,6 +269,11 @@ function getBeatRepeatGridSeconds(busId = activeBus) {
 function getGrainArpGridSeconds(busId = activeBus) {
   const g = fxStates[busId].grainarp;
   return g.gridSync ? beatsToSeconds(getGrainSyncStep(g.gridSyncIndex).beats) : g.grid / 1000;
+}
+
+function getPitchTremoloRateHz(busId = activeBus) {
+  const effect = fxStates[busId].pitchtrem;
+  return effect.sync ? 1 / beatsToSeconds(getTempoStep(effect.syncIndex).beats) : effect.rate;
 }
 
 function getLfoRateHz(lfo) {
@@ -739,7 +760,14 @@ function createAudioContext() {
   if (!AudioContextCtor) {
     throw new Error('web audio is not supported in this browser');
   }
-  const ctx = new AudioContextCtor();
+  let ctx;
+  try {
+    ctx = new AudioContextCtor({ latencyHint: AUDIO_LATENCY_HINTS[audioLatencyMode] });
+  } catch (_) {
+    // Older engines may reject AudioContextOptions; keep audio available and
+    // let them use their platform default instead.
+    ctx = new AudioContextCtor();
+  }
   if (!ctx.audioWorklet?.addModule) {
     try {
       ctx.close?.();
@@ -747,6 +775,80 @@ function createAudioContext() {
     throw new Error(getAudioWorkletErrorMessage());
   }
   return ctx;
+}
+
+function getAudioLatencyLabel(mode = audioLatencyMode) {
+  return mode === 'low' ? 'Low' : mode === 'stable' ? 'Stable' : 'Balanced';
+}
+
+function getAudioLatencyStatus() {
+  const actualMs = audioCtx?.baseLatency ? Math.round(audioCtx.baseLatency * 1000) : 0;
+  return `audio latency: ${getAudioLatencyLabel()}${actualMs ? ` • ${actualMs} ms base` : ''}`;
+}
+
+async function restartAudioEngineForLatency() {
+  if (!audioCtx) {
+    setStatus(`${getAudioLatencyStatus()} • applies on next play`);
+    return;
+  }
+  if (BOUNCE.active || REC.isRecording) {
+    setStatus(`${getAudioLatencyStatus()} • saved for next audio restart`);
+    return;
+  }
+
+  const oldContext = audioCtx;
+  const wasStarted = started;
+  const wasRunning = oldContext.state === 'running';
+  const wasSequencerPlaying = GEN4.playing;
+
+  stopLFOLoop();
+  stopGenVizLoop();
+  stopGen3Scope();
+  stopAllGen3Notes();
+  stopGen4Sequencer();
+  disconnectGranularInput({ stopTracks: true });
+
+  GEN3.nodes = null;
+  GEN4.nodes = null;
+  audioCtx = node = master = null;
+  vizAnalyser = null;
+  INPUT_GATE.node = null;
+  INPUT_GATE.env = 0;
+  FX_BUS_IDS.forEach((id) => {
+    fxBuses[id] = null;
+    fxPlugged[id].clear();
+  });
+  granularModulePromise = null;
+  bitReducerModulePromise = null;
+  beatRepeatModulePromise = null;
+  resonatorModulePromise = null;
+  grainArpModulePromise = null;
+  pitchTremoloModulePromise = null;
+  started = false;
+
+  try {
+    await oldContext.close();
+  } catch (_) {}
+
+  if (wasRunning) {
+    if (wasStarted) await start();
+    else await ensureAudioEngine();
+    if (wasStarted && !started) return;
+    if (wasSequencerPlaying && audioCtx) startGen4Sequencer();
+  }
+  refreshSongTransportUI();
+  refreshBackPanelState();
+  setStatus(wasRunning ? getAudioLatencyStatus() : `${getAudioLatencyStatus()} • ready`);
+}
+
+async function setAudioLatencyMode(mode) {
+  if (!Object.prototype.hasOwnProperty.call(AUDIO_LATENCY_HINTS, mode) || mode === audioLatencyMode)
+    return;
+  audioLatencyMode = mode;
+  try {
+    localStorage.setItem(AUDIO_LATENCY_STORAGE_KEY, mode);
+  } catch (_) {}
+  await restartAudioEngineForLatency();
 }
 
 function formatInputDeviceLabel(device, idx) {
@@ -843,11 +945,17 @@ async function ensureFxModules() {
   if (!grainArpModulePromise) {
     grainArpModulePromise = audioCtx.audioWorklet.addModule(workletUrl('grain-arp-processor.js'));
   }
+  if (!pitchTremoloModulePromise) {
+    pitchTremoloModulePromise = audioCtx.audioWorklet.addModule(
+      workletUrl('pitch-autopan-processor.js'),
+    );
+  }
   await Promise.all([
     bitReducerModulePromise,
     beatRepeatModulePromise,
     resonatorModulePromise,
     grainArpModulePromise,
+    pitchTremoloModulePromise,
   ]);
 }
 
@@ -1853,6 +1961,8 @@ const gen3ShapeButtons = new Map();
 let gen3SusBtnEl = null;
 const filterModeButtons = new Map();
 let delaySyncModeControl = null;
+let pitchTremoloSyncModeControl = null;
+const pitchTremoloShapeButtons = new Map();
 let resonatorNoteModeControl = null;
 let beatRepeatSyncModeControl = null;
 let beatRepeatGridSyncModeControl = null;
@@ -1889,6 +1999,12 @@ const FX_LFO_PARAMS = [
   { id: 'grainarp', key: 'reverse', min: 0, max: 1 },
   { id: 'grainarp', key: 'feedback', min: 0, max: 0.85 },
   { id: 'grainarp', key: 'mix', min: 0, max: 1 },
+  { id: 'pitchtrem', key: 'pitch', min: -24, max: 24, unit: 'st' },
+  { id: 'pitchtrem', key: 'pitchDepth', min: 0, max: 24, unit: 'st' },
+  { id: 'pitchtrem', key: 'fine', min: -100, max: 100, unit: 'ct' },
+  { id: 'pitchtrem', key: 'rate', min: 0.05, max: 20, unit: 'Hz' },
+  { id: 'pitchtrem', key: 'depth', min: 0, max: 1 },
+  { id: 'pitchtrem', key: 'mix', min: 0, max: 1 },
   { id: 'delay', key: 'time', min: 0, max: MAX_DELAY_SECONDS },
   { id: 'delay', key: 'feedback', min: 0, max: 0.95 },
   { id: 'delay', key: 'mix', min: 0, max: 1 },
@@ -1915,6 +2031,7 @@ const BACK_AUDIO_CHAIN = [
   { id: 'gen-3', title: 'Gen 3' },
   { id: 'mix', title: 'Mix Bus' },
   { id: 'grainarp', title: 'Grain Arp' },
+  { id: 'pitchtrem', title: 'Pitch + Auto Pan' },
   { id: 'delay', title: 'Delay' },
   { id: 'filter', title: 'Filter' },
   { id: 'resonator', title: 'Resonator' },
@@ -2206,6 +2323,7 @@ function getBaseFxValue(id, key, busId = activeBus) {
   if (id === 'beatrepeat' && key === 'interval') return getBeatRepeatIntervalSeconds(busId);
   if (id === 'beatrepeat' && key === 'grid') return getBeatRepeatGridSeconds(busId);
   if (id === 'grainarp' && key === 'grid') return getGrainArpGridSeconds(busId);
+  if (id === 'pitchtrem' && key === 'rate') return getPitchTremoloRateHz(busId);
   if (id === 'resonator' && key === 'freq') return getResonatorFreqHz(busId);
   return fxStates[busId][id]?.[key];
 }
@@ -8588,6 +8706,18 @@ const FX_DEFS = [
     ],
   },
   {
+    id: 'pitchtrem',
+    label: 'Pitch + Auto Pan',
+    params: [
+      { key: 'pitch', label: 'Pitch center', min: -24, max: 24, step: 1, value: 0, unit: 'st' },
+      { key: 'pitchDepth', label: 'Pitch sweep', min: 0, max: 24, step: 1, value: 0, unit: 'st' },
+      { key: 'fine', label: 'Fine', min: -100, max: 100, step: 1, value: 0, unit: 'ct' },
+      { key: 'rate', label: 'Pan rate', min: 0.05, max: 20, step: 0.05, value: 4, unit: 'Hz' },
+      { key: 'depth', label: 'Pan depth', min: 0, max: 1, step: 0.01, value: 0.5, unit: '' },
+      { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
+    ],
+  },
+  {
     id: 'delay',
     label: 'Delay',
     params: [
@@ -8811,6 +8941,78 @@ const FX_PRESETS = {
         reverse: 0.25,
         feedback: 0.35,
         mix: 0.45,
+      },
+    },
+  ],
+  pitchtrem: [
+    {
+      name: 'Off',
+      values: {
+        pitch: 0,
+        pitchDepth: 0,
+        fine: 0,
+        rate: 4,
+        sync: false,
+        syncIndex: 4,
+        depth: 0.5,
+        shape: 'sine',
+        mix: 0,
+      },
+    },
+    {
+      name: 'Gentle Motion',
+      values: {
+        pitch: 0,
+        pitchDepth: 1,
+        fine: 0,
+        rate: 0.2,
+        sync: false,
+        syncIndex: 4,
+        depth: 0.55,
+        shape: 'sine',
+        mix: 0.35,
+      },
+    },
+    {
+      name: 'Fifth Orbit',
+      values: {
+        pitch: 0,
+        pitchDepth: 7,
+        fine: 0,
+        rate: 2,
+        sync: true,
+        syncIndex: 4,
+        depth: 0.85,
+        shape: 'tri',
+        mix: 0.55,
+      },
+    },
+    {
+      name: 'Octave Sweep',
+      values: {
+        pitch: 0,
+        pitchDepth: 12,
+        fine: 0,
+        rate: 0.5,
+        sync: true,
+        syncIndex: 6,
+        depth: 1,
+        shape: 'sine',
+        mix: 0.65,
+      },
+    },
+    {
+      name: 'Wide Vibrato',
+      values: {
+        pitch: 0,
+        pitchDepth: 2,
+        fine: 0,
+        rate: 5,
+        sync: false,
+        syncIndex: 4,
+        depth: 1,
+        shape: 'sine',
+        mix: 0.5,
       },
     },
   ],
@@ -9725,6 +9927,18 @@ function makeDefaultFxState() {
       hold: false, // performance latch — freezes the capture ring
       mix: 0,
     },
+    pitchtrem: {
+      enabled: true,
+      pitch: 0,
+      pitchDepth: 0,
+      fine: 0,
+      rate: 4,
+      sync: false,
+      syncIndex: 4,
+      depth: 0.5,
+      shape: 'sine',
+      mix: 0,
+    },
     delay: {
       enabled: true,
       time: 0.3,
@@ -9769,13 +9983,14 @@ const LIMITER = { threshold: -8, attack: 0.003, release: 0.12, ratio: 20, knee: 
 // Order of the reorderable effects between each bus input and bus output.
 // Mutated per-bus by drag-to-reorder; persisted in presets.
 const DEFAULT_FX_ORDER = [
+  'filter',
+  'sat',
+  'bitreduce',
+  'pitchtrem',
+  'delay',
   'beatrepeat',
   'grainarp',
-  'delay',
-  'filter',
   'resonator',
-  'bitreduce',
-  'sat',
   'reverb',
 ];
 const fxOrders = {
@@ -9836,6 +10051,17 @@ const LFO_RATE_CONTROL = {
 const LFO_RATE_SYNC_CONTROL = {
   key: 'rate',
   label: 'Rate',
+  min: 0,
+  max: TEMPO_SYNC_STEPS.length - 1,
+  step: 1,
+  unit: '',
+};
+const PITCH_TREMOLO_RATE_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'pitchtrem').params.find(
+  (param) => param.key === 'rate',
+);
+const PITCH_TREMOLO_RATE_SYNC_CONTROL = {
+  key: 'rate',
+  label: 'Pan rate',
   min: 0,
   max: TEMPO_SYNC_STEPS.length - 1,
   step: 1,
@@ -11519,6 +11745,20 @@ function setTooltipsEnabled(on) {
 function initSettingsMenu() {
   const modal = getSettingsModal();
   const btn = document.getElementById('settingsMenuBtn');
+  const audioLatencySelect = document.getElementById('audioLatencySelect');
+  if (audioLatencySelect) {
+    audioLatencySelect.value = audioLatencyMode;
+    audioLatencySelect.addEventListener('change', async () => {
+      audioLatencySelect.disabled = true;
+      try {
+        await setAudioLatencyMode(audioLatencySelect.value);
+      } catch (error) {
+        setStatus(`audio restart failed: ${error.message}`);
+      } finally {
+        audioLatencySelect.disabled = false;
+      }
+    });
+  }
   const themeSelect = document.getElementById('themeSelect');
   if (themeSelect) {
     themeSelect.value = document.documentElement.dataset.theme || 'original';
@@ -13332,6 +13572,32 @@ function refreshDelayTimeUI() {
   delaySyncModeControl?.setMode(isSync ? 'sync' : 'free');
 }
 
+function refreshPitchTremoloUI() {
+  const control = fxControlBindings.get('pitchtrem:rate');
+  if (control) {
+    const isSync = !!FX.pitchtrem.sync;
+    control.setConfig(
+      isSync
+        ? { ...PITCH_TREMOLO_RATE_SYNC_CONTROL, resetValue: FX.pitchtrem.syncIndex }
+        : { ...PITCH_TREMOLO_RATE_FREE_CONTROL, resetValue: FX.pitchtrem.rate },
+    );
+    control.setFormatter(
+      isSync
+        ? (v) =>
+            formatTempoSyncValue(
+              v,
+              (step) => `${formatNumericValue(1 / beatsToSeconds(step.beats), 2)}Hz`,
+            )
+        : null,
+    );
+    control.setValue(isSync ? FX.pitchtrem.syncIndex : FX.pitchtrem.rate);
+    pitchTremoloSyncModeControl?.setMode(isSync ? 'sync' : 'free');
+  }
+  pitchTremoloShapeButtons.forEach((btn, shape) =>
+    btn.classList.toggle('active', FX.pitchtrem.shape === shape),
+  );
+}
+
 function refreshBeatRepeatIntervalUI() {
   const control = fxControlBindings.get('beatrepeat:interval');
   if (!control) return;
@@ -13483,11 +13749,14 @@ function setTransportBpm(value, { refresh = true, updateField = true } = {}) {
       applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid', busId), busId);
     if (st.grainarp.gridSync)
       applyFx('grainarp', 'grid', getBaseFxValue('grainarp', 'grid', busId), busId);
+    if (st.pitchtrem.sync)
+      applyFx('pitchtrem', 'rate', getBaseFxValue('pitchtrem', 'rate', busId), busId);
   });
   refreshDelayTimeUI();
   refreshBeatRepeatIntervalUI();
   refreshBeatRepeatGridUI();
   refreshGrainArpGridUI();
+  refreshPitchTremoloUI();
   refreshLFOUI();
   for (let gi = 0; gi < 2; gi++) {
     if (state[gi].grainSizeSync) refreshGenGrainSizeSyncUI(gi);
@@ -14041,6 +14310,14 @@ function buildBackPanel() {
       })),
     },
     {
+      title: 'Pitch + Pan',
+      subtitle: 'Shift / movement',
+      params: ['pitch', 'pitchDepth', 'fine', 'rate', 'depth', 'mix'].map((key) => ({
+        routeKey: `3:pitchtrem:${key}`,
+        label: getFxParamDef('pitchtrem', key)?.label || key,
+      })),
+    },
+    {
       title: 'Filter',
       subtitle: 'Tone shaping',
       params: ['cutoff', 'q', 'mix'].map((key) => ({
@@ -14477,6 +14754,15 @@ function refreshBackPanelState() {
       const module = BACK_PANEL.audioModules.get('grainarp');
       module.subtitleEl.textContent = `${FX.grainarp.hold ? 'HOLD • ' : ''}${FX.grainarp.pattern.toUpperCase()} • ${formatBackValue(getFxParamDef('grainarp', 'mix'), FX.grainarp.mix)} wet`;
       module.el.classList.toggle('active', FX.grainarp.mix > 0.001);
+    })();
+  BACK_PANEL.audioModules.get('pitchtrem') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('pitchtrem');
+      const rate = FX.pitchtrem.sync
+        ? getTempoStep(FX.pitchtrem.syncIndex).label
+        : `${formatNumericValue(FX.pitchtrem.rate, 2)}Hz`;
+      module.subtitleEl.textContent = `${FX.pitchtrem.pitch >= 0 ? '+' : ''}${formatNumericValue(FX.pitchtrem.pitch, 0)}st ±${formatNumericValue(FX.pitchtrem.pitchDepth, 0)} • ${rate} • ${formatBackValue(getFxParamDef('pitchtrem', 'mix'), FX.pitchtrem.mix)} wet`;
+      module.el.classList.toggle('active', FX.pitchtrem.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('delay') &&
     (() => {
@@ -18014,6 +18300,16 @@ function applyGrainArpHold(busId = activeBus) {
     ?.setValueAtTime(fxStates[busId].grainarp.hold ? 1 : 0, audioCtx.currentTime);
 }
 
+function applyPitchTremoloShape(busId = activeBus) {
+  const bus = fxBuses[busId];
+  if (!bus?.pitchtrem?.node) return;
+  const shape = Math.max(
+    0,
+    ['sine', 'tri', 'square', 'saw'].indexOf(fxStates[busId].pitchtrem.shape),
+  );
+  bus.pitchtrem.node.parameters.get('shape')?.setValueAtTime(shape, audioCtx.currentTime);
+}
+
 // Build the global master tail once: every bus output sums into master.sum,
 // which feeds the single limiter and the master output gain → destination.
 function buildMaster() {
@@ -18162,6 +18458,31 @@ function buildBusFx(busId) {
   arpNode.connect(arpWet);
   arpDry.connect(arpOut);
   arpWet.connect(arpOut);
+
+  // ─ Pitch + Auto Pan (one combined rack unit) ─
+  const pitchTremIn = ac.createGain();
+  const pitchTremDry = ac.createGain();
+  const pitchTremWet = ac.createGain();
+  const pitchTremNode = new AudioWorkletNode(ac, 'pitch-autopan-processor', {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [2],
+    parameterData: {
+      pitch: st.pitchtrem.pitch,
+      pitchDepth: st.pitchtrem.pitchDepth,
+      fine: st.pitchtrem.fine,
+      rate: getPitchTremoloRateHz(busId),
+      depth: st.pitchtrem.depth,
+      shape: Math.max(0, ['sine', 'tri', 'square', 'saw'].indexOf(st.pitchtrem.shape)),
+    },
+  });
+  const pitchTremOut = ac.createGain();
+
+  pitchTremIn.connect(pitchTremDry);
+  pitchTremIn.connect(pitchTremNode);
+  pitchTremNode.connect(pitchTremWet);
+  pitchTremDry.connect(pitchTremOut);
+  pitchTremWet.connect(pitchTremOut);
 
   // ─ Delay (feedback loop) ─
   const dlyIn = ac.createGain();
@@ -18344,6 +18665,13 @@ function buildBusFx(busId) {
     },
     beatrepeat: { node: brNode, dry: brDry, wet: brWet, in: brIn, out: brOut },
     grainarp: { node: arpNode, dry: arpDry, wet: arpWet, in: arpIn, out: arpOut },
+    pitchtrem: {
+      node: pitchTremNode,
+      dry: pitchTremDry,
+      wet: pitchTremWet,
+      in: pitchTremIn,
+      out: pitchTremOut,
+    },
     delay: {
       tap: dlyTap,
       fb: dlyFb,
@@ -18402,12 +18730,19 @@ function buildFxNodes() {
 // pair, so we fully disconnect the movable links and rebuild them. Disabled
 // units are left out of the chain: with no path to the destination the browser
 // skips their whole subgraph (worklets, convolver, oversampled shaper).
-// Stateless units that are safe to silently unplug while inaudible: nothing
-// in them accumulates material a player would expect to still be there when
-// the mix comes back up. Beat repeat, grain arp and delay stay plugged — their
+// Units that are safe to silently unplug while inaudible: nothing in them
+// accumulates material a player would expect to still be there when the mix
+// comes back up. Beat repeat, grain arp and delay stay plugged — their
 // capture rings / tail must keep filling while mix sits at 0 so a performance
 // gesture grabs the audio that just played.
-const FX_IDLE_BYPASS = new Set(['filter', 'resonator', 'bitreduce', 'sat', 'reverb']);
+const FX_IDLE_BYPASS = new Set([
+  'pitchtrem',
+  'filter',
+  'resonator',
+  'bitreduce',
+  'sat',
+  'reverb',
+]);
 
 // What reconnectFxChain actually spliced in, per bus — lets a mix change
 // detect whether the chain needs a re-splice without rebuilding every time.
@@ -18479,6 +18814,18 @@ function applyFx(id, key, val, busId = activeBus) {
     if (key === 'mix') {
       fx.grainarp.wet.gain.value = val;
       fx.grainarp.dry.gain.value = 1 - val;
+    }
+  } else if (id === 'pitchtrem') {
+    const setParam = (name, value) =>
+      fx.pitchtrem.node.parameters.get(name)?.setTargetAtTime(value, audioCtx.currentTime, 0.02);
+    if (key === 'pitch') setParam('pitch', clamp(val, -24, 24));
+    if (key === 'pitchDepth') setParam('pitchDepth', clamp(val, 0, 24));
+    if (key === 'fine') setParam('fine', clamp(val, -100, 100));
+    if (key === 'rate') setParam('rate', clamp(val, 0.02, 20));
+    if (key === 'depth') setParam('depth', clamp(val, 0, 1));
+    if (key === 'mix') {
+      fx.pitchtrem.wet.gain.value = val;
+      fx.pitchtrem.dry.gain.value = 1 - val;
     }
   } else if (id === 'delay') {
     if (key === 'time')
@@ -18580,6 +18927,7 @@ function applyAllFx(busId = activeBus) {
   applyFilterMode(busId);
   applyGrainArpPattern(busId);
   applyGrainArpHold(busId);
+  applyPitchTremoloShape(busId);
 }
 
 function refreshGen3UI() {
@@ -19627,6 +19975,8 @@ function renderActiveBusFx() {
   filterModeButtons.clear();
   delayModeButtons.clear();
   grainArpPatternButtons.clear();
+  pitchTremoloShapeButtons.clear();
+  pitchTremoloSyncModeControl = null;
   DEFAULT_FX_ORDER.forEach((effectId) => fxPresetSelects.delete(effectId));
 
   const fxDefById = new Map(FX_DEFS.map((def) => [def.id, def]));
@@ -19744,6 +20094,33 @@ function renderActiveBusFx() {
       content.appendChild(holdRow);
     }
 
+    if (def.id === 'pitchtrem') {
+      const shapeRow = document.createElement('div');
+      shapeRow.className = 'fx-mode-row';
+      [
+        ['sine', 'SIN'],
+        ['tri', 'TRI'],
+        ['square', 'SQR'],
+        ['saw', 'SAW'],
+      ].forEach(([shape, label]) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'fx-mode-btn' + (FX.pitchtrem.shape === shape ? ' active' : '');
+        btn.textContent = label;
+        btn.title = `${label} waveform — shared by pitch sweep and auto-pan`;
+        btn.addEventListener('click', () => {
+          markFxPresetCustom(def.id);
+          FX.pitchtrem.shape = shape;
+          applyPitchTremoloShape();
+          refreshPitchTremoloUI();
+          refreshBackPanelState();
+        });
+        pitchTremoloShapeButtons.set(shape, btn);
+        shapeRow.appendChild(btn);
+      });
+      content.appendChild(shapeRow);
+    }
+
     def.params.forEach((p) => {
       const isMappable = !!getFxParamBounds(def.id, p.key);
       const control = makeControlRow(
@@ -19796,6 +20173,18 @@ function renderActiveBusFx() {
             refreshBackPanelState();
             return;
           }
+          if (def.id === 'pitchtrem' && p.key === 'rate') {
+            if (FX.pitchtrem.sync) {
+              FX.pitchtrem.syncIndex = Math.round(v);
+            } else {
+              FX.pitchtrem.rate = v;
+            }
+            if (isMappable) applyFxModulation();
+            else applyFx('pitchtrem', 'rate', getBaseFxValue('pitchtrem', 'rate'));
+            refreshModulationVisuals();
+            refreshBackPanelState();
+            return;
+          }
           if (def.id === 'resonator' && p.key === 'freq') {
             if (FX.resonator.noteMode) {
               FX.resonator.note = Math.round(v);
@@ -19831,6 +20220,19 @@ function renderActiveBusFx() {
           refreshBackPanelState();
         });
         content.appendChild(delaySyncModeControl);
+      }
+
+      if (def.id === 'pitchtrem' && p.key === 'rate') {
+        pitchTremoloSyncModeControl = buildSyncModeRow(FX.pitchtrem.sync, (mode) => {
+          markFxPresetCustom(def.id);
+          FX.pitchtrem.sync = mode === 'sync';
+          refreshPitchTremoloUI();
+          if (isMappable) applyFxModulation();
+          else applyFx('pitchtrem', 'rate', getBaseFxValue('pitchtrem', 'rate'));
+          refreshModulationVisuals();
+          refreshBackPanelState();
+        });
+        content.appendChild(pitchTremoloSyncModeControl);
       }
 
       if (def.id === 'beatrepeat' && p.key === 'interval') {
@@ -19904,6 +20306,7 @@ function renderActiveBusFx() {
   refreshGrainArpGridUI();
   refreshGrainArpPatternUI();
   refreshGrainArpHoldUI();
+  refreshPitchTremoloUI();
   refreshResonatorFreqUI();
   // Freshly built controls start with unlit map LEDs — re-apply the active
   // mappings so a bus switch/reorder/preset never hides live modulation.
@@ -20265,6 +20668,7 @@ function stop() {
   beatRepeatModulePromise = null;
   resonatorModulePromise = null;
   grainArpModulePromise = null;
+  pitchTremoloModulePromise = null;
   started = false;
 
   // Reset freeze state for both generators.
