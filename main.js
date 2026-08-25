@@ -18945,18 +18945,12 @@ function openProject(name) {
   setStatus(`opened "${proj.name}"`);
 }
 
-// ── Project file export/import ── a portable .grnsh.json: the full preset
-// plus both generators' source clips (float32 samples, base64), so a project
-// survives browser-data wipes and moves between machines.
+// ── Project file export/import ── version 2 is a compact binary container:
+// a small JSON manifest followed by raw Float32 audio blocks. Unlike the old
+// base64-in-JSON format, it never creates several enormous temporary strings
+// for a long mastering track. Import still accepts version-1 .grnsh.json.
 
-function floatsToBase64(f32) {
-  const bytes = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
-  let bin = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(bin);
-}
+const PROJECT_FILE_MAGIC = 'GRNSH2\r\n'; // exactly 8 UTF-8 bytes
 
 function base64ToFloats(b64) {
   const bin = atob(b64);
@@ -18965,16 +18959,25 @@ function base64ToFloats(b64) {
   return new Float32Array(bytes.buffer);
 }
 
-// Same conditions as persistAudioForScope, but reading the live source state
-// into a JSON-safe shape.
-function captureExportAudio() {
+// Same conditions as persistAudioForScope, but audio samples become direct
+// Blob parts. Descriptors use offsets relative to the binary audio payload.
+function captureExportAudioBinary() {
   const audio = {};
+  const parts = [];
+  let byteOffset = 0;
+  const addSamples = (samples) => {
+    const descriptor = { offset: byteOffset, length: samples.length };
+    const bytes = new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength);
+    parts.push(bytes);
+    byteOffset += bytes.byteLength;
+    return descriptor;
+  };
   for (let genIdx = 0; genIdx < 2; genIdx++) {
     const source = getSourceState(genIdx);
     if (source.mode === 'file' && source.bufferData) {
       audio[`gen${genIdx}`] = {
         mode: 'file',
-        samples: floatsToBase64(source.bufferData),
+        samples: addSamples(source.bufferData),
         sampleRate: audioCtx?.sampleRate || 48000,
         durationSec: source.durationSec,
         fileName: source.fileName,
@@ -18982,7 +18985,7 @@ function captureExportAudio() {
     } else if (source.mode === 'mic' && source.frozenData && state[genIdx].freeze) {
       audio[`gen${genIdx}`] = {
         mode: 'frozen',
-        samples: floatsToBase64(source.frozenData.samples),
+        samples: addSamples(source.frozenData.samples),
         frozenAt: source.frozenData.frozenAt,
         sampleRate: source.frozenData.sampleRate,
       };
@@ -18992,41 +18995,145 @@ function captureExportAudio() {
   if (ms?.left?.length) {
     audio.master = {
       mode: 'master',
-      left: floatsToBase64(ms.left),
-      right: floatsToBase64(ms.right),
+      left: addSamples(ms.left),
+      right: addSamples(ms.right),
       sampleRate: ms.sampleRate,
       name: ms.name,
     };
   }
-  return audio;
+  return { audio, parts };
 }
 
-function exportProjectFile() {
+async function writeProjectFileStream(suggestedName, headerParts, audioParts) {
+  if (typeof window.showSaveFilePicker !== 'function') return false;
+  let handle;
+  try {
+    handle = await window.showSaveFilePicker({
+      suggestedName,
+      types: [
+        {
+          description: 'grnsh project',
+          accept: { 'application/octet-stream': ['.grnsh'] },
+        },
+      ],
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') return null;
+    return false;
+  }
+  const writable = await handle.createWritable();
+  try {
+    for (const part of headerParts) await writable.write(part);
+    const chunkBytes = 8 * 1024 * 1024;
+    for (const part of audioParts) {
+      for (let offset = 0; offset < part.byteLength; offset += chunkBytes) {
+        await writable.write(part.subarray(offset, Math.min(offset + chunkBytes, part.byteLength)));
+      }
+    }
+    await writable.close();
+    return true;
+  } catch (error) {
+    try {
+      await writable.abort();
+    } catch (e) {}
+    throw error;
+  }
+}
+
+async function exportProjectFile() {
   const name = currentProjectName || getProjectNameInput()?.value.trim() || 'grnsh-project';
+  const { audio, parts } = captureExportAudioBinary();
   const payload = {
     format: 'grnsh-project',
-    version: 1,
+    version: 2,
+    audioEncoding: 'float32-binary',
     name,
     savedAt: Date.now(),
     data: capturePreset(),
-    audio: captureExportAudio(),
+    audio,
   };
-  const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${name.replace(/[^\w.-]+/g, '_')}.grnsh.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  setStatus(`exported "${name}"`);
+  const encoder = new TextEncoder();
+  const magic = encoder.encode(PROJECT_FILE_MAGIC);
+  const manifest = encoder.encode(JSON.stringify(payload));
+  const manifestSize = new ArrayBuffer(4);
+  new DataView(manifestSize).setUint32(0, manifest.byteLength, true);
+  const fileName = `${name.replace(/[^\w.-]+/g, '_')}.grnsh`;
+  setStatus(`exporting "${name}"…`);
+  try {
+    const streamed = await writeProjectFileStream(
+      fileName,
+      [magic, manifestSize, manifest],
+      parts,
+    );
+    if (streamed === null) {
+      setStatus('export cancelled');
+      return;
+    }
+    if (streamed) {
+      setStatus(`exported "${name}"`);
+      return;
+    }
+  } catch (error) {
+    setStatus(`export failed: ${error.message}`);
+    return;
+  }
+  try {
+    const blob = new Blob([magic, manifestSize, manifest, ...parts], {
+      type: 'application/octet-stream',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setStatus(`exported "${name}"`);
+  } catch (error) {
+    setStatus(`export failed: ${error.message}`);
+  }
+}
+
+async function readProjectFile(file) {
+  const prefix = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  const magic = new TextDecoder().decode(prefix.subarray(0, 8));
+  if (magic !== PROJECT_FILE_MAGIC) {
+    return { payload: JSON.parse(await file.text()), readFloats: null };
+  }
+  if (prefix.byteLength < 12) throw new Error('truncated project header');
+  const manifestLength = new DataView(
+    prefix.buffer,
+    prefix.byteOffset + 8,
+    4,
+  ).getUint32(0, true);
+  const manifestStart = 12;
+  const audioStart = manifestStart + manifestLength;
+  if (manifestLength <= 0 || audioStart > file.size) throw new Error('invalid project header');
+  const payload = JSON.parse(await file.slice(manifestStart, audioStart).text());
+  const readFloats = async (descriptor) => {
+    if (
+      !descriptor ||
+      !Number.isSafeInteger(descriptor.offset) ||
+      !Number.isSafeInteger(descriptor.length) ||
+      descriptor.offset < 0 ||
+      descriptor.length < 0
+    ) {
+      throw new Error('invalid audio block');
+    }
+    const start = audioStart + descriptor.offset;
+    const end = start + descriptor.length * Float32Array.BYTES_PER_ELEMENT;
+    if (end > file.size) throw new Error('truncated audio block');
+    return new Float32Array(await file.slice(start, end).arrayBuffer());
+  };
+  return { payload, readFloats };
 }
 
 async function importProjectFile(file) {
   let payload;
+  let readFloats;
   try {
-    payload = JSON.parse(await file.text());
+    ({ payload, readFloats } = await readProjectFile(file));
   } catch (e) {
     payload = null;
   }
@@ -19039,15 +19146,24 @@ async function importProjectFile(file) {
     const clip = payload.audio?.[`gen${genIdx}`];
     if (!clip?.samples) continue;
     try {
-      await applyRestoredClip(genIdx, { ...clip, samples: base64ToFloats(clip.samples) });
+      const samples = readFloats
+        ? await readFloats(clip.samples)
+        : base64ToFloats(clip.samples);
+      await applyRestoredClip(genIdx, { ...clip, samples });
     } catch (e) {}
   }
   const masterClip = payload.audio?.master;
   if (masterClip?.left && masterClip.right) {
     try {
+      const left = readFloats
+        ? await readFloats(masterClip.left)
+        : base64ToFloats(masterClip.left);
+      const right = readFloats
+        ? await readFloats(masterClip.right)
+        : base64ToFloats(masterClip.right);
       setMasteringSource(
-        base64ToFloats(masterClip.left),
-        base64ToFloats(masterClip.right),
+        left,
+        right,
         masterClip.sampleRate || 48000,
         masterClip.name,
       );
