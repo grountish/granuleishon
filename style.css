@@ -206,6 +206,7 @@ main {
 
 .undo-bar {
   display: flex;
+  align-items: center;
   gap: 2px;
 }
 
@@ -856,6 +857,52 @@ body.view-master .transport > .status {
   color: #bdd8f2;
 }
 
+.harmonizer-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.harmonizer-btn.open {
+  background: #35506c;
+  border-color: #4e7ca8;
+  color: #bdd8f2;
+}
+
+.harmonizer-menu {
+  width: 176px;
+}
+
+.harmonizer-row {
+  display: flex;
+  gap: 5px;
+}
+
+.harmonizer-row .drum-scale-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.harmonizer-apply {
+  flex: 1;
+  padding: 5px 7px;
+  font-size: 8px;
+  text-align: center;
+}
+
+.harmonizer-apply:hover:not(:disabled) {
+  border-color: var(--accent-0-dim);
+  color: #bfe6cf;
+}
+
+.harmonizer-hint {
+  font-size: 7px;
+  color: var(--muted);
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 .view-toggle {
   display: flex;
   align-items: center;
@@ -864,6 +911,8 @@ body.view-master .transport > .status {
 
 /* Vertical dividers between the header's sections (Ableton-style). */
 .header-bar > .project-bar,
+.header-bar > .undo-bar,
+.header-bar > .harmonizer-bar,
 .header-bar > .view-toggle,
 .header-bar > .loop-strip {
   align-self: stretch;
@@ -1332,15 +1381,54 @@ body.view-master .transport > .status {
 }
 
 .status {
+  position: relative;
   width: 126px;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-size: 9px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+.status-text {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Keep the header compact, but surface a readable toast whenever a message
+   cannot fit its fixed status slot. Hovering the clipped label recalls it. */
+.status.status-overflow::after {
+  content: attr(data-message);
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 6px);
+  right: 0;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(520px, calc(100vw - 16px));
+  padding: 7px 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--surface-2);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.42);
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-3px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.status.status-overflow.status-toast-visible::after,
+.status.status-overflow:hover::after {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 /* ── Buttons ─────────────────────────────────────────────────── */

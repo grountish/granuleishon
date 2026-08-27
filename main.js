@@ -189,11 +189,27 @@ function getBpmInput() {
   return document.getElementById('bpmInput');
 }
 
+let statusToastTimer = null;
+
 function setStatus(text) {
   const status = getStatusEl();
   if (status) {
-    status.textContent = text;
+    const statusText = status.querySelector('.status-text') || status;
+    statusText.textContent = text;
     status.title = text;
+    status.dataset.message = text;
+    status.classList.remove('status-overflow', 'status-toast-visible');
+    if (statusToastTimer) clearTimeout(statusToastTimer);
+    requestAnimationFrame(() => {
+      if (status.dataset.message !== text || statusText.scrollWidth <= statusText.clientWidth) {
+        return;
+      }
+      status.classList.add('status-overflow', 'status-toast-visible');
+      statusToastTimer = setTimeout(() => {
+        status.classList.remove('status-toast-visible');
+        statusToastTimer = null;
+      }, 5000);
+    });
   }
 }
 
@@ -6941,6 +6957,224 @@ function snapMidiToGen4Scale(midi) {
     if (isMidiInGen4Scale(midi + d)) return midi + d;
   }
   return midi;
+}
+
+// ── Harmonizer ── header dropdown: pick a root + scale, then fit every
+// pitched value in the whole project to it in one undoable step. Soft mode
+// snaps each note / frequency to the nearest scale tone; hard mode pulls
+// everything to the tonic (nearest octave) and zeroes detune/jitter so
+// nothing drifts off it.
+const HARMONIZER = { root: 0, scale: 'major' };
+let harmonizerMenuOpen = false;
+
+// Hz-valued gen4 lane params worth harmonizing, with their paramDef ranges.
+// Sub-audio rates (LFOs, delay time) stay untouched — they aren't tones.
+const HARMONIZER_GEN4_HZ_KEYS = {
+  kick: [['tune', 30, 120]],
+  snare: [['tune', 100, 500]],
+  hat: [['tone', 3000, 16000]],
+  perc: [['tune', 80, 800]],
+  fm: [
+    ['tune', 30, 1200],
+    ['tone', 200, 16000],
+  ],
+  smp: [['tone', 200, 16000]],
+};
+
+function harmonizerSnapMidi(midi, pitchClasses) {
+  if (!Number.isFinite(midi)) return midi;
+  const m = clamp(Math.round(midi), 0, 127);
+  for (let d = 0; d <= 11; d++) {
+    if (m - d >= 0 && pitchClasses.has((m - d) % 12)) return m - d; // ties resolve downward
+    if (d && m + d <= 127 && pitchClasses.has((m + d) % 12)) return m + d;
+  }
+  return m;
+}
+
+function harmonizerSnapHz(hz, pitchClasses, min, max) {
+  if (!Number.isFinite(hz) || hz <= 0) return hz;
+  let best = null;
+  let bestDist = Infinity;
+  for (let m = 0; m <= 135; m++) {
+    if (!pitchClasses.has(m % 12)) continue;
+    const f = midiToFreqHz(m);
+    if (f < min || f > max) continue;
+    const dist = Math.abs(Math.log2(f / hz));
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = f;
+    }
+  }
+  return best ?? hz;
+}
+
+// Semitone offsets (grain pitch, resonator intervals…) have no absolute
+// pitch, so they snap by interval: offset mod 12 must land on a scale degree.
+function harmonizerSnapOffset(st, intervals, min, max) {
+  if (!Number.isFinite(st)) return st;
+  const v = clamp(Math.round(st), min, max);
+  for (let d = 0; d <= 11; d++) {
+    for (const cand of d === 0 ? [v] : [v - d, v + d]) {
+      if (cand < min || cand > max) continue;
+      if (intervals.has(((cand % 12) + 12) % 12)) return cand;
+    }
+  }
+  return v;
+}
+
+function harmonizePreset(preset, root, scaleId, hard) {
+  const scaleIntervals = GEN4_SCALES.find(([id]) => id === scaleId)?.[2] || [0];
+  const intervals = new Set(hard ? [0] : scaleIntervals);
+  const pitchClasses = new Set([...intervals].map((i) => (root + i) % 12));
+  const snapMidi = (m) => harmonizerSnapMidi(m, pitchClasses);
+  const snapHz = (hz, min, max) => harmonizerSnapHz(hz, pitchClasses, min, max);
+  const snapSt = (v, min, max) => harmonizerSnapOffset(v, intervals, min, max);
+
+  const fitGen = (gen) => {
+    if (!gen) return;
+    if (typeof gen.pitch === 'number') gen.pitch = snapSt(gen.pitch, -24, 24);
+    if (hard && typeof gen.pitchJitter === 'number') gen.pitchJitter = 0;
+  };
+  const fitGen3 = (gen3) => {
+    if (!gen3) return;
+    if (typeof gen3.pitch === 'number') gen3.pitch = snapSt(gen3.pitch, -24, 24);
+    if (hard && typeof gen3.detune === 'number') gen3.detune = 0;
+    if (Array.isArray(gen3.lockedMidis)) {
+      gen3.lockedMidis = [...new Set(gen3.lockedMidis.map(snapMidi))];
+    }
+  };
+  const fitLaneParams = (laneId, params) => {
+    if (!params) return;
+    (HARMONIZER_GEN4_HZ_KEYS[laneId] || []).forEach(([key, min, max]) => {
+      if (typeof params[key] === 'number') params[key] = snapHz(params[key], min, max);
+    });
+    // The osc lane's locks override gen3 synth params, so they carry
+    // gen3-shaped pitch/detune keys; smp has its own semitone pitch.
+    if ((laneId === 'smp' || laneId === 'osc') && typeof params.pitch === 'number') {
+      params.pitch = snapSt(params.pitch, -24, 24);
+    }
+    if (laneId === 'osc' && hard && typeof params.detune === 'number') params.detune = 0;
+  };
+  const fitPattern = (pattern) => {
+    pattern?.channels?.forEach((channel, ci) => {
+      if (!channel) return;
+      if (Array.isArray(channel.notes)) {
+        channel.notes = channel.notes.map((n) => (Number.isFinite(n) ? snapMidi(n) : n));
+      }
+      const laneId = GEN4_DEFS[ci]?.id;
+      channel.locks?.forEach((lock) => fitLaneParams(laneId, lock));
+    });
+  };
+
+  preset.gens?.forEach(fitGen);
+  fitGen3(preset.gen3);
+  preset.gen4?.channels?.forEach((ch, ci) => fitLaneParams(GEN4_DEFS[ci]?.id, ch?.params));
+  preset.loops?.forEach((loop) => {
+    loop?.gens?.forEach(fitGen);
+    fitGen3(loop?.gen3);
+    fitPattern(loop?.gen4);
+    loop?.gen4?.variations?.forEach((variation) => variation && fitPattern(variation));
+  });
+  Object.values(preset.fxByBus || {}).forEach((bus) => {
+    if (!bus) return;
+    if (typeof bus.filter?.cutoff === 'number') {
+      bus.filter.cutoff = snapHz(bus.filter.cutoff, 80, 14000);
+    }
+    const res = bus.resonator;
+    if (res) {
+      if (typeof res.freq === 'number') res.freq = snapHz(res.freq, 40, 2000);
+      if (typeof res.note === 'number') res.note = snapMidi(res.note);
+      if (typeof res.int2 === 'number') res.int2 = snapSt(res.int2, -24, 24);
+      if (typeof res.int3 === 'number') res.int3 = snapSt(res.int3, -24, 24);
+    }
+    const trem = bus.pitchtrem;
+    if (trem) {
+      if (typeof trem.pitch === 'number') trem.pitch = snapSt(trem.pitch, -24, 24);
+      if (typeof trem.pitchDepth === 'number') trem.pitchDepth = snapSt(trem.pitchDepth, 0, 24);
+      if (hard && typeof trem.fine === 'number') trem.fine = 0;
+    }
+    if (typeof bus.beatrepeat?.pitch === 'number') {
+      bus.beatrepeat.pitch = snapSt(bus.beatrepeat.pitch, -24, 24);
+    }
+  });
+  // The note editors' scale guide follows the harmonized key.
+  if (preset.scale) {
+    preset.scale.root = root;
+    preset.scale.scale = scaleId;
+  }
+  return preset;
+}
+
+function applyHarmonizer(hard) {
+  historyCaptureNow(); // seal the pre-fit state as the undo point
+  const preset = harmonizePreset(capturePreset(), HARMONIZER.root, HARMONIZER.scale, hard);
+  applyPreset(preset, { resetSources: false });
+  historyCaptureNow();
+  closeHarmonizerMenu();
+  const scaleLabel = GEN4_SCALES.find(([id]) => id === HARMONIZER.scale)?.[1] || HARMONIZER.scale;
+  setStatus(
+    `harmonized to ${GEN4_ROOT_NAMES[HARMONIZER.root]} ${scaleLabel.toLowerCase()} (${hard ? 'hard' : 'soft'})`,
+  );
+}
+
+function openHarmonizerMenu() {
+  harmonizerMenuOpen = true;
+  document.getElementById('harmonizerMenu')?.removeAttribute('hidden');
+  document.getElementById('harmonizerBtn')?.classList.add('open');
+}
+
+function closeHarmonizerMenu() {
+  harmonizerMenuOpen = false;
+  document.getElementById('harmonizerMenu')?.setAttribute('hidden', '');
+  document.getElementById('harmonizerBtn')?.classList.remove('open');
+}
+
+function initHarmonizer() {
+  const rootSelect = document.getElementById('harmonizerRoot');
+  const scaleSelect = document.getElementById('harmonizerScale');
+  if (rootSelect) {
+    GEN4_ROOT_NAMES.forEach((name, idx) => {
+      const opt = document.createElement('option');
+      opt.value = `${idx}`;
+      opt.textContent = name;
+      rootSelect.appendChild(opt);
+    });
+    rootSelect.value = `${HARMONIZER.root}`;
+    rootSelect.addEventListener('change', () => {
+      HARMONIZER.root = clamp(Number(rootSelect.value) || 0, 0, 11);
+    });
+  }
+  if (scaleSelect) {
+    GEN4_SCALES.forEach(([id, label, intervals]) => {
+      if (!intervals) return; // "No scale" can't be a harmonizing target
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = label;
+      scaleSelect.appendChild(opt);
+    });
+    scaleSelect.value = HARMONIZER.scale;
+    scaleSelect.addEventListener('change', () => {
+      HARMONIZER.scale = scaleSelect.value;
+    });
+  }
+  document.getElementById('harmonizerBtn')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (harmonizerMenuOpen) closeHarmonizerMenu();
+    else openHarmonizerMenu();
+  });
+  // Clicks inside the menu shouldn't bubble to the document close-handler.
+  document
+    .getElementById('harmonizerMenu')
+    ?.addEventListener('click', (event) => event.stopPropagation());
+  document
+    .getElementById('harmonizerSoftBtn')
+    ?.addEventListener('click', () => applyHarmonizer(false));
+  document
+    .getElementById('harmonizerHardBtn')
+    ?.addEventListener('click', () => applyHarmonizer(true));
+  document.addEventListener('click', () => {
+    if (harmonizerMenuOpen) closeHarmonizerMenu();
+  });
 }
 
 // One shared musical scale: the drum note roll and the gen3 keys grid read
@@ -20784,6 +21018,7 @@ defaultProjectSnapshot = capturePreset();
 // Bring back whatever the user was working on last session.
 restoreAutosave();
 initHistory();
+initHarmonizer();
 // Autosave serializes the whole workspace — run it in idle time so the write
 // never lands in the middle of a frame the sequencer needs.
 setInterval(() => {

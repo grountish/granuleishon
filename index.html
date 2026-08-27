@@ -38,6 +38,29 @@
         <button id="undoBtn" class="undo-btn" type="button" title="Undo (&#8984;Z)" disabled>&#8630;</button>
         <button id="redoBtn" class="undo-btn" type="button" title="Redo (&#8679;&#8984;Z)" disabled>&#8631;</button>
       </div>
+      <div class="harmonizer-bar" id="harmonizerBar">
+        <button id="harmonizerBtn" class="undo-btn harmonizer-btn" type="button"
+          title="Harmonizer — fit every note &amp; frequency to a scale">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 3.2h5.4M1 6h4.2M1 8.8h5.4"/>
+            <path d="M9.4 8.6V1.8l1.6 1.1"/>
+            <circle cx="8.1" cy="8.6" r="1.45" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+        <div id="harmonizerMenu" class="project-menu harmonizer-menu" hidden>
+          <div class="harmonizer-row">
+            <select id="harmonizerRoot" class="drum-scale-select" title="Root note"></select>
+            <select id="harmonizerScale" class="drum-scale-select" title="Scale"></select>
+          </div>
+          <div class="harmonizer-row">
+            <button id="harmonizerSoftBtn" class="harmonizer-apply" type="button"
+              title="Snap every note and frequency to the nearest scale tone">Soft fit</button>
+            <button id="harmonizerHardBtn" class="harmonizer-apply" type="button"
+              title="Pull every note and frequency to the tonic (nearest octave)">Hard fit</button>
+          </div>
+          <div class="harmonizer-hint">soft &#8594; nearest scale tone &#183; hard &#8594; tonic</div>
+        </div>
+      </div>
       <div class="view-toggle" id="viewToggle">
         <button type="button" class="view-btn active" data-view="front" title="Music — instruments &amp; FX">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
@@ -189,7 +212,7 @@
           <span id="bounceProgressFill" class="bounce-progress-fill"></span>
           <span id="bounceProgressLabel" class="bounce-progress-label">0%</span>
         </div>
-        <span id="status" class="status">idle</span>
+        <span id="status" class="status" role="status" aria-live="polite"><span class="status-text">idle</span></span>
       </div>
     </div>
 
