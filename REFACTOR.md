@@ -42,21 +42,37 @@
 
 `src/app.js` is down from 21,273 to 18,512 lines with 23 modules carved out.
 
-Measured coupling of the sections still in `app.js` (external references /
-lines / symbols the rest of the file still needs back):
+Measured coupling of the sections still in `app.js` — how many app.js-local
+names each still reaches for. Low numbers are the cheap next extractions:
 
 | section | ext refs | lines |
 | --- | --- | --- |
-| Graphical EQ | 6 | 305 |
-| Song block context menu | 9 | 141 |
-| Song entry ops | 10 | 269 |
-| LFO | 11 | 256 |
-| Mastering view | 13 | 748 |
-| Transport-locked events / viz render | 14 | 578 |
-| FX chain | 20 | 849 |
-| Metering | 24 | 690 |
-| LAN Link | 28 | 371 |
-| Mastering persistence | 176 | 2,763 |
+| LFO | 5 | 250 |
+| Transport-locked events | 8 | 578 |
+| Song block context menu (cycles / remove) | 9 | 141 |
+| Song entry ops | 9 | 269 |
+| Note generators | 9 | 314 |
+| Mastering view | 9 | 663 |
+| Metering | 16 | 675 |
+| FX Chain | 19 | 755 |
+| Harmonizer | 20 | 308 |
+| LAN Link | 24 | 371 |
+| Song bounce | 27 | 269 |
+| Trig conditions | 31 | 294 |
+| Knob | 34 | 364 |
+| Song cursor / playback | 36 | 308 |
+| Gen 3: Oscillator | 40 | 759 |
+| Song morph | 42 | 423 |
+| Visualizer (per-generator) | 51 | 1,025 |
+| Loops & Song Arrangement | 52 | 826 |
+| Genre kits | 59 | 1,291 |
+| Audio clip persistence | 61 | 524 |
+| Orbit view | 61 | 828 |
+| Lane transforms | 76 | 1,297 |
+| Project file export/import | 83 | 952 |
+| Mod source context menu (right-click a knob's map LED) | 88 | 1,359 |
+| FX reordering (drag & drop) | 112 | 556 |
+| Mastering persistence | 149 | 1,979 |
 
 The knob widget and control row stay put for now: they reach into modulation
 visuals and the knob context menu, so they want the phase-6 event bus first.
