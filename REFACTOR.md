@@ -17,10 +17,14 @@
       became fields on `engine` (`core/engine.js`), and `activeBus`/`FX`
       became `BUS.active`/`BUS.fx` (`fx/state.js`).
 - [x] **Phase 4 — FX unit registry.** Each effect declares itself in one file
-      under `src/fx/units/` — data, `build`, `apply`, `applyAll` — and
-      `fx/registry.js` derives every table plus the wet/dry scaffold.
-      `buildBusFx` went 389 → 87 lines and names no effect.
-      **Still in app.js:** `extraUI` and the back-panel `subtitle` lines.
+      under `src/fx/units/` — data, `build`, `apply`, `applyAll`, its
+      back-panel line (`subtitle` / `isActive`), and its mode rows and latches
+      (`modeRows` / `toggles`) — and `fx/registry.js` derives every table plus
+      the wet/dry scaffold. `buildBusFx` went 389 → 87 lines and names no
+      effect; `renderActiveBusFx` and `refreshBackPanelState` no longer name
+      one either. An effect with mode buttons really is one file now. The only
+      per-effect UI left in `app.js` is autotune's root and scale selects, a
+      one-off widget where a spec would be indirection without payoff.
 - [ ] **Phase 5 — feature folders.** Barely started, and it is now the bulk of
       what is left. See "What remains" below.
 - [~] **Phase 6 — shared abstractions.** Done: **E** the event bus
