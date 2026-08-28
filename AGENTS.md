@@ -6,7 +6,9 @@ Run `node tools/check.mjs` after editing any file under `src/` or `worklets/`,
 and before committing. It is dependency-free and takes about a second. It
 checks that every file parses, that every import resolves to a name the target
 module actually exports, that nothing is declared twice at the top level of a
-file, and that every worklet `workletUrl()` asks for exists.
+file, that no module references a name only `app.js` declares without importing
+it, and that every worklet `workletUrl()` asks for exists. `serve.py` is parsed
+too, since it re-execs itself when edited.
 
 This is the one check that catches a file being *malformed* rather than
 misbehaving. It was added after a mechanical rename turned an object shorthand
