@@ -12,7 +12,20 @@
       **Blocked on phase 3:** everything left couples to the engine
       (`audioCtx`, `master`, `started`) or to a shared state object
       (`MASTERING`, `VIZ`, `UI_VIEW`, `state`) — see the coupling table below.
-- [ ] **Phase 3 — own the globals.** Now the gate for the rest of phase 2.
+- [~] **Phase 3 — own the globals.** (`0d03082`, `51a6806`, `e5d3ac8`)
+      Key discovery: a **SCREAMING_CASE state object needs no rename at all** —
+      moving the declaration into a module and importing it is enough, which
+      is far cheaper than the engine rename this phase was scoped around.
+      Done that way: `master/state.js` (MASTERING, its module ids, the
+      pristine defaults snapshot, the factory chains), `core/dsp.js` (RBJ
+      biquad math shared by the LUFS meter and the EQ plot), and
+      `master/eq-plot.js` — which the mastering-state move unblocked.
+      **Still to do:** the lowercase engine vars, which *do* need renaming:
+      `audioCtx` (121 refs), `master` (133), `node` (44), `started` (25).
+      Only one local shadows any of them (`const node` in the orbit view), so
+      the rename is mechanical — but it is the one genuinely risky step left,
+      and it gates the FX chain, metering, transport/viz and mastering-view
+      sections.
 - [x] **Phase 4 — FX unit registry.** (`4933a73`, `4d1a0a3`, `14ec0fb`) Each
       effect declares itself in `src/fx/units/*.js` — data, `build`, `apply`,
       `applyAll` — and `fx/registry.js` derives `FX_DEFS`, `FX_PRESETS`,
@@ -27,7 +40,7 @@
       DOM-facing and want the phase-6 event bus first.
 - [ ] Phases 5–7.
 
-`src/app.js` is down from 21,273 to 19,129 lines with 20 modules carved out.
+`src/app.js` is down from 21,273 to 18,512 lines with 23 modules carved out.
 
 Measured coupling of the sections still in `app.js` (external references /
 lines / symbols the rest of the file still needs back):
