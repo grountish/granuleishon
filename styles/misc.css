@@ -1,0 +1,685 @@
+/* ── Mod source context menu ── */
+
+.mod-source-menu {
+  position: fixed;
+  z-index: 80;
+  width: 132px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
+.mod-source-menu-title {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0 2px 2px;
+}
+
+.mod-source-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 6px;
+  font-size: 8px;
+  text-align: left;
+}
+
+.mod-source-option.active {
+  border-color: var(--accent-0);
+  color: var(--accent-0);
+}
+
+.knob-context-menu {
+  width: 160px;
+}
+
+.knob-context-option {
+  justify-content: flex-start;
+}
+
+.mod-source-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  font-size: 6px;
+  font-weight: 700;
+  line-height: 1;
+  color: #081118;
+}
+
+.mod-source-dot.lfo-1 {
+  background: #7aacdc;
+  border-color: #7aacdc;
+}
+
+.mod-source-dot.lfo-2 {
+  background: #6ed4a0;
+  border-color: #6ed4a0;
+}
+
+.mod-source-dot.lfo-seq {
+  background: #e0a45a;
+  border-color: #e0a45a;
+  color: #241507;
+}
+
+.mod-source-dot.lfo-sc {
+  background: #d05858;
+  border-color: #d05858;
+  color: #1a0808;
+}
+
+.mod-source-dot.lfo-trig {
+  background: #a06df5;
+  border-color: #a06df5;
+  color: #140826;
+}
+
+.mod-source-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Slate Arrangement theme ─────────────────────────────────── */
+
+:root[data-theme='slate-arrangement'] button,
+:root[data-theme='slate-arrangement'] input,
+:root[data-theme='slate-arrangement'] select {
+  border-color: #4d5853;
+  background-color: #2a3230;
+  color: #c5c5ad;
+}
+
+:root[data-theme='slate-arrangement'] button:hover:not(:disabled),
+:root[data-theme='slate-arrangement'] select:hover,
+:root[data-theme='slate-arrangement'] input:hover:not(:disabled) {
+  border-color: #778078;
+  background-color: #3d4643;
+}
+
+:root[data-theme='slate-arrangement'] button.active:not(.record-btn):not(.instrument-mute-btn):not(.lfo-led),
+:root[data-theme='slate-arrangement'] .fx-mode-btn.active,
+:root[data-theme='slate-arrangement'] .source-mode-btn.active {
+  border-color: #e0ad62;
+  background: #e0ad62;
+  color: #252b29;
+}
+
+:root[data-theme='slate-arrangement'] .header-bar,
+:root[data-theme='slate-arrangement'] .col-header,
+:root[data-theme='slate-arrangement'] .fx-section-label {
+  background: #343d3a;
+}
+
+:root[data-theme='slate-arrangement'] .project-menu,
+:root[data-theme='slate-arrangement'] .settings-modal,
+:root[data-theme='slate-arrangement'] .mod-source-menu,
+:root[data-theme='slate-arrangement'] .song-block-menu {
+  background: #3b4542;
+  border-color: #68716b;
+}
+
+:root[data-theme='slate-arrangement'] .generator,
+:root[data-theme='slate-arrangement'] #fx-chain,
+:root[data-theme='slate-arrangement'] .drum-grid,
+:root[data-theme='slate-arrangement'] .drum-note-editor {
+  background: #303836;
+}
+
+:root[data-theme='slate-arrangement'] .control:hover,
+:root[data-theme='slate-arrangement'] .fx-section-label:hover {
+  background: #414a47;
+}
+
+:root[data-theme='slate-arrangement'] .drum-step,
+:root[data-theme='slate-arrangement'] .drum-note-cell,
+:root[data-theme='slate-arrangement'] .seq-step {
+  background: #29312f;
+  border-color: #46504c;
+}
+
+:root[data-theme='slate-arrangement'] .drum-note-lanes,
+:root[data-theme='slate-arrangement'] .drum-note-label,
+:root[data-theme='slate-arrangement'] .drum-note-step-header,
+:root[data-theme='slate-arrangement'] .drum-note-step-number {
+  background: #343d3a;
+}
+
+:root[data-theme='slate-arrangement'] .drum-note-row.black-key,
+:root[data-theme='slate-arrangement'] .drum-note-row.black-key .drum-note-cell {
+  background: #2a3230;
+}
+
+:root[data-theme='slate-arrangement'] .drum-note-row.black-key .drum-note-label {
+  background: #29312f;
+  color: #b8b9a4;
+}
+
+:root[data-theme='slate-arrangement'] .instrument-solo-btn.active {
+  border-color: #e0ad62;
+  background: #e0ad62;
+  color: #252b29;
+}
+
+:root[data-theme='slate-arrangement'] .instrument-mute-btn.active,
+:root[data-theme='slate-arrangement'] .record-btn.active {
+  border-color: #d26960;
+  background: #d26960;
+  color: #2b1c1b;
+}
+
+/* ── Slate Session theme ─────────────────────────── */
+
+:root[data-theme='slate-session'] button,
+:root[data-theme='slate-session'] input,
+:root[data-theme='slate-session'] select {
+  border-color: #172226;
+  background-color: #354246;
+  color: #d2d7d4;
+}
+
+:root[data-theme='slate-session'] button:hover:not(:disabled),
+:root[data-theme='slate-session'] select:hover,
+:root[data-theme='slate-session'] input:hover:not(:disabled) {
+  border-color: #718187;
+  background-color: #4b5a5f;
+}
+
+:root[data-theme='slate-session'] button.active:not(.record-btn):not(.instrument-mute-btn):not(.lfo-led),
+:root[data-theme='slate-session'] .fx-mode-btn.active,
+:root[data-theme='slate-session'] .source-mode-btn.active {
+  border-color: #68d4e5;
+  background: #68d4e5;
+  color: #172226;
+}
+
+:root[data-theme='slate-session'] .header-bar,
+:root[data-theme='slate-session'] .col-header,
+:root[data-theme='slate-session'] .fx-section-label {
+  background: #3d4b4f;
+  border-color: #172226;
+}
+
+:root[data-theme='slate-session'] .project-menu,
+:root[data-theme='slate-session'] .settings-modal,
+:root[data-theme='slate-session'] .mod-source-menu,
+:root[data-theme='slate-session'] .song-block-menu {
+  background: #46565b;
+  border-color: #172226;
+}
+
+:root[data-theme='slate-session'] .generator,
+:root[data-theme='slate-session'] #fx-chain,
+:root[data-theme='slate-session'] .drum-grid,
+:root[data-theme='slate-session'] .drum-note-editor {
+  background: #303a3e;
+}
+
+:root[data-theme='slate-session'] .control:hover,
+:root[data-theme='slate-session'] .fx-section-label:hover {
+  background: #4a595e;
+}
+
+:root[data-theme='slate-session'] .drum-step,
+:root[data-theme='slate-session'] .drum-note-cell,
+:root[data-theme='slate-session'] .seq-step {
+  background: #273236;
+  border-color: #172226;
+}
+
+:root[data-theme='slate-session'] .drum-note-lanes,
+:root[data-theme='slate-session'] .drum-note-label,
+:root[data-theme='slate-session'] .drum-note-step-header,
+:root[data-theme='slate-session'] .drum-note-step-number {
+  background: #3b484c;
+}
+
+:root[data-theme='slate-session'] .drum-note-row.black-key,
+:root[data-theme='slate-session'] .drum-note-row.black-key .drum-note-cell {
+  background: #293438;
+}
+
+:root[data-theme='slate-session'] .drum-note-row.black-key .drum-note-label {
+  background: #293438;
+  color: #b8c0be;
+}
+
+:root[data-theme='slate-session'] .instrument-solo-btn.active {
+  border-color: #68d4e5;
+  background: #68d4e5;
+  color: #172226;
+}
+
+:root[data-theme='slate-session'] .instrument-mute-btn.active,
+:root[data-theme='slate-session'] .record-btn.active {
+  border-color: #e49abc;
+  background: #e49abc;
+  color: #281921;
+}
+
+/* ── Acid Circuit theme ────────────────────────────────────── */
+
+:root[data-theme='acid-circuit'] button,
+:root[data-theme='acid-circuit'] input,
+:root[data-theme='acid-circuit'] select {
+  border-color: #344b24;
+  background-color: #10170f;
+  color: #e7f7be;
+}
+
+:root[data-theme='acid-circuit'] button:hover:not(:disabled),
+:root[data-theme='acid-circuit'] select:hover,
+:root[data-theme='acid-circuit'] input:hover:not(:disabled) {
+  border-color: #b7ff2a;
+  background-color: #1a2616;
+  box-shadow: 0 0 8px rgba(183, 255, 42, 0.16);
+}
+
+:root[data-theme='acid-circuit'] button.active:not(.record-btn):not(.instrument-mute-btn):not(.lfo-led),
+:root[data-theme='acid-circuit'] .fx-mode-btn.active,
+:root[data-theme='acid-circuit'] .source-mode-btn.active {
+  border-color: #d5ff7b;
+  background: #b7ff2a;
+  color: #091006;
+  box-shadow: 0 0 10px rgba(183, 255, 42, 0.32);
+}
+
+:root[data-theme='acid-circuit'] .header-bar,
+:root[data-theme='acid-circuit'] .col-header,
+:root[data-theme='acid-circuit'] .fx-section-label,
+:root[data-theme='acid-circuit'] .mixer-channel-header {
+  border-color: #3f572a;
+  background: linear-gradient(90deg, #111b0f, #17131a 76%, #1c101a);
+}
+
+:root[data-theme='acid-circuit'] .project-menu,
+:root[data-theme='acid-circuit'] .settings-modal,
+:root[data-theme='acid-circuit'] .mod-source-menu,
+:root[data-theme='acid-circuit'] .song-block-menu {
+  border-color: #668d32;
+  background: linear-gradient(145deg, #182315, #101311 62%, #1b1019);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.7), 0 0 16px rgba(183, 255, 42, 0.08);
+}
+
+:root[data-theme='acid-circuit'] .workspace,
+:root[data-theme='acid-circuit'] .back-panel,
+:root[data-theme='acid-circuit'] .mixer-panel,
+:root[data-theme='acid-circuit'] .song-panel-view,
+:root[data-theme='acid-circuit'] .master-panel {
+  background:
+    linear-gradient(rgba(183, 255, 42, 0.018) 1px, transparent 1px) 0 0 / 32px 32px,
+    linear-gradient(90deg, rgba(183, 255, 42, 0.018) 1px, transparent 1px) 0 0 / 32px 32px,
+    radial-gradient(circle at 10% 0%, rgba(183, 255, 42, 0.07), transparent 36%),
+    radial-gradient(circle at 92% 8%, rgba(255, 62, 200, 0.06), transparent 30%),
+    var(--bg);
+}
+
+:root[data-theme='acid-circuit'] .generator,
+:root[data-theme='acid-circuit'] #fx-chain,
+:root[data-theme='acid-circuit'] .drum-grid,
+:root[data-theme='acid-circuit'] .drum-note-editor,
+:root[data-theme='acid-circuit'] .mixer-channel,
+:root[data-theme='acid-circuit'] .mixer-eq,
+:root[data-theme='acid-circuit'] .master-section,
+:root[data-theme='acid-circuit'] .master-leveler,
+:root[data-theme='acid-circuit'] .song-card,
+:root[data-theme='acid-circuit'] .song-orbit-center {
+  border-color: #344b24;
+  background: linear-gradient(155deg, rgba(23, 34, 20, 0.98), rgba(9, 13, 9, 0.98));
+  box-shadow: inset 0 1px rgba(220, 255, 147, 0.035), 0 8px 22px rgba(0, 0, 0, 0.22);
+}
+
+:root[data-theme='acid-circuit'] .control:hover,
+:root[data-theme='acid-circuit'] .fx-section-label:hover {
+  background: rgba(183, 255, 42, 0.07);
+}
+
+:root[data-theme='acid-circuit'] .drum-step,
+:root[data-theme='acid-circuit'] .drum-note-cell,
+:root[data-theme='acid-circuit'] .seq-step {
+  border-color: #344b24;
+  background: #0c120c;
+}
+
+:root[data-theme='acid-circuit'] .drum-note-lanes,
+:root[data-theme='acid-circuit'] .drum-note-label,
+:root[data-theme='acid-circuit'] .drum-note-step-header,
+:root[data-theme='acid-circuit'] .drum-note-step-number {
+  background: #121b11;
+}
+
+:root[data-theme='acid-circuit'] .drum-note-row.black-key,
+:root[data-theme='acid-circuit'] .drum-note-row.black-key .drum-note-cell,
+:root[data-theme='acid-circuit'] .drum-note-row.black-key .drum-note-label {
+  background: #090d09;
+}
+
+:root[data-theme='acid-circuit'] .loop-chip,
+:root[data-theme='acid-circuit'] .song-block {
+  border-color: #344b24;
+  background: #10170f;
+}
+
+:root[data-theme='acid-circuit'] .loop-chip.active,
+:root[data-theme='acid-circuit'] .song-block.playing {
+  border-color: #22e5ff;
+  background: #102226;
+  box-shadow: 0 0 8px rgba(34, 229, 255, 0.18);
+}
+
+:root[data-theme='acid-circuit'] .back-module {
+  border-color: #46642b;
+  background:
+    repeating-linear-gradient(180deg, rgba(183, 255, 42, 0.86) 0 2px, transparent 2px 8px) left 4px top 14px / 5px calc(100% - 28px) no-repeat,
+    repeating-linear-gradient(180deg, rgba(255, 62, 200, 0.72) 0 2px, transparent 2px 8px) right 4px top 14px / 5px calc(100% - 28px) no-repeat,
+    linear-gradient(145deg, #152112, #080c09 74%);
+  box-shadow: inset 0 1px rgba(220, 255, 147, 0.06), 0 0 14px rgba(183, 255, 42, 0.06), 0 10px 24px rgba(0, 0, 0, 0.38);
+}
+
+:root[data-theme='acid-circuit'] .back-module::after {
+  border-color: rgba(183, 255, 42, 0.1);
+}
+
+:root[data-theme='acid-circuit'] .back-module-title {
+  border-color: rgba(183, 255, 42, 0.16);
+  color: #e7f7be;
+}
+
+:root[data-theme='acid-circuit'] .patch-jack {
+  border-color: #789b39;
+  box-shadow: 0 0 7px rgba(183, 255, 42, 0.12);
+}
+
+:root[data-theme='acid-circuit'] .mixer-gen3 {
+  --gen-accent: #22e5ff;
+}
+
+:root[data-theme='acid-circuit'] .mixer-gen4 {
+  --gen-accent: #ff5b45;
+}
+
+:root[data-theme='acid-circuit'] .mixer-meter,
+:root[data-theme='acid-circuit'] .mixer-meter-track {
+  border-color: #26331d;
+  background: #050805;
+}
+
+:root[data-theme='acid-circuit'] .mixer-meter-peak,
+:root[data-theme='acid-circuit'] .mixer-meter-peak:hover,
+:root[data-theme='acid-circuit'] .mixer-meter-peak:focus-visible {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+:root[data-theme='acid-circuit'] .mixer-meter-fill {
+  background: linear-gradient(to top, #b7ff2a 0 72%, #22e5ff 84%, #22e5ff 90.9%, #ff3ec8 90.9% 100%);
+  box-shadow: 0 0 7px rgba(183, 255, 42, 0.42);
+}
+
+:root[data-theme='acid-circuit'] .mixer-meter-track::after,
+:root[data-theme='acid-circuit'] .mixer-meter-hold {
+  background: #dcff9c;
+  box-shadow: 0 0 4px rgba(183, 255, 42, 0.9);
+}
+
+:root[data-theme='acid-circuit'] .mixer-meter-peak.over-zero {
+  color: #ff3ec8;
+}
+
+:root[data-theme='acid-circuit'] .mixer-meter-hold.over-zero {
+  background: #ff3ec8;
+  box-shadow: 0 0 5px rgba(255, 62, 200, 0.9);
+}
+
+:root[data-theme='acid-circuit'] .instrument-solo-btn.active {
+  border-color: #b7ff2a;
+  background: #b7ff2a;
+  color: #091006;
+}
+
+:root[data-theme='acid-circuit'] .instrument-mute-btn.active,
+:root[data-theme='acid-circuit'] .record-btn.active {
+  border-color: #ff3ec8;
+  background: #ff3ec8;
+  color: #190813;
+  box-shadow: 0 0 9px rgba(255, 62, 200, 0.35);
+}
+
+/* ── Solar Ritual theme ────────────────────────────────────── */
+
+:root[data-theme='solar-ritual'] button,
+:root[data-theme='solar-ritual'] input,
+:root[data-theme='solar-ritual'] select {
+  border-color: #5a322f;
+  background-color: #281416;
+  color: #ffe8c2;
+}
+
+:root[data-theme='solar-ritual'] button:hover:not(:disabled),
+:root[data-theme='solar-ritual'] select:hover,
+:root[data-theme='solar-ritual'] input:hover:not(:disabled) {
+  border-color: #ffad32;
+  background-color: #3a1d1b;
+  box-shadow: 0 0 9px rgba(255, 173, 50, 0.14);
+}
+
+:root[data-theme='solar-ritual'] button.active:not(.record-btn):not(.instrument-mute-btn):not(.lfo-led),
+:root[data-theme='solar-ritual'] .fx-mode-btn.active,
+:root[data-theme='solar-ritual'] .source-mode-btn.active {
+  border-color: #ffd36a;
+  background: linear-gradient(180deg, #ffc04b, #ee8b27);
+  color: #2a1009;
+  box-shadow: 0 0 11px rgba(255, 173, 50, 0.3);
+}
+
+:root[data-theme='solar-ritual'] .header-bar,
+:root[data-theme='solar-ritual'] .col-header,
+:root[data-theme='solar-ritual'] .fx-section-label,
+:root[data-theme='solar-ritual'] .mixer-channel-header {
+  border-color: #6a3930;
+  background: linear-gradient(90deg, #351817, #271416 58%, #22132d);
+}
+
+:root[data-theme='solar-ritual'] .project-menu,
+:root[data-theme='solar-ritual'] .settings-modal,
+:root[data-theme='solar-ritual'] .mod-source-menu,
+:root[data-theme='solar-ritual'] .song-block-menu {
+  border-color: #8a4c37;
+  background: linear-gradient(145deg, #3b1d1a, #251215 62%, #2b1736);
+  box-shadow: 0 14px 34px rgba(7, 2, 3, 0.72), 0 0 18px rgba(255, 142, 38, 0.07);
+}
+
+:root[data-theme='solar-ritual'] .workspace,
+:root[data-theme='solar-ritual'] .back-panel,
+:root[data-theme='solar-ritual'] .mixer-panel,
+:root[data-theme='solar-ritual'] .song-panel-view,
+:root[data-theme='solar-ritual'] .master-panel {
+  background:
+    radial-gradient(circle at 50% -18%, rgba(255, 173, 50, 0.11), transparent 38%),
+    radial-gradient(circle at 92% 82%, rgba(167, 121, 255, 0.06), transparent 30%),
+    linear-gradient(150deg, #1c0c0f, #12090b 72%);
+}
+
+:root[data-theme='solar-ritual'] .generator,
+:root[data-theme='solar-ritual'] #fx-chain,
+:root[data-theme='solar-ritual'] .drum-grid,
+:root[data-theme='solar-ritual'] .drum-note-editor,
+:root[data-theme='solar-ritual'] .mixer-channel,
+:root[data-theme='solar-ritual'] .mixer-eq,
+:root[data-theme='solar-ritual'] .master-section,
+:root[data-theme='solar-ritual'] .master-leveler,
+:root[data-theme='solar-ritual'] .song-card,
+:root[data-theme='solar-ritual'] .song-orbit-center {
+  border-color: #62352f;
+  border-radius: 6px;
+  background: linear-gradient(150deg, rgba(52, 26, 24, 0.98), rgba(28, 13, 16, 0.98));
+  box-shadow: inset 0 1px rgba(255, 232, 194, 0.04), 0 9px 24px rgba(5, 1, 2, 0.28);
+}
+
+:root[data-theme='solar-ritual'] .control:hover,
+:root[data-theme='solar-ritual'] .fx-section-label:hover {
+  background: rgba(255, 173, 50, 0.07);
+}
+
+:root[data-theme='solar-ritual'] .drum-step,
+:root[data-theme='solar-ritual'] .drum-note-cell,
+:root[data-theme='solar-ritual'] .seq-step {
+  border-color: #5a322f;
+  background: #211013;
+}
+
+:root[data-theme='solar-ritual'] .drum-note-lanes,
+:root[data-theme='solar-ritual'] .drum-note-label,
+:root[data-theme='solar-ritual'] .drum-note-step-header,
+:root[data-theme='solar-ritual'] .drum-note-step-number {
+  background: #32191a;
+}
+
+:root[data-theme='solar-ritual'] .drum-note-row.black-key,
+:root[data-theme='solar-ritual'] .drum-note-row.black-key .drum-note-cell,
+:root[data-theme='solar-ritual'] .drum-note-row.black-key .drum-note-label {
+  background: #190c0f;
+}
+
+:root[data-theme='solar-ritual'] .loop-chip,
+:root[data-theme='solar-ritual'] .song-block {
+  border-color: #67372f;
+  border-radius: 5px;
+  background: #2b1517;
+}
+
+:root[data-theme='solar-ritual'] .loop-chip.active,
+:root[data-theme='solar-ritual'] .song-block.playing {
+  border-color: #ffd36a;
+  background: #4a2818;
+  box-shadow: 0 0 9px rgba(255, 173, 50, 0.17);
+}
+
+:root[data-theme='solar-ritual'] .song-orbit-node.playing circle {
+  fill: #4a2818;
+}
+
+:root[data-theme='solar-ritual'] .back-module {
+  border-color: #784332;
+  border-radius: 7px;
+  background:
+    repeating-linear-gradient(180deg, rgba(255, 173, 50, 0.8) 0 3px, transparent 3px 10px) left 4px top 14px / 6px calc(100% - 28px) no-repeat,
+    repeating-linear-gradient(180deg, rgba(167, 121, 255, 0.65) 0 3px, transparent 3px 10px) right 4px top 14px / 6px calc(100% - 28px) no-repeat,
+    radial-gradient(circle at 50% 0%, rgba(255, 173, 50, 0.09), transparent 45%),
+    linear-gradient(160deg, #361a17, #160b0e 76%);
+  box-shadow: inset 0 1px rgba(255, 232, 194, 0.07), 0 0 16px rgba(255, 173, 50, 0.045), 0 12px 26px rgba(7, 2, 3, 0.42);
+}
+
+:root[data-theme='solar-ritual'] .back-module::after {
+  border-color: rgba(255, 211, 106, 0.1);
+}
+
+:root[data-theme='solar-ritual'] .back-module-title {
+  border-color: rgba(255, 173, 50, 0.18);
+  color: #ffe8c2;
+}
+
+:root[data-theme='solar-ritual'] .patch-jack {
+  border-color: #a9663d;
+  box-shadow: 0 0 7px rgba(255, 173, 50, 0.12);
+}
+
+:root[data-theme='solar-ritual'] .mixer-gen3 {
+  --gen-accent: #ff6f3c;
+}
+
+:root[data-theme='solar-ritual'] .mixer-gen4 {
+  --gen-accent: #a779ff;
+}
+
+:root[data-theme='solar-ritual'] .mixer-meter,
+:root[data-theme='solar-ritual'] .mixer-meter-track {
+  border-color: #48251f;
+  background: #100708;
+}
+
+:root[data-theme='solar-ritual'] .mixer-meter-peak,
+:root[data-theme='solar-ritual'] .mixer-meter-peak:hover,
+:root[data-theme='solar-ritual'] .mixer-meter-peak:focus-visible {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+:root[data-theme='solar-ritual'] .mixer-meter-fill {
+  background: linear-gradient(to top, #ffd36a 0 72%, #ff9b35 84%, #ff9b35 90.9%, #a779ff 90.9% 100%);
+  box-shadow: 0 0 7px rgba(255, 173, 50, 0.4);
+}
+
+:root[data-theme='solar-ritual'] .mixer-meter-track::after,
+:root[data-theme='solar-ritual'] .mixer-meter-hold {
+  background: #fff0bc;
+  box-shadow: 0 0 4px rgba(255, 211, 106, 0.9);
+}
+
+:root[data-theme='solar-ritual'] .mixer-meter-peak.over-zero {
+  color: #c29aff;
+}
+
+:root[data-theme='solar-ritual'] .mixer-meter-hold.over-zero {
+  background: #a779ff;
+  box-shadow: 0 0 5px rgba(167, 121, 255, 0.92);
+}
+
+:root[data-theme='solar-ritual'] .instrument-solo-btn.active {
+  border-color: #ffd36a;
+  background: #ffd36a;
+  color: #2a1009;
+}
+
+:root[data-theme='solar-ritual'] .instrument-mute-btn.active,
+:root[data-theme='solar-ritual'] .record-btn.active {
+  border-color: #a779ff;
+  background: #a779ff;
+  color: #180d28;
+  box-shadow: 0 0 9px rgba(167, 121, 255, 0.35);
+}
+
+/* Keep sequenced notes legible regardless of theme surface overrides. */
+:root .drum-step.on,
+:root[data-theme] .drum-step.on {
+  border-color: var(--ch-color);
+  background: var(--ch-color);
+}
+
+:root .drum-note-cell.on,
+:root[data-theme] .drum-note-cell.on {
+  border-color: var(--ch-color);
+  background: var(--ch-color);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+}
+
+:root .drum-note-cell.inherited,
+:root[data-theme] .drum-note-cell.inherited {
+  border-color: var(--ch-color);
+  background: color-mix(in srgb, var(--ch-color) 38%, var(--bg));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ch-color) 70%, white);
+}
+
+:root .piano-cell.locked {
+  box-shadow: inset 0 0 0 1px rgba(130, 225, 240, 0.75);
+}
+
+:root .piano-cell.active {
+  box-shadow: inset 0 0 0 2px rgba(235, 255, 255, 0.9);
+}

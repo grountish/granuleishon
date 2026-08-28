@@ -1,0 +1,760 @@
+/* ── Gen 4: Glitch Drums ─────────────────────────────────────── */
+
+.gen-4 {
+  --gen-accent: #d05858;
+  --gen-accent-dim: #a84444;
+}
+
+.drum-hints {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.drum-hint {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.drum-hint-key {
+  background: #252525;
+  border: 1px solid #383838;
+  border-radius: 2px;
+  padding: 1px 5px;
+  font-size: 11px;
+  color: #888;
+  font-family: monospace;
+  line-height: 1.4;
+}
+
+.drum-hints-sep {
+  color: #333;
+}
+
+.drum-grid {
+  flex-shrink: 0;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.drum-row {
+  display: grid;
+  /* Steps take the stretch; the FX/mute actions hug the right edge. */
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 6px;
+  /* Tall enough that a step's badge rows (timing/stutter up top, note and
+     trig condition at the bottom) never overlap. */
+  height: 34px;
+}
+
+.drum-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-self: end;
+  /* Constant width (FX 22 + gap 6 + M 22) even on rows without an FX button
+     (OSC), so every row's fluid step cells line up column-for-column. */
+  min-width: 50px;
+  justify-content: flex-end;
+}
+
+.drum-row-label {
+  width: 38px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  flex-shrink: 0;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ch-color, var(--text));
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.drum-row-label:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+.drum-row-label.fixed-note-source {
+  cursor: default;
+}
+
+.drum-row-label.fixed-note-source:hover {
+  color: var(--ch-color, var(--text));
+}
+
+.drum-steps {
+  display: grid;
+  /* Fluid columns: fill the row's width, never shrinking below tap size. */
+  grid-template-columns: repeat(32, minmax(22px, 1fr));
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+}
+
+.drum-step {
+  height: 100%;
+  padding: 0;
+  border: 1px solid #2a2a2a;
+  background: #181818;
+  border-radius: 2px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.06s, background 0.06s;
+  min-width: 0;
+}
+
+.drum-step::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2px solid transparent;
+  border-radius: 1px;
+  pointer-events: none;
+  transition: border-color 0.05s;
+}
+
+.drum-step.current::after {
+  border-color: rgba(255, 255, 255, 0.88);
+}
+
+.drum-step.on {
+  background: var(--ch-color);
+  border-color: var(--ch-color);
+  opacity: max(0.42, var(--step-velocity, 1));
+}
+
+.drum-step:hover:not(.on) {
+  border-color: #404040;
+  background: #222;
+}
+
+.drum-step.on:hover {
+  filter: brightness(1.15);
+}
+
+.drum-mute-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  transition: color 0.08s, border-color 0.08s, background 0.08s, box-shadow 0.08s;
+}
+
+.drum-mute-btn:hover:not(:disabled) {
+  border-color: #5a5a5a;
+  background: #303030;
+  color: var(--text);
+}
+
+.drum-mute-btn.muted {
+  background: #a94e54;
+  border-color: #df7379;
+  color: #fff;
+  box-shadow: 0 0 0 1px rgba(223, 115, 121, 0.25);
+}
+
+.drum-row.channel-muted .drum-row-label,
+.drum-row.channel-muted .drum-steps,
+.drum-row.channel-muted .drum-fx-btn {
+  opacity: 0.32;
+}
+
+.drum-note-lane-btn.muted:not(.active) {
+  opacity: 0.42;
+}
+
+.drum-params {
+  flex-shrink: 0;
+}
+
+.drum-grid[hidden],
+.drum-hints[hidden],
+.drum-note-editor[hidden] {
+  display: none;
+}
+
+.drum-note-editor {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.drum-note-lanes {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 28px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: #1d1d1d;
+}
+
+/* Generator toolbar (euclid / arp / random) under the lane row. */
+.drum-note-gen {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-height: 26px;
+  padding: 2px 10px;
+  border-bottom: 1px solid var(--border);
+  background: #1d1d1d;
+}
+
+.drum-note-gen-label {
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.drum-gen-tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.drum-gen-tab {
+  height: 18px;
+  min-height: 18px;
+  padding: 0 8px;
+  font-size: 7px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.drum-gen-tab.active {
+  color: #fff;
+  background: #333;
+  border-color: #5a5a5a;
+}
+
+.drum-gen-panel {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
+/* display:flex would otherwise defeat the hidden attribute */
+.drum-gen-panel[hidden] {
+  display: none;
+}
+
+.drum-gen-run {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.drum-note-edit-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-left: 8px;
+  margin-left: 2px;
+  border-left: 1px solid var(--border);
+}
+
+.drum-note-edit-caption {
+  font-size: 7px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+/* Shared instant tooltip — replaces the slow native title on toolbars. */
+.ui-tip {
+  position: fixed;
+  z-index: 1000;
+  max-width: 320px;
+  padding: 4px 7px;
+  font-size: 9px;
+  line-height: 1.4;
+  color: var(--text);
+  background: #111;
+  border: 1px solid #4a4a4a;
+  border-radius: 3px;
+  pointer-events: none;
+  white-space: normal;
+}
+
+.drum-note-lane-btn {
+  min-width: 42px;
+  height: 19px;
+  padding: 0 7px;
+  border-color: #363636;
+  background: #202020;
+  color: var(--ch-color);
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.drum-note-lane-btn.active {
+  border-color: var(--ch-color);
+  background: color-mix(in srgb, var(--ch-color) 22%, #202020);
+  color: var(--ch-color);
+}
+
+.drum-note-pencil-btn {
+  width: 24px;
+  height: 19px;
+  margin-left: 8px;
+  padding: 0;
+  border-color: #3b3b3b;
+  background: #202020;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.drum-note-pencil-btn:hover,
+.drum-note-pencil-btn.active {
+  border-color: var(--ch-color);
+  color: var(--ch-color);
+}
+
+.drum-note-pencil-btn.active {
+  background: color-mix(in srgb, var(--ch-color) 18%, #202020);
+}
+
+.drum-note-editor:has(.drum-note-pencil-btn.active) .drum-note-cell:not(.step-inactive) {
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.drum-note-roll {
+  max-height: 300px;
+  padding: 4px 8px 8px;
+  overflow: auto;
+  scrollbar-color: #444 #181818;
+}
+
+.drum-note-row {
+  display: grid;
+  grid-template-columns: 42px repeat(32, 26px);
+  gap: 3px;
+  width: max-content;
+  height: 18px;
+}
+
+.drum-note-row.black-key {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+/* Scale mode: out-of-scale rows recede, the root row's label pops. */
+.drum-note-row.out-scale .drum-note-cell {
+  opacity: 0.4;
+}
+
+.drum-note-row.out-scale .drum-note-label {
+  opacity: 0.45;
+}
+
+.drum-note-row.scale-root .drum-note-label {
+  color: var(--ch-color, var(--accent-0));
+  font-weight: 700;
+}
+
+.drum-scale-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.drum-scale-select {
+  font-size: 8px;
+  padding: 2px 4px;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+
+.drum-scale-fit-btn {
+  padding: 3px 8px;
+}
+
+.drum-note-label {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  padding-left: 5px;
+  background: #1b1b1b;
+  border-right: 1px solid #343434;
+  color: #777;
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.drum-note-row.black-key .drum-note-label {
+  background: #242424;
+  color: #aaa;
+}
+
+.drum-note-step-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: 17px;
+  background: #1b1b1b;
+}
+
+.drum-note-step-number {
+  display: grid;
+  place-items: center;
+  color: #555;
+  background: #1b1b1b;
+  font-size: 7px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.drum-note-step-number:hover:not(.step-inactive) {
+  color: #999;
+}
+
+/* Step selected for param locks — matches the grid's .drum-step highlight. */
+.drum-note-step-number.lock-selected {
+  color: #111;
+  background: rgba(255, 255, 255, 0.94);
+}
+
+.drum-note-cell {
+  min-width: 0;
+  height: 15px;
+  margin-top: 1px;
+  padding: 0;
+  border: 1px solid #2d2d2d;
+  border-radius: 1px;
+  background: #181818;
+}
+
+.drum-note-row.black-key .drum-note-cell {
+  background: #202020;
+}
+
+.drum-note-cell:hover:not(.step-inactive) {
+  border-color: var(--ch-color);
+  background: #292929;
+}
+
+.drum-note-cell.on {
+  border-color: var(--ch-color);
+  background: var(--ch-color);
+}
+
+.drum-note-cell.inherited {
+  border-color: var(--ch-color);
+  background: color-mix(in srgb, var(--ch-color) 18%, #181818);
+}
+
+.drum-note-cell.current {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+}
+
+/* Slot selected for param editing — warm column tint, distinct from the
+   white playhead outline. */
+.drum-note-cell.lock-selected {
+  border-color: color-mix(in srgb, var(--ch-color, var(--accent-fx)) 70%, transparent);
+  background: color-mix(in srgb, var(--ch-color, var(--accent-fx)) 12%, #181818);
+}
+
+.drum-note-cell.step-inactive,
+.drum-note-step-number.step-inactive {
+  opacity: 0.18;
+  pointer-events: none;
+}
+
+.drum-param-section .gen-controls {
+  border-top: none;
+}
+
+.drum-step-stutter {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 2;
+  padding: 1px 2px;
+  border-radius: 2px;
+  background: rgba(12, 16, 16, 0.72);
+  font-size: 6px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.95);
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+  pointer-events: none;
+}
+
+.drum-step-timing {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  z-index: 2;
+  min-width: 9px;
+  padding: 1px 2px;
+  border-radius: 2px;
+  background: rgba(12, 16, 16, 0.72);
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 6px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  pointer-events: none;
+}
+
+/* Lock marker sits in the free middle band, clear of the corner badges. */
+.drum-step-lock {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  color: rgba(10, 14, 14, 0.88);
+  font-size: 6px;
+  font-weight: 900;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.drum-step.lock-selected {
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.94);
+}
+
+.drum-param-section .control.parameter-locked,
+.gen-3 .control.parameter-locked {
+  background: color-mix(in srgb, var(--gen-accent) 14%, var(--surface));
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--gen-accent) 72%, transparent);
+}
+
+.drum-param-section .control.parameter-locked label,
+.drum-param-section .control.parameter-locked .value,
+.gen-3 .control.parameter-locked label,
+.gen-3 .control.parameter-locked .value {
+  color: var(--gen-accent);
+}
+
+.drum-step-prob {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.42);
+  pointer-events: none;
+  transition: width 0.1s;
+}
+
+/* Trig condition badge — bottom-right so it coexists with stutter (top-right). */
+.drum-step-cond {
+  position: absolute;
+  right: 2px;
+  bottom: 5px;
+  z-index: 2;
+  padding: 1px 2px;
+  border-radius: 2px;
+  background: rgba(12, 16, 16, 0.78);
+  color: #ffd76a;
+  font-size: 6px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.drum-step-cond[hidden] {
+  display: none;
+}
+
+
+.drum-fx-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  border-color: #2e2e2e;
+  background: #1e1e1e;
+}
+
+.drum-fx-btn:hover:not(:disabled) {
+  border-color: #4a6650;
+  color: var(--text);
+  background: #242424;
+}
+
+.drum-fx-btn.active {
+  background: #1e3022;
+  border-color: #3a6644;
+  color: #6ec87a;
+  font-weight: 700;
+}
+
+.drum-fx-btn.active:hover {
+  background: #243828;
+  border-color: #4a7a54;
+}
+
+.drum-fx-btn.locked {
+  box-shadow: inset 0 -2px 0 #d6a35f;
+}
+
+.drum-step-count-group {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+}
+
+.drum-variation-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 6px;
+  border-right: 1px solid #3d3d3d;
+}
+
+.drum-variation-btn,
+.drum-fill-btn {
+  min-width: 20px;
+  height: 18px;
+  padding: 0 5px;
+  border-color: #333;
+  background: #1e1e1e;
+  color: var(--muted);
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.drum-variation-btn.active {
+  border-color: #777;
+  background: #ddd;
+  color: #202020;
+}
+
+.drum-fill-btn {
+  min-width: 30px;
+  color: #b98755;
+}
+
+.drum-fill-btn.active {
+  border-color: #d49a5f;
+  background: #6b4827;
+  color: #ffd29b;
+}
+
+.drum-editor-mode-group {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  padding-right: 6px;
+  border-right: 1px solid #3d3d3d;
+}
+
+.drum-editor-mode-btn {
+  padding: 2px 7px;
+  border-color: #333;
+  background: #1e1e1e;
+  color: var(--muted);
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.drum-editor-mode-btn.active {
+  border-color: #666;
+  background: #353535;
+  color: var(--text);
+}
+
+.drum-lock-clear-btn {
+  padding: 2px 6px;
+  border-color: #433438;
+  background: #261e20;
+  color: #a96a72;
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.drum-lock-clear-btn:hover:not(:disabled) {
+  border-color: #b45b66;
+  color: #e08a94;
+}
+
+.drum-lock-clear-btn:disabled {
+  opacity: 0.25;
+}
+
+.drum-step-count-btn {
+  padding: 1px 6px;
+  font-size: 10px;
+  color: var(--muted);
+  border-color: #2e2e2e;
+  background: #1e1e1e;
+  border-radius: 3px;
+  line-height: 1.6;
+}
+
+.drum-step-count-btn:hover {
+  border-color: #444;
+  color: var(--text);
+  background: #242424;
+}
+
+.drum-step-count-btn.active {
+  background: #2a2a40;
+  border-color: #5050a0;
+  color: #9090e0;
+  font-weight: 700;
+}
+
+.drum-step.step-inactive {
+  opacity: 0.18;
+  pointer-events: none;
+}

@@ -1,0 +1,751 @@
+/* ── Loops & Song ────────────────────────────────────────────── */
+
+.mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.mode-btn {
+  height: var(--header-control-height);
+  padding: 0 7px;
+  font-size: 8px;
+}
+
+.mode-btn.active {
+  background: var(--accent-0-dim);
+  border-color: var(--accent-0);
+  color: #dff5e8;
+}
+
+/* Lives inside the header bar; hidden-panel hides it off the front view. */
+.loop-strip {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+}
+
+.loops-bar {
+  /* Shrink to content so the song lane gets the leftover width; cap it so a
+     pile of loops still leaves the song room and scrolls instead. */
+  flex: 0 1 auto;
+  max-width: 35%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  gap: 4px;
+  padding: 0 10px;
+  overflow-x: auto;
+}
+
+.loops-bar-label,
+.song-lane-label {
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+.loop-chip {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--surface-2);
+}
+
+.loop-chip-name {
+  border: none;
+  background: transparent;
+  padding: 3px 5px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.loop-chip-name:hover:not(:disabled) {
+  border: none;
+  background: #343434;
+}
+
+.loop-chip.active {
+  border-color: var(--accent-0);
+  background: #22352a;
+}
+
+.loop-chip.active .loop-chip-name {
+  color: var(--accent-0);
+}
+
+.loop-rename-input {
+  width: 64px;
+  padding: 2px 6px;
+  font-family: inherit;
+  font-size: 9px;
+  background: var(--bg);
+  border: 1px solid var(--accent-0);
+  border-radius: 2px;
+  color: var(--text);
+  outline: none;
+}
+
+.loop-add-btn {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.loop-add-btn:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* ── Song lane ── */
+
+.song-lane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: stretch;
+  padding: 0 10px;
+  border-left: 1px dashed var(--border);
+}
+
+.song-lane[hidden] {
+  display: none;
+}
+
+.strip-play-btn {
+  display: grid;
+  place-items: center;
+  width: var(--header-icon-width);
+  height: var(--header-control-height);
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.header-bar .record-btn,
+.header-bar .bounce-btn {
+  display: grid;
+  place-items: center;
+  width: var(--header-icon-width);
+  height: var(--header-control-height);
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.header-bar .record-btn.active {
+  width: 68px;
+  padding: 0 7px;
+}
+
+.strip-play-btn.active {
+  background: var(--accent-fx-dim);
+  border-color: var(--accent-fx);
+  color: #ffe9cf;
+}
+
+.song-blocks {
+  position: relative; /* anchors the jump-arc overlay + block offsets */
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  align-self: stretch;
+  flex: 1;
+  min-width: 0;
+}
+
+.song-jump-arcs {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+
+.song-jump-arcs path {
+  fill: none;
+  stroke: var(--accent-fx-dim);
+  stroke-width: 1;
+  opacity: 0.7;
+}
+
+.song-jump-arcs path.dashed {
+  stroke-dasharray: 3 2;
+}
+
+.song-jump-arcs path.armed {
+  stroke: var(--accent-fx);
+  opacity: 1;
+}
+
+.song-jump-arcs path.taken {
+  stroke: var(--accent-fx);
+  stroke-width: 1.5;
+  opacity: 1;
+}
+
+.song-jump-arcs circle {
+  fill: var(--accent-fx-dim);
+}
+
+.song-arc-label {
+  font-size: 8px;
+  /* Lighter + desaturated relative to the arcs so text reads as a separate
+     layer; the bg-colored halo keeps it legible where an arc crosses under. */
+  fill: color-mix(in srgb, var(--accent-fx) 55%, var(--text));
+  letter-spacing: 0.05em;
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+/* ── Song view (first-class panel, sibling to mixer/master) ── */
+
+.song-panel-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.song-expanded-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.song-expanded-title {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--accent-fx);
+}
+
+.song-expanded-spacer {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+}
+
+.song-expanded-length {
+  font-size: 8px;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.song-expanded-close {
+  padding: 3px 8px;
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.song-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  user-select: none;
+}
+
+.song-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.song-card-pos {
+  font-size: 8px;
+  color: var(--muted);
+  min-width: 10px;
+}
+
+.song-card-name {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.song-card.playing .song-card-name {
+  color: var(--accent-fx);
+}
+
+.song-card-repeats {
+  margin-left: auto;
+  padding: 2px 6px;
+  font-size: 8px;
+  color: var(--muted);
+}
+
+.song-card-move,
+.song-card-cue,
+.song-card-remove {
+  padding: 2px 6px;
+  font-size: 8px;
+  color: var(--muted);
+}
+
+.song-card-remove:hover:not(:disabled) {
+  color: #e05858;
+  border-color: #5a3030;
+}
+
+.song-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* ── Orbit view ── */
+
+.song-expanded-views {
+  display: flex;
+  gap: 3px;
+}
+
+.song-orbit {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.song-orbit-stage {
+  position: relative; /* anchors the centered detail card */
+  flex: 1;
+  min-width: 0;
+  padding: 8px;
+}
+
+.song-orbit-stage svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.song-orbit-rim {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.song-orbit-flow {
+  fill: var(--border);
+}
+
+.song-orbit-chords path {
+  stroke-width: 1.2;
+}
+
+.song-orbit-node {
+  cursor: grab;
+}
+
+.song-orbit-node.dragging {
+  cursor: grabbing;
+}
+
+.song-orbit-node.dragging circle {
+  stroke: var(--accent-fx);
+}
+
+.song-orbit-node circle {
+  fill: var(--surface-2);
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+
+.song-orbit-node.selected circle {
+  stroke: var(--text);
+}
+
+.song-orbit-node.playing circle {
+  stroke: var(--accent-fx);
+  fill: #34290f;
+}
+
+.song-orbit-node.upnext circle {
+  stroke: var(--accent-fx-dim);
+  stroke-dasharray: 3 2;
+}
+
+.song-orbit-name {
+  font-size: 12px;
+  font-weight: 700;
+  fill: var(--text);
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.song-orbit-node.playing .song-orbit-name {
+  fill: var(--accent-fx);
+}
+
+.song-orbit-idx {
+  font-size: 8px;
+  fill: var(--muted);
+  pointer-events: none;
+}
+
+.song-orbit-opt {
+  font-size: 8px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  fill: color-mix(in srgb, var(--accent-fx) 55%, var(--text));
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+.song-orbit-progress {
+  fill: none;
+  stroke: var(--accent-fx);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.song-orbit-dot {
+  fill: var(--accent-fx);
+}
+
+/* Rim "+" node — add a loop from the circle itself. */
+.song-orbit-add {
+  cursor: pointer;
+}
+
+.song-orbit-add circle {
+  fill: var(--surface-2);
+  stroke: var(--muted);
+  stroke-width: 1.2;
+  stroke-dasharray: 3 2;
+}
+
+.song-orbit-add text {
+  font-size: 12px;
+  fill: var(--muted);
+  pointer-events: none;
+}
+
+.song-orbit-add:hover circle {
+  stroke: var(--accent-fx);
+}
+
+.song-orbit-add:hover text {
+  fill: var(--accent-fx);
+}
+
+/* Selected block's controls, floating in the circle's dead center. */
+.song-orbit-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 232px;
+  max-height: 62%;
+  overflow-y: auto;
+  padding: 10px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  backdrop-filter: blur(3px);
+}
+
+.song-orbit-center.idle {
+  width: auto;
+  background: transparent;
+  border: none;
+  backdrop-filter: none;
+  overflow: visible;
+  text-align: center;
+}
+
+/* The loop/song strips live inside the 36px header — hide the scrollbar
+   entirely (they still scroll with the trackpad / wheel). */
+.loops-bar,
+.song-blocks {
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+
+.loops-bar::-webkit-scrollbar,
+.song-blocks::-webkit-scrollbar {
+  display: none;
+}
+
+.song-block {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--surface-2);
+  cursor: grab;
+  user-select: none;
+}
+
+.song-block:hover {
+  border-color: #5a5a5a;
+}
+
+.song-block.dragging {
+  opacity: 0.4;
+  cursor: grabbing;
+}
+
+.song-block.playing {
+  border-color: var(--accent-fx);
+  background: #3a2c17;
+}
+
+/* Scheduler has already decided this block plays next. */
+.song-block.upnext {
+  border-color: var(--accent-fx-dim);
+  border-style: dashed;
+}
+
+.song-block-mods {
+  font-size: 7px;
+  letter-spacing: 0.04em;
+  color: var(--accent-fx-dim);
+  white-space: nowrap;
+}
+
+.song-block.playing .song-block-mods {
+  color: var(--accent-fx);
+}
+
+.song-block-name {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.song-block.playing .song-block-name {
+  color: var(--accent-fx);
+}
+
+.song-block-repeats {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 8px;
+  color: var(--muted);
+  min-width: 10px;
+  text-align: right;
+}
+
+.song-block-repeats:hover:not(:disabled) {
+  border: none;
+  background: transparent;
+  color: var(--text);
+}
+
+.song-block-repeats:empty::before {
+  content: '×1';
+  opacity: 0;
+}
+
+.song-block:hover .song-block-repeats:empty::before {
+  opacity: 0.5;
+}
+
+.song-add-btn,
+.song-opt-btn {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  font-size: 8px;
+  color: var(--muted);
+}
+
+.song-add-btn {
+  color: var(--text);
+  border-color: var(--accent-fx-dim);
+  font-weight: 700;
+}
+
+.song-add-btn:hover:not(:disabled),
+.song-opt-btn:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.song-opt-btn.active {
+  border-color: var(--accent-fx-dim);
+  color: var(--accent-fx);
+}
+
+.song-empty-hint {
+  font-size: 8px;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+/* ── Song block context menu ── */
+
+.song-block-menu {
+  position: fixed;
+  z-index: 80;
+  width: 172px;
+  padding: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
+.loop-chip-menu {
+  width: 140px;
+}
+
+.song-block-menu-title {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.song-block-menu-presets {
+  display: flex;
+  gap: 3px;
+}
+
+.song-block-menu-preset {
+  flex: 1;
+  padding: 4px 0;
+  font-size: 8px;
+}
+
+.song-block-menu-preset.active {
+  background: var(--accent-fx-dim);
+  border-color: var(--accent-fx);
+  color: #ffe9cf;
+}
+
+.song-block-menu-custom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 8px;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.song-block-menu-custom input {
+  width: 56px;
+  padding: 3px 6px;
+  font-family: inherit;
+  font-size: 9px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  outline: none;
+}
+
+.song-block-menu-custom input:focus {
+  border-color: var(--accent-fx-dim);
+}
+
+.song-block-menu-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.song-block-menu-slider-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 8px;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.song-block-menu-slider-val {
+  color: var(--text);
+  font-size: 9px;
+}
+
+.song-block-menu-slider input[type='range'] {
+  width: 100%;
+  padding: 0;
+  accent-color: var(--accent-fx);
+}
+
+.song-block-menu-slider input[type='range']:disabled {
+  opacity: 0.35;
+}
+
+.song-block-menu-fill {
+  padding: 4px 0;
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.song-block-menu-fill.active {
+  background: var(--accent-fx-dim);
+  border-color: var(--accent-fx);
+  color: #ffe9cf;
+}
+
+.song-block-menu-custom select {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 4px;
+  font-family: inherit;
+  font-size: 9px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  outline: none;
+}
+
+.song-block-menu-custom select:focus {
+  border-color: var(--accent-fx-dim);
+}
+
+.song-block-menu-preset:disabled {
+  opacity: 0.35;
+}
+
+.song-block-menu-remove {
+  font-size: 8px;
+  padding: 4px 0;
+  color: #e05858;
+  border-color: #5a3030;
+}
+
+.song-block-menu-remove:hover:not(:disabled) {
+  background: #3a2020;
+  border-color: #e05858;
+}

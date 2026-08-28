@@ -1,0 +1,65 @@
+/* ── Workspace (3-column) ────────────────────────────────────── */
+
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.hidden-panel {
+  display: none !important;
+}
+
+#generators {
+  flex: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+#generators::-webkit-scrollbar {
+  width: 4px;
+}
+
+#generators::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#generators::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+#fx-chain {
+  flex: 1;
+  min-width: 220px;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background: var(--bg);
+  /* FX column uses amber accent throughout */
+  --gen-accent: var(--accent-fx);
+  --gen-accent-dim: var(--accent-fx-dim);
+}
+
+.back-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background:
+    radial-gradient(circle at 12% 14%, rgba(70, 104, 74, 0.28), transparent 28%),
+    radial-gradient(circle at 82% 18%, rgba(104, 86, 48, 0.18), transparent 24%),
+    linear-gradient(180deg, #0b120d 0%, #09100b 100%);
+}
+
+.visual-panel {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background: #0a0a0c;
+}

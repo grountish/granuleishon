@@ -1,0 +1,70 @@
+/* ── Buttons ─────────────────────────────────────────────────── */
+
+button {
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s;
+}
+
+button:hover:not(:disabled) {
+  border-color: #5a5a5a;
+  background: #343434;
+}
+
+button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.record-btn {
+  color: #c44a4a;
+}
+
+.record-btn.active {
+  background: #c44a4a;
+  border-color: #c44a4a;
+  color: #210909;
+  width: 68px;
+  padding: 0 7px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.record-btn.active:hover {
+  background: #a73e3e;
+  border-color: #a73e3e;
+}
+
+.fx-mode-row {
+  display: flex;
+  gap: 2px;
+  padding: 5px 10px 8px;
+}
+
+.fx-mode-btn {
+  flex: 1;
+  font-size: 8px;
+  font-weight: 700;
+  padding: 4px 0;
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+}
+
+.fx-mode-btn.active {
+  background: var(--gen-accent);
+  border-color: var(--gen-accent);
+  color: #161006;
+}

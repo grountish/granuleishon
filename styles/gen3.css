@@ -1,0 +1,224 @@
+/* ── Gen 3 Oscillator ────────────────────────────────────────── */
+
+.gen-3 {
+  --gen-accent: #40b8d0;
+  --gen-accent-dim: #2d8fa0;
+  height: 360px;
+}
+
+.gen-3-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.gen-3-scope {
+  flex: 4;
+  display: block;
+  min-width: 0;
+  background: #141414;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── Piano Roll ──────────────────────────────────────────────── */
+
+.piano-roll {
+  flex: 0 0 292px;
+  min-width: 292px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px;
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  background: #1a1f1f;
+}
+
+.piano-row {
+  flex: 0 0 auto;
+}
+
+.piano-row-cells {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.piano-cell {
+  min-width: 0;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  padding: 0;
+  display: block;
+  border: 1px solid #2a3332;
+  border-radius: 0;
+  background: #53605e;
+  color: #aeb8b6;
+  transition: background 0.08s, border-color 0.08s, color 0.08s;
+}
+
+.piano-row:nth-child(odd) .piano-cell.white-key {
+  background: #55615f;
+}
+
+.piano-row:nth-child(even) .piano-cell.white-key {
+  background: #4d5857;
+}
+
+.piano-cell.black-key {
+  background: #202928;
+  border-color: #1a2322;
+  color: #7b8784;
+}
+
+.piano-row:nth-child(even) .piano-cell.black-key {
+  background: #252e2d;
+}
+
+.piano-cell:hover {
+  border-color: #6a7976;
+  background: #63706e;
+  color: #d8e1df;
+}
+
+.piano-cell.black-key:hover {
+  background: #313c3a;
+}
+
+/* Scale mode: out-of-scale keys recede, root keys get a tinted edge. */
+.piano-cell.black-key.in-scale {
+  background: linear-gradient(180deg, #314a4d 0 24%, #202b2b 24% 100%);
+  border-color: rgba(64, 184, 208, 0.62);
+  box-shadow:
+    inset 0 2px 0 rgba(93, 208, 228, 0.48),
+    inset 0 -3px 0 rgba(4, 11, 12, 0.52);
+}
+
+.piano-cell.black-key.in-scale:hover {
+  background: linear-gradient(180deg, #3b5c60 0 24%, #293737 24% 100%);
+  border-color: rgba(93, 208, 228, 0.85);
+}
+
+.piano-cell.out-scale {
+  opacity: 0.35;
+}
+
+.piano-cell.scale-root {
+  border-color: rgba(64, 184, 208, 0.45);
+}
+
+.piano-cell.locked {
+  background: rgba(64, 184, 208, 0.22) !important;
+  border-color: rgba(64, 184, 208, 0.55) !important;
+}
+
+.piano-cell.active {
+  background: #40b8d0 !important;
+  border-color: #40b8d0 !important;
+  color: #061820 !important;
+}
+
+/* ── Osc shape selector (in Gen 3 header) ────────────────────── */
+
+.osc-shapes {
+  display: flex;
+  gap: 2px;
+}
+
+.osc-shape {
+  font-size: 8px;
+  font-weight: 700;
+  padding: 3px 6px;
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.osc-shape:hover {
+  border-color: #40b8d0;
+  color: var(--text);
+}
+
+.osc-shape.active {
+  background: #40b8d0;
+  border-color: #40b8d0;
+  color: #061820;
+}
+
+.osc-sus-btn {
+  font-size: 8px;
+  font-weight: 700;
+  padding: 3px 6px;
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  margin-left: 4px;
+}
+
+.osc-sus-btn:hover {
+  border-color: #5a5a5a;
+  color: var(--text);
+}
+
+.osc-sus-btn.active {
+  background: #1a3028;
+  border-color: #3a7050;
+  color: #6ec8a0;
+}
+
+.osc-arp-btn.active {
+  background: #163039;
+  border-color: var(--gen-accent-dim);
+  color: var(--gen-accent);
+}
+
+.gen3-arp-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: #1a1d1d;
+  flex-shrink: 0;
+}
+
+.gen3-arp-bar[hidden] {
+  display: none;
+}
+
+.gen3-arp-control {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.gen3-arp-control select {
+  min-width: 58px;
+  height: 22px;
+  padding: 0 20px 0 7px;
+  border: 1px solid #3a4141;
+  border-radius: 2px;
+  background: #1e2222;
+  color: var(--text);
+  font: 700 9px var(--mono);
+}
+
+.gen3-arp-control:nth-child(2) select {
+  min-width: 88px;
+}

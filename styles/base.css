@@ -1,0 +1,184 @@
+:root {
+  --bg: #1c1c1c;
+  --surface: #242424;
+  --surface-2: #2c2c2c;
+  --border: #3a3a3a;
+  --text: #c8c8c8;
+  --muted: #5a5a5a;
+  --accent-0: #3cb870;
+  --accent-0-dim: #2d9458;
+  --accent-1: #8b6ed4;
+  --accent-1-dim: #6e52b0;
+  --accent-fx: #d4892a;
+  --accent-fx-dim: #ae6e1c;
+}
+
+:root[data-theme='sober'] {
+  --bg: #1a1b1b;
+  --surface: #222323;
+  --surface-2: #292a2a;
+  --border: #3b3d3d;
+  --text: #c5c8c7;
+  --muted: #626665;
+  --accent-0: #a9b2ae;
+  --accent-0-dim: #7f8985;
+  --accent-1: #aaa8ae;
+  --accent-1-dim: #817f86;
+  --accent-fx: #b2ada4;
+  --accent-fx-dim: #89847b;
+}
+
+:root[data-theme='sober'] body {
+  filter: saturate(0.16);
+}
+
+:root[data-theme='slate-arrangement'] {
+  --bg: #303836;
+  --surface: #353e3b;
+  --surface-2: #3b4542;
+  --border: #56605b;
+  --text: #d0cfb6;
+  --muted: #7d8478;
+  --accent-0: #d7c99d;
+  --accent-0-dim: #a89d79;
+  --accent-1: #6bc9dc;
+  --accent-1-dim: #4b9bab;
+  --accent-fx: #e0ad62;
+  --accent-fx-dim: #b48142;
+}
+
+:root[data-theme='slate-session'] {
+  --bg: #303a3e;
+  --surface: #3b484c;
+  --surface-2: #46565b;
+  --border: #172226;
+  --text: #d2d7d4;
+  --muted: #879397;
+  --accent-0: #68d4e5;
+  --accent-0-dim: #49a6b6;
+  --accent-1: #e49abc;
+  --accent-1-dim: #b87291;
+  --accent-fx: #79c9d6;
+  --accent-fx-dim: #5398a3;
+}
+
+:root[data-theme='neon-flux'] {
+  --bg: #0b0b12;
+  --surface: #13131f;
+  --surface-2: #1a1a2b;
+  --border: #2d2d49;
+  --text: #d8d6ee;
+  --muted: #5d5b80;
+  --accent-0: #2de2a6;
+  --accent-0-dim: #1fa87c;
+  --accent-1: #7c5cff;
+  --accent-1-dim: #5d43c4;
+  --accent-fx: #ff4f9a;
+  --accent-fx-dim: #c43a77;
+}
+
+:root[data-theme='neon-flux'] body {
+  background: radial-gradient(ellipse at 50% -30%, #181030 0%, var(--bg) 65%);
+}
+
+:root[data-theme='aurora'] {
+  --bg: #0a1214;
+  --surface: #0f1c1f;
+  --surface-2: #152629;
+  --border: #26424b;
+  --text: #cfe6e3;
+  --muted: #557b7d;
+  --accent-0: #35e0b4;
+  --accent-0-dim: #27a988;
+  --accent-1: #6fb6ff;
+  --accent-1-dim: #4f8ccc;
+  --accent-fx: #c987ff;
+  --accent-fx-dim: #9963c9;
+}
+
+:root[data-theme='aurora'] body {
+  background: radial-gradient(ellipse at 20% -20%, #0e2a26 0%, var(--bg) 55%),
+    radial-gradient(ellipse at 85% -25%, #14203a 0%, var(--bg) 60%);
+}
+
+:root[data-theme='acid-circuit'] {
+  --bg: #070a07;
+  --surface: #0d130e;
+  --surface-2: #151d14;
+  --border: #344426;
+  --text: #e7f7be;
+  --muted: #718058;
+  --accent-0: #b7ff2a;
+  --accent-0-dim: #739f1c;
+  --accent-1: #ff3ec8;
+  --accent-1-dim: #b6288b;
+  --accent-fx: #22e5ff;
+  --accent-fx-dim: #168da0;
+}
+
+:root[data-theme='acid-circuit'] body {
+  background:
+    radial-gradient(circle at 12% -20%, rgba(183, 255, 42, 0.13), transparent 38%),
+    radial-gradient(circle at 92% 0%, rgba(255, 62, 200, 0.11), transparent 34%),
+    repeating-linear-gradient(90deg, rgba(183, 255, 42, 0.018) 0 1px, transparent 1px 48px),
+    var(--bg);
+}
+
+:root[data-theme='solar-ritual'] {
+  --bg: #160b0e;
+  --surface: #211113;
+  --surface-2: #30191b;
+  --border: #5a322f;
+  --text: #ffe8c2;
+  --muted: #98685a;
+  --accent-0: #ffad32;
+  --accent-0-dim: #b86f1f;
+  --accent-1: #a779ff;
+  --accent-1-dim: #7152bd;
+  --accent-fx: #ffd36a;
+  --accent-fx-dim: #b98a34;
+}
+
+:root[data-theme='solar-ritual'] body {
+  background:
+    radial-gradient(circle at 50% -22%, rgba(255, 126, 40, 0.18), transparent 42%),
+    radial-gradient(circle at 90% 20%, rgba(167, 121, 255, 0.1), transparent 38%),
+    linear-gradient(160deg, #1b0c0e 0%, var(--bg) 58%);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  background: var(--bg);
+  color: var(--text);
+  /* Instrument UI — nothing is prose, dragging should never select text. */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input[type='text'],
+input[type='number'],
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+main {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}

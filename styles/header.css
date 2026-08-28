@@ -1,0 +1,26 @@
+/* ── Header ──────────────────────────────────────────────────── */
+
+.header-bar {
+  --header-control-height: 24px;
+  --header-icon-width: 28px;
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.project-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.undo-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}

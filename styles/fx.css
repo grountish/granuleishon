@@ -1,0 +1,342 @@
+/* ── LFO section (in FX column) ─────────────────────────────── */
+
+.lfo-section {
+  --gen-accent: #7aacdc;
+  --gen-accent-dim: #5590c0;
+}
+
+.lfo-section>.fx-section-label {
+  color: var(--gen-accent);
+}
+
+.lfo-section-2 {
+  --gen-accent: #6ed4a0;
+  --gen-accent-dim: #48ab79;
+}
+
+.lfo-shapes {
+  display: flex;
+  gap: 2px;
+  padding: 5px 10px 8px;
+}
+
+.sync-mode-row {
+  padding-top: 0;
+}
+
+.gen-sync-toggle {
+  flex: none;
+  align-self: flex-end;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 3px 6px;
+  margin: 0 0 6px;
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.gen-sync-toggle.active {
+  background: var(--gen-accent);
+  border-color: var(--gen-accent);
+  color: #161006;
+}
+
+.lfo-shape {
+  flex: 1;
+  font-size: 8px;
+  font-weight: 700;
+  padding: 4px 0;
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.lfo-shape:hover {
+  border-color: #7aacdc;
+  color: var(--text);
+}
+
+.lfo-shape.active {
+  background: #7aacdc;
+  border-color: #7aacdc;
+  color: #0a1822;
+}
+
+.seq-section {
+  --gen-accent: #e0a45a;
+  --gen-accent-dim: #bf8040;
+}
+
+.seq-section>.fx-section-label {
+  color: var(--gen-accent);
+}
+
+.seq-row-label {
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.seq-compact-row {
+  display: grid;
+  grid-template-columns: minmax(70px, 0.7fr) minmax(96px, 1fr) auto auto;
+  align-items: end;
+  gap: 6px;
+  padding: 7px 10px 5px;
+}
+
+.seq-compact-control {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.seq-compact-select,
+.seq-compact-row .seq-action-btn {
+  height: 24px;
+  border: 1px solid #414141;
+  border-radius: 2px;
+  background: #202020;
+  color: var(--text);
+  font: inherit;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.seq-compact-select {
+  width: 100%;
+  min-width: 0;
+  padding: 0 6px;
+  cursor: pointer;
+}
+
+.seq-compact-row .seq-action-btn {
+  min-width: 54px;
+  padding: 0 9px;
+}
+
+.seq-grid {
+  display: grid;
+  grid-template-columns: repeat(16, minmax(0, 1fr));
+  gap: 3px;
+  padding: 10px;
+  height: 132px;
+}
+
+.seq-step {
+  --seq-value: 0;
+  position: relative;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid #393939;
+  background: #191919;
+  overflow: hidden;
+  cursor: ns-resize;
+}
+
+.seq-step::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  transform: translateY(-0.5px);
+}
+
+.seq-step::after {
+  content: '';
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  bottom: 50%;
+  height: calc((50% - 2px) * var(--seq-value));
+  background: linear-gradient(180deg, #f3c27f 0%, #d4892a 100%);
+  transform-origin: bottom center;
+}
+
+.seq-step.negative::after {
+  top: 50%;
+  bottom: auto;
+  background: linear-gradient(180deg, #8d6b45 0%, #684b2c 100%);
+  transform-origin: top center;
+}
+
+.seq-step.active {
+  border-color: var(--gen-accent);
+  box-shadow: inset 0 0 0 1px rgba(224, 164, 90, 0.25);
+}
+
+.seq-step.inactive {
+  opacity: 0.28;
+}
+
+.seq-step.dragging,
+.seq-step:hover {
+  background: #202020;
+}
+
+/* ── FX sections ─────────────────────────────────────────────── */
+
+.fx-section {
+  border-bottom: 1px solid var(--border);
+}
+
+.fx-section-label {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 0 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.fx-section-label:hover {
+  background: #2b2b2b;
+}
+
+.fx-section-label-text,
+.fx-section-toggle {
+  pointer-events: none;
+}
+
+.fx-section-label-text {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+
+.fx-section-toggle {
+  font-size: 11px;
+  line-height: 1;
+  color: #7a7a7a;
+}
+
+/* Per-unit power switch: off unplugs the unit from the bus chain. */
+.fx-power {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  margin-right: 7px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: transparent;
+}
+
+.fx-eco-btn {
+  flex: none;
+  padding: 1px 8px;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.fx-power:hover:not(:disabled) {
+  border-color: var(--accent-fx-dim);
+  background: transparent;
+}
+
+.fx-power.active {
+  border-color: var(--accent-fx);
+  background: var(--accent-fx);
+  box-shadow: 0 0 4px var(--accent-fx-dim);
+}
+
+.fx-section.fx-off .fx-section-label-text {
+  opacity: 0.5;
+}
+
+.fx-section.fx-off .fx-section-content {
+  opacity: 0.4;
+}
+
+.fx-section-content {
+  overflow: hidden;
+}
+
+.fx-section.collapsed .fx-section-content {
+  display: none;
+}
+
+.fx-preset-select {
+  width: 92px;
+  height: 18px;
+  margin-left: 8px;
+  margin-right: 10px;
+  padding: 0 4px;
+  border: 1px solid #363636;
+  border-radius: 2px;
+  outline: none;
+  background: #202020;
+  color: #999;
+  font: inherit;
+  font-size: 8px;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  cursor: pointer;
+}
+
+.fx-preset-select:hover,
+.fx-preset-select:focus {
+  border-color: #5b5b5b;
+  background: #292929;
+}
+
+.drum-preset-select {
+  width: 86px;
+  color: inherit;
+}
+
+.fx-drag-handle {
+  cursor: grab;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 4px 0 0;
+  opacity: 0.4;
+  pointer-events: all;
+  flex-shrink: 0;
+  line-height: 1;
+  transition: opacity 0.1s;
+}
+
+.fx-reorderable:hover .fx-drag-handle {
+  opacity: 0.8;
+}
+
+.fx-drag-handle:active {
+  cursor: grabbing;
+  opacity: 1;
+}
+
+.fx-section.dragging {
+  opacity: 0.4;
+  outline: 1px dashed var(--muted);
+}
+
+.fx-section.fx-reorderable {
+  transition: outline 0.1s;
+}
