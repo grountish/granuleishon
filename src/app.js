@@ -23,8 +23,13 @@ import {
   SOLO_MODE_STORAGE_KEY,
   MASTERING_HQ_STORAGE_KEY,
 } from './core/storage.js';
-import { FX_DEFS } from './fx/defs.js';
-import { FX_PRESETS } from './fx/presets.js';
+import {
+  FX_DEFS,
+  FX_PRESETS,
+  DEFAULT_FX_ORDER,
+  FX_IDLE_BYPASS,
+  makeDefaultFxState,
+} from './fx/registry.js';
 import { GEN4_DEFS, GEN4_PRESETS } from './instruments/gen4/defs.js';
 import { MASTERING_CONTROL_SPECS, MASTERING_EQ_BANDS } from './master/specs.js';
 import {
@@ -8799,88 +8804,6 @@ function stopMixerMeters() {
   MIXER.raf = null;
 }
 
-// Default per-bus effect state (the limiter is global, not per-bus).
-function makeDefaultFxState() {
-  // enabled:false unplugs the unit from the bus chain entirely (zero CPU) —
-  // unlike mix:0, which keeps every processor rendering behind the dry path.
-  return {
-    beatrepeat: {
-      enabled: true,
-      interval: 0.5,
-      sync: true,
-      syncIndex: 4,
-      grid: 125,
-      gridSync: true,
-      gridSyncIndex: 2,
-      gate: 8,
-      pitch: 0,
-      decay: 1,
-      chance: 1,
-      mix: 0,
-    },
-    grainarp: {
-      enabled: true,
-      grid: 250, // free value in ms, like beatrepeat's grid
-      gridSync: true,
-      gridSyncIndex: 4, // 1/8
-      pattern: 'oct',
-      chance: 1,
-      shape: 0.3,
-      scatter: 0,
-      reverse: 0,
-      feedback: 0.25,
-      hold: false, // performance latch — freezes the capture ring
-      mix: 0,
-    },
-    pitchtrem: {
-      enabled: true,
-      pitch: 0,
-      pitchDepth: 0,
-      fine: 0,
-      rate: 4,
-      sync: false,
-      syncIndex: 4,
-      depth: 0.5,
-      shape: 'sine',
-      mix: 0,
-    },
-    autotune: {
-      enabled: true,
-      root: 0,
-      scale: 'major',
-      speed: 40,
-      amount: 1,
-      mix: 0,
-    },
-    delay: {
-      enabled: true,
-      time: 0.3,
-      feedback: 0.35,
-      mix: 0,
-      sync: false,
-      syncIndex: 4,
-      hp: 20,
-      mode: 'stereo',
-    },
-    filter: { enabled: true, mode: 'lowpass', cutoff: 2400, q: 0.7, mix: 0 },
-    resonator: {
-      enabled: true,
-      freq: 220,
-      noteMode: false,
-      note: 57, // MIDI A3 = 220Hz
-      decay: 0.85,
-      damp: 4200,
-      int2: 12, // chord voice 2, semitones from root (octave)
-      int3: 7, // chord voice 3, semitones from root (fifth)
-      harm2: 0.5,
-      harm3: 0.3,
-      mix: 0,
-    },
-    bitreduce: { enabled: true, bits: 8, rate: 1, mix: 0 },
-    sat: { enabled: true, drive: 0.3, mix: 0 },
-    reverb: { enabled: true, size: 2, decay: 3, predelay: 0.018, damping: 0.42, mix: 0 },
-  };
-}
 
 // Source of truth for per-bus FX state — applied to audio nodes when they exist.
 const fxStates = {
@@ -8895,18 +8818,6 @@ const LIMITER = { threshold: -8, attack: 0.003, release: 0.12, ratio: 20, knee: 
 
 // Order of the reorderable effects between each bus input and bus output.
 // Mutated per-bus by drag-to-reorder; persisted in presets.
-const DEFAULT_FX_ORDER = [
-  'filter',
-  'sat',
-  'bitreduce',
-  'pitchtrem',
-  'autotune',
-  'delay',
-  'beatrepeat',
-  'grainarp',
-  'resonator',
-  'reverb',
-];
 const fxOrders = {
   gen0: [...DEFAULT_FX_ORDER],
   gen1: [...DEFAULT_FX_ORDER],
@@ -17542,20 +17453,8 @@ function buildFxNodes() {
 // pair, so we fully disconnect the movable links and rebuild them. Disabled
 // units are left out of the chain: with no path to the destination the browser
 // skips their whole subgraph (worklets, convolver, oversampled shaper).
-// Units that are safe to silently unplug while inaudible: nothing in them
-// accumulates material a player would expect to still be there when the mix
-// comes back up. Beat repeat, grain arp and delay stay plugged — their
-// capture rings / tail must keep filling while mix sits at 0 so a performance
-// gesture grabs the audio that just played.
-const FX_IDLE_BYPASS = new Set([
-  'pitchtrem',
-  'autotune',
-  'filter',
-  'resonator',
-  'bitreduce',
-  'sat',
-  'reverb',
-]);
+// Which units may be unplugged while inaudible is declared per unit —
+// see FX_IDLE_BYPASS in fx/registry.js.
 
 // What reconnectFxChain actually spliced in, per bus — lets a mix change
 // detect whether the chain needs a re-splice without rebuilding every time.
