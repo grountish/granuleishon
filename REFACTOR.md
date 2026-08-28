@@ -1,5 +1,30 @@
 # grnsh refactor plan — split `main.js`, abstract the repeated shapes
 
+## Status
+
+- [x] **Phase 1 — ES modules.** `main.js` → `src/app.js` loaded with
+      `type="module"`; processors → `worklets/`; `serve.py` watches
+      subdirectories. (`b57979b`)
+- [~] **Phase 2 — leaf modules.** Done so far: `core/util.js`,
+      `core/theory.js`, `core/tempo.js`, `core/storage.js`, `render/wav.js`,
+      `fx/defs.js`, `fx/presets.js`, `instruments/gen4/defs.js`,
+      `master/specs.js`. (`d5de822`, `c2a8221`, `7e88088`, `0d58d36`)
+      **Still to do:** `ui/knob.js`, `ui/control-row.js`, `ui/confirm.js`,
+      `ui/tooltip.js`, `persistence/project-file.js`, `link/link.js`,
+      `master/presets.js` (needs `MASTERING_DEFAULT_PARAMS` moved first — it
+      is spread into the factory presets at module-evaluation time).
+- [ ] Phases 3–7.
+
+`src/app.js` is down from 21,273 to 20,276 lines with 9 modules carved out.
+The knob widget and control row are deliberately **not** moved yet: they
+reach back into modulation visuals and the knob context menu, so they want
+the event bus from phase 6 first.
+
+Duplicates collapsed while moving (phase 2 so far): `midiNoteToFrequency` ≡
+`midiToFreqHz`, `GEN4_ROOT_NAMES` ≡ `NOTE_NAMES`, a third inline copy of the
+pitch formula in `OSC_NOTES`, `frequencyToMidi` restating `freqHzToMidi`, and
+`formatResonatorNote` ≡ a separate `formatMidiNote`.
+
 ## Where we are
 
 | Fact | Number |
