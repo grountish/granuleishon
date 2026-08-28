@@ -65,6 +65,7 @@ let beatRepeatModulePromise = null;
 let resonatorModulePromise = null;
 let grainArpModulePromise = null;
 let pitchTremoloModulePromise = null;
+let autotuneModulePromise = null;
 const LIVE_SOURCE_SECONDS = 10;
 const MAX_DELAY_SECONDS = 16;
 const INPUT_SOURCE = {
@@ -840,6 +841,7 @@ async function restartAudioEngineForLatency() {
   resonatorModulePromise = null;
   grainArpModulePromise = null;
   pitchTremoloModulePromise = null;
+  autotuneModulePromise = null;
   started = false;
 
   try {
@@ -966,12 +968,16 @@ async function ensureFxModules() {
       workletUrl('pitch-autopan-processor.js'),
     );
   }
+  if (!autotuneModulePromise) {
+    autotuneModulePromise = audioCtx.audioWorklet.addModule(workletUrl('autotune-processor.js'));
+  }
   await Promise.all([
     bitReducerModulePromise,
     beatRepeatModulePromise,
     resonatorModulePromise,
     grainArpModulePromise,
     pitchTremoloModulePromise,
+    autotuneModulePromise,
   ]);
 }
 
@@ -2048,6 +2054,7 @@ const BACK_AUDIO_CHAIN = [
   { id: 'mix', title: 'Mix Bus' },
   { id: 'grainarp', title: 'Grain Arp' },
   { id: 'pitchtrem', title: 'Pitch + Auto Pan' },
+  { id: 'autotune', title: 'Autotune' },
   { id: 'delay', title: 'Delay' },
   { id: 'filter', title: 'Filter' },
   { id: 'resonator', title: 'Resonator' },
@@ -7096,6 +7103,11 @@ function harmonizePreset(preset, root, scaleId, hard) {
     if (typeof bus.beatrepeat?.pitch === 'number') {
       bus.beatrepeat.pitch = snapSt(bus.beatrepeat.pitch, -24, 24);
     }
+    // Live autotune follows the harmonized key; hard mode pins it to the tonic.
+    if (bus.autotune) {
+      bus.autotune.root = root;
+      bus.autotune.scale = hard ? 'tonic' : scaleId;
+    }
   });
   // The note editors' scale guide follows the harmonized key.
   if (preset.scale) {
@@ -8952,6 +8964,15 @@ const FX_DEFS = [
     ],
   },
   {
+    id: 'autotune',
+    label: 'Autotune',
+    params: [
+      { key: 'speed', label: 'Retune', min: 0, max: 500, step: 5, value: 40, unit: 'ms' },
+      { key: 'amount', label: 'Amount', min: 0, max: 1, step: 0.01, value: 1, unit: '' },
+      { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
+    ],
+  },
+  {
     id: 'delay',
     label: 'Delay',
     params: [
@@ -9035,6 +9056,11 @@ const FX_DEFS = [
 ];
 
 const FX_PRESETS = {
+  autotune: [
+    { name: 'Off', values: { speed: 40, amount: 1, mix: 0 } },
+    { name: 'Natural', values: { speed: 120, amount: 0.8, mix: 1 } },
+    { name: 'Hard Snap', values: { speed: 0, amount: 1, mix: 1 } },
+  ],
   beatrepeat: [
     {
       name: 'Off',
@@ -10173,6 +10199,14 @@ function makeDefaultFxState() {
       shape: 'sine',
       mix: 0,
     },
+    autotune: {
+      enabled: true,
+      root: 0,
+      scale: 'major',
+      speed: 40,
+      amount: 1,
+      mix: 0,
+    },
     delay: {
       enabled: true,
       time: 0.3,
@@ -10221,6 +10255,7 @@ const DEFAULT_FX_ORDER = [
   'sat',
   'bitreduce',
   'pitchtrem',
+  'autotune',
   'delay',
   'beatrepeat',
   'grainarp',
@@ -14998,6 +15033,14 @@ function refreshBackPanelState() {
       module.subtitleEl.textContent = `${FX.pitchtrem.pitch >= 0 ? '+' : ''}${formatNumericValue(FX.pitchtrem.pitch, 0)}st ±${formatNumericValue(FX.pitchtrem.pitchDepth, 0)} • ${rate} • ${formatBackValue(getFxParamDef('pitchtrem', 'mix'), FX.pitchtrem.mix)} wet`;
       module.el.classList.toggle('active', FX.pitchtrem.mix > 0.001);
     })();
+  BACK_PANEL.audioModules.get('autotune') &&
+    (() => {
+      const module = BACK_PANEL.audioModules.get('autotune');
+      const scaleLabel =
+        AUTOTUNE_SCALE_OPTIONS.find(([id]) => id === FX.autotune.scale)?.[1] || FX.autotune.scale;
+      module.subtitleEl.textContent = `${GEN4_ROOT_NAMES[FX.autotune.root] || 'C'} ${scaleLabel} • ${formatNumericValue(FX.autotune.speed, 0)}ms • ${formatBackValue(getFxParamDef('autotune', 'mix'), FX.autotune.mix)} wet`;
+      module.el.classList.toggle('active', FX.autotune.mix > 0.001);
+    })();
   BACK_PANEL.audioModules.get('delay') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('delay');
@@ -18544,6 +18587,36 @@ function applyPitchTremoloShape(busId = activeBus) {
   bus.pitchtrem.node.parameters.get('shape')?.setValueAtTime(shape, audioCtx.currentTime);
 }
 
+// The autotune worklet takes its allowed notes as a 12-bit pitch-class mask,
+// so root/scale/tonic/chromatic all collapse into one number.
+const AUTOTUNE_SCALE_OPTIONS = [
+  ['chromatic', 'Chromatic'],
+  ['tonic', 'Tonic'],
+  ...GEN4_SCALES.filter(([, , intervals]) => intervals).map(([id, label]) => [id, label]),
+];
+
+function computeAutotuneMask(at) {
+  const intervals =
+    at.scale === 'tonic'
+      ? [0]
+      : at.scale === 'chromatic'
+        ? [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        : GEN4_SCALES.find(([id]) => id === at.scale)?.[2] || [0, 2, 4, 5, 7, 9, 11];
+  let mask = 0;
+  intervals.forEach((i) => {
+    mask |= 1 << (((at.root + i) % 12) + 12) % 12;
+  });
+  return mask;
+}
+
+function applyAutotuneScale(busId = activeBus) {
+  const bus = fxBuses[busId];
+  if (!bus?.autotune?.node) return;
+  bus.autotune.node.parameters
+    .get('mask')
+    ?.setValueAtTime(computeAutotuneMask(fxStates[busId].autotune), audioCtx.currentTime);
+}
+
 // Build the global master tail once: every bus output sums into master.sum,
 // which feeds the single limiter and the master output gain → destination.
 function buildMaster() {
@@ -18717,6 +18790,28 @@ function buildBusFx(busId) {
   pitchTremNode.connect(pitchTremWet);
   pitchTremDry.connect(pitchTremOut);
   pitchTremWet.connect(pitchTremOut);
+
+  // ─ Autotune (monophonic pitch corrector) ─
+  const atIn = ac.createGain();
+  const atDry = ac.createGain();
+  const atWet = ac.createGain();
+  const atNode = new AudioWorkletNode(ac, 'autotune-processor', {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [2],
+    parameterData: {
+      speed: st.autotune.speed,
+      amount: st.autotune.amount,
+      mask: computeAutotuneMask(st.autotune),
+    },
+  });
+  const atOut = ac.createGain();
+
+  atIn.connect(atDry);
+  atIn.connect(atNode);
+  atNode.connect(atWet);
+  atDry.connect(atOut);
+  atWet.connect(atOut);
 
   // ─ Delay (feedback loop) ─
   const dlyIn = ac.createGain();
@@ -18906,6 +19001,7 @@ function buildBusFx(busId) {
       in: pitchTremIn,
       out: pitchTremOut,
     },
+    autotune: { node: atNode, dry: atDry, wet: atWet, in: atIn, out: atOut },
     delay: {
       tap: dlyTap,
       fb: dlyFb,
@@ -18971,6 +19067,7 @@ function buildFxNodes() {
 // gesture grabs the audio that just played.
 const FX_IDLE_BYPASS = new Set([
   'pitchtrem',
+  'autotune',
   'filter',
   'resonator',
   'bitreduce',
@@ -19060,6 +19157,15 @@ function applyFx(id, key, val, busId = activeBus) {
     if (key === 'mix') {
       fx.pitchtrem.wet.gain.value = val;
       fx.pitchtrem.dry.gain.value = 1 - val;
+    }
+  } else if (id === 'autotune') {
+    const setParam = (name, value) =>
+      fx.autotune.node.parameters.get(name)?.setTargetAtTime(value, audioCtx.currentTime, 0.02);
+    if (key === 'speed') setParam('speed', clamp(val, 0, 500));
+    if (key === 'amount') setParam('amount', clamp(val, 0, 1));
+    if (key === 'mix') {
+      fx.autotune.wet.gain.value = val;
+      fx.autotune.dry.gain.value = 1 - val;
     }
   } else if (id === 'delay') {
     if (key === 'time')
@@ -19162,6 +19268,7 @@ function applyAllFx(busId = activeBus) {
   applyGrainArpPattern(busId);
   applyGrainArpHold(busId);
   applyPitchTremoloShape(busId);
+  applyAutotuneScale(busId);
 }
 
 function refreshGen3UI() {
@@ -20355,6 +20462,50 @@ function renderActiveBusFx() {
       content.appendChild(shapeRow);
     }
 
+    if (def.id === 'autotune') {
+      const scaleRow = document.createElement('div');
+      scaleRow.className = 'fx-mode-row';
+      const rootSelect = document.createElement('select');
+      rootSelect.className = 'drum-scale-select';
+      rootSelect.title = 'Correction root';
+      GEN4_ROOT_NAMES.forEach((name, idx) => {
+        const opt = document.createElement('option');
+        opt.value = `${idx}`;
+        opt.textContent = name;
+        rootSelect.appendChild(opt);
+      });
+      rootSelect.value = `${FX.autotune.root}`;
+      rootSelect.addEventListener('change', () => {
+        markFxPresetCustom(def.id);
+        FX.autotune.root = clamp(Number(rootSelect.value) || 0, 0, 11);
+        applyAutotuneScale(activeBus);
+        refreshBackPanelState();
+      });
+      const scaleSelect = document.createElement('select');
+      scaleSelect.className = 'drum-scale-select';
+      scaleSelect.title = 'Correction scale — Tonic pulls everything to the root';
+      AUTOTUNE_SCALE_OPTIONS.forEach(([id, label]) => {
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = label;
+        scaleSelect.appendChild(opt);
+      });
+      scaleSelect.value = FX.autotune.scale;
+      scaleSelect.addEventListener('change', () => {
+        markFxPresetCustom(def.id);
+        FX.autotune.scale = scaleSelect.value;
+        applyAutotuneScale(activeBus);
+        refreshBackPanelState();
+      });
+      // Keep the dropdowns out of the section drag/collapse handlers' way.
+      [rootSelect, scaleSelect].forEach((sel) => {
+        sel.addEventListener('click', (event) => event.stopPropagation());
+        sel.addEventListener('keydown', (event) => event.stopPropagation());
+      });
+      scaleRow.append(rootSelect, scaleSelect);
+      content.appendChild(scaleRow);
+    }
+
     def.params.forEach((p) => {
       const isMappable = !!getFxParamBounds(def.id, p.key);
       const control = makeControlRow(
@@ -20903,6 +21054,7 @@ function stop() {
   resonatorModulePromise = null;
   grainArpModulePromise = null;
   pitchTremoloModulePromise = null;
+  autotuneModulePromise = null;
   started = false;
 
   // Reset freeze state for both generators.
