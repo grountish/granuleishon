@@ -11,6 +11,7 @@ import {
 import { rbjHighpass, rbjLowShelf, rbjPeaking, biquadMagnitudeDb } from './core/dsp.js';
 import { encodeWav } from './render/wav.js';
 import { emit, on } from './core/events.js';
+import { mountMenuAtPointer } from './ui/popover.js';
 import { UI_VIEW } from './ui/view.js';
 import { LFOS, lfoMappings, STEP_SEQ, BACK_PANEL } from './modulation/state.js';
 import { VIZ } from './visual/state.js';
@@ -9279,10 +9280,7 @@ function openGen4VariationMenu(index, x, y) {
   });
 
   menu.append(title, generateBtn);
-  document.body.appendChild(menu);
-  const rect = menu.getBoundingClientRect();
-  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
-  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+  mountMenuAtPointer(menu, x, y);
 }
 
 window.addEventListener('pointerdown', (event) => {
@@ -10679,10 +10677,7 @@ function openLoopChipMenu(loopId, x, y) {
   });
 
   menu.append(title, deleteBtn);
-  document.body.appendChild(menu);
-  const rect = menu.getBoundingClientRect();
-  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
-  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+  mountMenuAtPointer(menu, x, y);
 }
 
 function openSongBlockMenu(entryId, x, y) {
@@ -10753,11 +10748,7 @@ function openSongBlockMenu(entryId, x, y) {
   });
   menu.appendChild(removeBtn);
 
-  document.body.appendChild(menu);
-  // Clamp into the viewport once measurable.
-  const rect = menu.getBoundingClientRect();
-  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
-  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+  mountMenuAtPointer(menu, x, y);
 }
 
 window.addEventListener('pointerdown', (e) => {
@@ -11047,10 +11038,7 @@ function openSongAddMenu(x, y) {
     row.appendChild(b);
   });
   menu.appendChild(row);
-  document.body.appendChild(menu);
-  const rect = menu.getBoundingClientRect();
-  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
-  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+  mountMenuAtPointer(menu, x, y);
 }
 
 // ── Orbit view ──
@@ -11970,10 +11958,7 @@ function openKnobContextMenu(target, x, y) {
   });
 
   menu.append(title, copyBtn);
-  document.body.appendChild(menu);
-  const rect = menu.getBoundingClientRect();
-  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
-  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+  mountMenuAtPointer(menu, x, y);
 }
 
 // ── Mod source context menu (right-click a knob's map LED) ──
@@ -12042,10 +12027,7 @@ function openModSourceMenu(target, led, x, y) {
     menu.appendChild(btn);
   });
 
-  document.body.appendChild(menu);
-  const rect = menu.getBoundingClientRect();
-  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
-  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+  mountMenuAtPointer(menu, x, y);
 }
 
 window.addEventListener('pointerdown', (e) => {
