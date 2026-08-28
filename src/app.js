@@ -11,6 +11,7 @@ import {
 import { rbjHighpass, rbjLowShelf, rbjPeaking, biquadMagnitudeDb } from './core/dsp.js';
 import { encodeWav } from './render/wav.js';
 import { setStatus, getStatusEl } from './ui/status.js';
+import { PARAMS, GEN_DEFAULTS, state } from './instruments/granular/state.js';
 import {
   PLAY,
   LOOPS,
@@ -52,6 +53,8 @@ import {
   makeDefaultFxState,
 } from './fx/registry.js';
 import { GEN4_DEFS, GEN4_PRESETS } from './instruments/gen4/defs.js';
+import { GEN4 } from './instruments/gen4/state.js';
+import { GEN3 } from './instruments/gen3/state.js';
 import { MASTERING_CONTROL_SPECS, MASTERING_EQ_BANDS } from './master/specs.js';
 import {
   EQ_FMIN,
@@ -218,7 +221,6 @@ const BACK_PANEL = {
   connFrame: null,
 };
 
-
 function getRecordBtn() {
   return document.getElementById('recordBtn');
 }
@@ -258,8 +260,6 @@ function getProjectNameInput() {
 function getBpmInput() {
   return document.getElementById('bpmInput');
 }
-
-
 
 function getDelayTimeSeconds(busId = activeBus) {
   const d = fxStates[busId].delay;
@@ -1861,56 +1861,6 @@ function drawViz({ gens }) {
   gens.forEach((genData, gi) => updateGenVizState(gi, genData));
 }
 
-const PARAMS = [
-  { key: 'grainSizeMs', label: 'Grain size', min: 5, max: 500, step: 1, unit: 'ms' },
-  { key: 'density', label: 'Density', min: 1, max: 100, step: 1, unit: '/s' },
-  { key: 'positionSec', label: 'Position', min: 0, max: 9, step: 0.01, unit: 's back' },
-  { key: 'spraySec', label: 'Spray', min: 0, max: 2, step: 0.01, unit: 's' },
-  { key: 'pitch', label: 'Pitch', min: -24, max: 24, step: 1, unit: 'st' },
-  { key: 'pitchJitter', label: 'Pitch jitter', min: 0, max: 12, step: 0.5, unit: 'st' },
-  { key: 'spread', label: 'Stereo spread', min: 0, max: 1, step: 0.01, unit: '' },
-  { key: 'gain', label: 'Output gain', min: 0, max: 2, step: 0.01, unit: '' },
-];
-
-// Slightly different defaults for gen 1 so independence is immediately audible.
-const GEN_DEFAULTS = [
-  {
-    grainSizeMs: 308,
-    density: 20,
-    positionSec: 0.51,
-    spraySec: 0.05,
-    pitch: 0,
-    pitchJitter: 0,
-    spread: 0.63,
-    gain: 0.8,
-    reverse: false,
-    envType: 'hann',
-    freeze: false,
-    grainSizeSync: false,
-    grainSizeSyncIndex: 2,
-    densitySync: false,
-    densitySyncIndex: 2,
-  },
-  {
-    grainSizeMs: 80,
-    density: 15,
-    positionSec: 3.26,
-    spraySec: 0.03,
-    pitch: 0,
-    pitchJitter: 0,
-    spread: 1,
-    gain: 0.34,
-    reverse: true,
-    envType: 'soft',
-    freeze: false,
-    grainSizeSync: false,
-    grainSizeSyncIndex: 2,
-    densitySync: false,
-    densitySyncIndex: 2,
-  },
-];
-
-const state = [{ ...GEN_DEFAULTS[0] }, { ...GEN_DEFAULTS[1] }];
 const genControlBindings = [new Map(), new Map()];
 const genMapBindings = [new Map(), new Map()];
 const genFreezeButtons = [null, null];
@@ -3216,7 +3166,6 @@ function ensureVizAnalyser() {
   VIZ.timeBuf = new Uint8Array(vizAnalyser.fftSize);
 }
 
-
 // ── Transport-locked events ──────────────────────────────────────
 // The gen4 scheduler queues each hit with its scheduled audio time; the viz
 // loop fires the visual when audioCtx.currentTime reaches it — beat-perfect,
@@ -3877,27 +3826,6 @@ const GEN3_LOOP_PARAM_KEYS = [
   'arpOctaves',
   'arpGate',
 ];
-
-const GEN3 = {
-  type: 'sine',
-  gain: 0.5,
-  pitch: 0,
-  detune: 0,
-  attack: 0.3,
-  decay: 0.18,
-  sustain: 0.7,
-  release: 0.5,
-  sustainMode: true,
-  arpEnabled: false,
-  arpRateBeats: 0.25,
-  arpDirection: 'up',
-  arpOctaves: 1,
-  arpGate: 0.75,
-  lockedMidis: new Set(),
-  activeNotes: new Map(),
-  releasingVoices: new Set(),
-  nodes: null,
-};
 
 function captureGen3LoopParams(source = GEN3) {
   return Object.fromEntries(GEN3_LOOP_PARAM_KEYS.map((key) => [key, source[key]]));
@@ -4582,8 +4510,6 @@ function buildOscPanel() {
 
 // ─── Gen 4: Glitch Drums ──────────────────────────────────────────────────
 
-
-
 // ── Genre kits ── one selection sets every lane's sound AND writes a groove
 // into the edit loop's drum pattern (sound is global, the pattern lands in the
 // loop being edited). Step entries: step | [step, velocity] |
@@ -5002,36 +4928,6 @@ function buildGen4PresetSelect(ci) {
   refreshGen4PresetSelection(ci);
   return select;
 }
-
-const GEN4 = {
-  playing: false,
-  schedulerStep: -1,
-  displayStep: -1,
-  nextStepTime: 0,
-  schedulerTimer: null,
-  scheduleAheadTime: 0.15,
-  scheduleInterval: 25,
-  stepCount: 16,
-  nodes: null,
-  cycleCount: 0, // pattern passes since play started — drives A:B trig conditions
-  condFired: GEN4_DEFS.map(() => false), // last per-lane trig decision, for PRE
-  channels: GEN4_DEFS.map((def) => {
-    return {
-      id: def.id,
-      muted: false,
-      fxSend: def.id !== 'kick',
-      steps: new Array(32).fill(false),
-      notes: new Array(32).fill(null),
-      velocity: new Array(32).fill(1.0),
-      timing: new Array(32).fill(0),
-      locks: Array.from({ length: 32 }, () => ({})),
-      stutter: new Array(32).fill(1),
-      probability: new Array(32).fill(1.0),
-      condition: new Array(32).fill(0),
-      params: Object.fromEntries(def.paramDefs.map((p) => [p.key, p.value])),
-    };
-  }),
-};
 
 const KICK_SC = {
   envelope: 0,
@@ -8095,8 +7991,6 @@ function buildDrumPanel() {
 
 // ─── FX Chain ──────────────────────────────────────────────────────────────
 
-
-
 // Per-instrument FX buses. Each instrument (granular 1/2, synth, drums) owns an
 // independent effect chain; one instrument is "active" and its chain is shown and
 // edited in the FX column. All bus outputs sum into a single global master limiter.
@@ -8816,7 +8710,6 @@ function stopMixerMeters() {
   if (MIXER.raf) cancelAnimationFrame(MIXER.raf);
   MIXER.raf = null;
 }
-
 
 // Source of truth for per-bus FX state — applied to audio nodes when they exist.
 const fxStates = {
@@ -13637,8 +13530,6 @@ function refreshBackPanelState() {
 // (suspended on exit), and the final render happens in an OfflineAudioContext.
 // While the view is closed the feature costs zero CPU.
 
-
-
 const MASTERING_PEAK_BINS = 2048;
 
 function buildMasteringPeaks(L, R) {
@@ -13694,7 +13585,6 @@ function clearMasteringSource() {
   MASTERING.loopSelection = null;
   if (MASTERING.built) refreshMasteringSourceUI();
 }
-
 
 // Keeps whatever saved order is valid and appends any modules it doesn't know
 // yet, so an order saved before a module existed survives the upgrade.
@@ -14437,7 +14327,6 @@ function updatePeakBallistics(meter, key, holdKey, framePeak, dt, now) {
   }
 }
 
-
 // Cursor frequency readout over the spectrum area — spectrum shares the EQ's log axis.
 function drawMeterHoverFreq(g, w, specH, col) {
   const hov = MASTERING.meterHover;
@@ -14861,7 +14750,6 @@ function rbjHighShelf(sr, f0, gainDb, q) {
   return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
 }
 
-
 function applyBiquad(input, [b0, b1, b2, a1, a2]) {
   const out = new Float32Array(input.length);
   let x1 = 0,
@@ -14969,7 +14857,6 @@ function drawMasteringWave() {
     g.fillText('master', 6, 19);
   }
 }
-
 
 // ── Mastering persistence ── params ride inside the preset (autosave, named
 // projects, file export, undo history). No mastering data → reset to defaults
