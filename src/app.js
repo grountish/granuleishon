@@ -16113,7 +16113,7 @@ function capturePreset() {
       FX_BUS_IDS.map((busId) => [busId, { ...INSTRUMENT_MIX[busId] }]),
     ),
     limiter: { ...LIMITER },
-    BUS.active,
+    activeBus: BUS.active,
     lfos: LFOS.map(({ label, rate, sync, syncIndex, shape, depth }) => ({
       label,
       rate,
