@@ -37,57 +37,66 @@ split out.
 
 ## What remains
 
-Phase 5 is the long tail: roughly 18k lines of interdependent UI and DSP code
-still in `app.js`. Everything now blocking it is **function-level** coupling,
-not state — the state extraction is finished. The table below is the work
-queue, ordered by how many `app.js`-local names each section still reaches for.
+`src/app.js` is **21,273 → 17,297 lines**, with 44 JS modules and 12
+stylesheets split out.
 
-Two things make the rest harder than what came before, and both are why it
-stopped here rather than being pushed through:
+Phase 5 is the long tail, and a dependency-closure analysis changed what I
+think it is worth. For each section, take its functions and follow every call
+transitively: most sections pull in **150–450 further functions**, which is to
+say half the file. `app.js` is one densely mutually-recursive call graph, not a
+set of features that happen to share a file.
 
-1. **Cycles.** Moving a section that calls back into `app.js` needs either the
-   callee moved with it (cluster the whole feature) or the call inverted
-   through the event bus. Neither is mechanical, so each section needs a
-   judgement call rather than a scripted move.
-2. **No test suite.** Every step so far was verifiable by construction — pure
-   moves diffed line-for-line, renames diffed against the previous revision,
-   imports checked against actual exports. Feature clustering cannot be
-   verified that way, so it wants manual testing per step.
+Only one cluster came back separable, and it has been extracted: gen 4 note
+editing, 35 functions that plenty of code calls into and that call nothing
+back out (`instruments/gen4/note-editor.js`). The measurement is worth
+re-running before attempting more:
 
-The deferred phase-6 items are riskier than the ones done: **A** touches every
-param control in the app, and **B** touches preset serialization, where a
+    functions in a section, and how many more its call closure drags in
+
+    Trig conditions        21 own  +1     ← extracted
+    Note generators        12 own  +13    ← extracted
+    Visualizer             58 own  +135
+    Mastering view         17 own  +164
+    LFO                    12 own  +166
+    Metering               22 own  +170
+    Gen 3: Oscillator      32 own  +183
+    Song entry ops          6 own  +400
+    Project file I/O       25 own  +448
+
+So further splitting is not a matter of finding the right seams — there are no
+more clean seams. It needs the graph broken deliberately: invert calls through
+the event bus (`core/events.js`), or move a whole feature and its closure at
+once. Both are per-call judgement rather than mechanical moves, and neither is
+verifiable by construction the way everything so far has been.
+
+The deferred phase-6 items are the riskier two: **A** (`bindParamControls`
+across the five param families) touches every control in the app, and **B**
+(per-module `serialize`/`restore`) touches preset serialization, where a
 mistake silently corrupts saved projects rather than breaking loudly.
 
 The knob widget and control row are still in `app.js` for the same reason they
 were at the start: they reach into modulation visuals and the knob context
 menu, so they want their feature cluster moved with them.
 
-| section | ext refs | lines |
-| --- | --- | --- |
-| Song entry ops | 4 | 269 |
-| Transport-locked events | 4 | 578 |
-| Note generators | 5 | 314 |
-| Mastering view | 8 | 660 |
-| LFO | 9 | 194 |
-| Metering | 12 | 672 |
-| FX Chain | 12 | 712 |
-| Harmonizer | 15 | 308 |
-| Song bounce | 16 | 254 |
-| Solo mode | 16 | 358 |
-| Song cursor / playback | 22 | 308 |
-| Trig conditions | 25 | 294 |
-| Knob | 30 | 364 |
-| Gen 3: Oscillator | 31 | 738 |
-| Visualizer (per-generator) | 35 | 1,384 |
-| Genre kits | 43 | 1,244 |
-| Loops & Song Arrangement | 44 | 789 |
-| Audio clip persistence | 46 | 524 |
-| Orbit view | 48 | 828 |
-| Mod source context menu (right-click a knob's map LED) | 55 | 1,292 |
-| Project file export/import | 69 | 952 |
-| Lane transforms | 72 | 1,297 |
-| FX reordering (drag & drop) | 91 | 556 |
-| Mastering persistence | 122 | 1,979 |
+## Checking your work
+
+`node tools/check.mjs` — parses every source, resolves every import against
+the target's actual exports, rejects duplicate top-level declarations, and
+rejects any module referencing a name only `app.js` declares. That last one is
+the check a parser cannot do for you: a moved function that left a dependency
+behind compiles fine and throws `ReferenceError` when it runs.
+
+Two verification habits earned their keep and are worth continuing:
+
+- **Diff a rename against the previous revision** and confirm every changed
+  line differs *only* by the intended substitution. This caught a corrupted
+  `INPUT_GATE` property key mid-rename.
+- **Diff a move and confirm it contains only deletions plus new imports**, no
+  changed lines. That is what makes a "pure move" claim checkable.
+
+Neither replaces running the app. A rename that is correct in content can
+still be invalid in position — that is exactly how `activeBus,` became
+`BUS.active,` and broke the build.
 
 ## Where we are
 
