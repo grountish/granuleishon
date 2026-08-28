@@ -10,6 +10,7 @@ import {
 } from './core/util.js';
 import { rbjHighpass, rbjLowShelf, rbjPeaking, biquadMagnitudeDb } from './core/dsp.js';
 import { encodeWav } from './render/wav.js';
+import { engine } from './core/engine.js';
 import { setStatus, getStatusEl } from './ui/status.js';
 import { PARAMS, GEN_DEFAULTS, state } from './instruments/granular/state.js';
 import {
@@ -155,11 +156,6 @@ try {
   setAppTheme('original', { persist: false });
 }
 
-let audioCtx = null;
-let node = null;
-let micStream = null;
-let granularInputSource = null;
-let started = false;
 let granularModulePromise = null;
 let bitReducerModulePromise = null;
 let beatRepeatModulePromise = null;
@@ -545,7 +541,7 @@ async function persistAudioForScope(scope) {
       await audioClipPut(key, {
         mode: 'file',
         samples: source.bufferData,
-        sampleRate: audioCtx?.sampleRate || 48000,
+        sampleRate: engine.ctx?.sampleRate || 48000,
         durationSec: source.durationSec,
         fileName: source.fileName,
       });
@@ -595,7 +591,7 @@ async function applyRestoredClip(genIdx, clip) {
     );
     refreshSourceModeUI(genIdx);
     if (!genVizFrame) drawGenVizIdle(genIdx);
-    if (node) await syncGranularSourceState(genIdx);
+    if (engine.node) await syncGranularSourceState(genIdx);
   } else if (clip.mode === 'frozen' && clip.samples?.length) {
     source.mode = 'mic';
     source.fileName = '';
@@ -610,7 +606,7 @@ async function applyRestoredClip(genIdx, clip) {
     setSourceDurationSec(genIdx, LIVE_SOURCE_SECONDS);
     refreshSourceModeUI(genIdx);
     if (!genVizFrame) drawGenVizIdle(genIdx);
-    if (node) {
+    if (engine.node) {
       await syncGranularSourceState(genIdx);
       sendParams(genIdx);
     }
@@ -659,7 +655,7 @@ function resetGranularSources() {
     setSourceDurationSec(genIdx, LIVE_SOURCE_SECONDS);
     refreshSourceModeUI(genIdx);
     if (!genVizFrame) drawGenVizIdle(genIdx);
-    if (node) syncGranularSourceState(genIdx);
+    if (engine.node) syncGranularSourceState(genIdx);
   }
 }
 
@@ -742,12 +738,12 @@ function getAudioLatencyLabel(mode = audioLatencyMode) {
 }
 
 function getAudioLatencyStatus() {
-  const actualMs = audioCtx?.baseLatency ? Math.round(audioCtx.baseLatency * 1000) : 0;
+  const actualMs = engine.ctx?.baseLatency ? Math.round(engine.ctx.baseLatency * 1000) : 0;
   return `audio latency: ${getAudioLatencyLabel()}${actualMs ? ` • ${actualMs} ms base` : ''}`;
 }
 
 async function restartAudioEngineForLatency() {
-  if (!audioCtx) {
+  if (!engine.ctx) {
     setStatus(`${getAudioLatencyStatus()} • applies on next play`);
     return;
   }
@@ -756,8 +752,8 @@ async function restartAudioEngineForLatency() {
     return;
   }
 
-  const oldContext = audioCtx;
-  const wasStarted = started;
+  const oldContext = engine.ctx;
+  const wasStarted = engine.started;
   const wasRunning = oldContext.state === 'running';
   const wasSequencerPlaying = GEN4.playing;
 
@@ -770,7 +766,7 @@ async function restartAudioEngineForLatency() {
 
   GEN3.nodes = null;
   GEN4.nodes = null;
-  audioCtx = node = master = null;
+  engine.ctx = engine.node = engine.master = null;
   vizAnalyser = null;
   INPUT_GATE.node = null;
   INPUT_GATE.env = 0;
@@ -785,7 +781,7 @@ async function restartAudioEngineForLatency() {
   grainArpModulePromise = null;
   pitchTremoloModulePromise = null;
   autotuneModulePromise = null;
-  started = false;
+  engine.started = false;
 
   try {
     await oldContext.close();
@@ -794,8 +790,8 @@ async function restartAudioEngineForLatency() {
   if (wasRunning) {
     if (wasStarted) await start();
     else await ensureAudioEngine();
-    if (wasStarted && !started) return;
-    if (wasSequencerPlaying && audioCtx) startGen4Sequencer();
+    if (wasStarted && !engine.started) return;
+    if (wasSequencerPlaying && engine.ctx) startGen4Sequencer();
   }
   refreshSongTransportUI();
   refreshBackPanelState();
@@ -867,19 +863,19 @@ function createGranularSourceState() {
 }
 
 async function ensureAudioEngine() {
-  if (!audioCtx) {
-    audioCtx = createAudioContext();
+  if (!engine.ctx) {
+    engine.ctx = createAudioContext();
     await ensureFxModules();
     buildFxNodes();
     buildGen3Nodes();
     buildGen4Nodes();
-    master.output.connect(audioCtx.destination);
+    engine.master.output.connect(engine.ctx.destination);
     ensureVizAnalyser();
   }
-  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  if (engine.ctx.state === 'suspended') await engine.ctx.resume();
   if (!gen3ScopeFrame) startGen3Scope();
   if (!lfoAnimFrame) startLFOLoop();
-  if (!started) setStatus('gen3 ready');
+  if (!engine.started) setStatus('gen3 ready');
 }
 
 // Worklet modules are fetched via addModule AFTER page load (on the start
@@ -892,29 +888,29 @@ function workletUrl(file) {
 }
 
 async function ensureFxModules() {
-  if (!audioCtx) return;
-  if (!audioCtx.audioWorklet?.addModule) {
+  if (!engine.ctx) return;
+  if (!engine.ctx.audioWorklet?.addModule) {
     throw new Error(getAudioWorkletErrorMessage());
   }
   if (!bitReducerModulePromise) {
-    bitReducerModulePromise = audioCtx.audioWorklet.addModule(workletUrl('bit-reducer-processor.js'));
+    bitReducerModulePromise = engine.ctx.audioWorklet.addModule(workletUrl('bit-reducer-processor.js'));
   }
   if (!beatRepeatModulePromise) {
-    beatRepeatModulePromise = audioCtx.audioWorklet.addModule(workletUrl('beat-repeat-processor.js'));
+    beatRepeatModulePromise = engine.ctx.audioWorklet.addModule(workletUrl('beat-repeat-processor.js'));
   }
   if (!resonatorModulePromise) {
-    resonatorModulePromise = audioCtx.audioWorklet.addModule(workletUrl('resonator-processor.js'));
+    resonatorModulePromise = engine.ctx.audioWorklet.addModule(workletUrl('resonator-processor.js'));
   }
   if (!grainArpModulePromise) {
-    grainArpModulePromise = audioCtx.audioWorklet.addModule(workletUrl('grain-arp-processor.js'));
+    grainArpModulePromise = engine.ctx.audioWorklet.addModule(workletUrl('grain-arp-processor.js'));
   }
   if (!pitchTremoloModulePromise) {
-    pitchTremoloModulePromise = audioCtx.audioWorklet.addModule(
+    pitchTremoloModulePromise = engine.ctx.audioWorklet.addModule(
       workletUrl('pitch-autopan-processor.js'),
     );
   }
   if (!autotuneModulePromise) {
-    autotuneModulePromise = audioCtx.audioWorklet.addModule(workletUrl('autotune-processor.js'));
+    autotuneModulePromise = engine.ctx.audioWorklet.addModule(workletUrl('autotune-processor.js'));
   }
   await Promise.all([
     bitReducerModulePromise,
@@ -927,12 +923,12 @@ async function ensureFxModules() {
 }
 
 async function ensureGranularModule() {
-  if (!audioCtx) await ensureAudioEngine();
-  if (!audioCtx.audioWorklet?.addModule) {
+  if (!engine.ctx) await ensureAudioEngine();
+  if (!engine.ctx.audioWorklet?.addModule) {
     throw new Error(getAudioWorkletErrorMessage());
   }
   if (!granularModulePromise) {
-    granularModulePromise = audioCtx.audioWorklet.addModule(workletUrl('granular-processor.js'));
+    granularModulePromise = engine.ctx.audioWorklet.addModule(workletUrl('granular-processor.js'));
   }
   await granularModulePromise;
 }
@@ -940,14 +936,14 @@ async function ensureGranularModule() {
 async function startRecording({ bufferSize = 4096 } = {}) {
   if (REC.isRecording) return;
   await ensureAudioEngine();
-  if (!master?.output || !audioCtx) return;
+  if (!engine.master?.output || !engine.ctx) return;
 
   REC.left = [];
   REC.right = [];
   REC.sampleCount = 0;
 
-  const processor = audioCtx.createScriptProcessor(bufferSize, 2, 2);
-  const sink = audioCtx.createGain();
+  const processor = engine.ctx.createScriptProcessor(bufferSize, 2, 2);
+  const sink = engine.ctx.createGain();
   sink.gain.value = 0;
 
   processor.onaudioprocess = (e) => {
@@ -962,9 +958,9 @@ async function startRecording({ bufferSize = 4096 } = {}) {
     REC.sampleCount += inL.length;
   };
 
-  master.output.connect(processor);
+  engine.master.output.connect(processor);
   processor.connect(sink);
-  sink.connect(audioCtx.destination);
+  sink.connect(engine.ctx.destination);
 
   REC.processor = processor;
   REC.sink = sink;
@@ -976,9 +972,9 @@ async function startRecording({ bufferSize = 4096 } = {}) {
 function stopRecording() {
   if (!REC.isRecording) return;
 
-  if (REC.processor && master?.output) {
+  if (REC.processor && engine.master?.output) {
     try {
-      master.output.disconnect(REC.processor);
+      engine.master.output.disconnect(REC.processor);
     } catch (e) {}
   }
   if (REC.processor) {
@@ -995,11 +991,11 @@ function stopRecording() {
 
   const left = mergeFloat32(REC.left, REC.sampleCount);
   const right = mergeFloat32(REC.right, REC.sampleCount);
-  if (REC.sampleCount > 0 && audioCtx) {
+  if (REC.sampleCount > 0 && engine.ctx) {
     // The merged buffers already exist — handing them to the mastering view
     // costs no copy and no processing until that view is opened.
-    setMasteringSource(left, right, audioCtx.sampleRate, REC.downloadName || 'recording');
-    downloadRecording(encodeWav(left, right, audioCtx.sampleRate));
+    setMasteringSource(left, right, engine.ctx.sampleRate, REC.downloadName || 'recording');
+    downloadRecording(encodeWav(left, right, engine.ctx.sampleRate));
   }
 
   REC.left = [];
@@ -1009,7 +1005,7 @@ function stopRecording() {
   REC.sink = null;
   REC.isRecording = false;
   refreshRecordButton();
-  setStatus(started ? getGranularStatusText() : audioCtx ? 'gen3 ready' : 'idle');
+  setStatus(engine.started ? getGranularStatusText() : engine.ctx ? 'gen3 ready' : 'idle');
 }
 
 // ── Stem taps ── during a stems bounce each instrument bus gets its own
@@ -1022,8 +1018,8 @@ function startStemTaps({ bufferSize = 4096 } = {}) {
   STEM_TAPS.taps = FX_BUS_IDS.map((busId) => {
     const bus = fxBuses[busId];
     if (!bus) return null;
-    const processor = audioCtx.createScriptProcessor(bufferSize, 2, 2);
-    const sink = audioCtx.createGain();
+    const processor = engine.ctx.createScriptProcessor(bufferSize, 2, 2);
+    const sink = engine.ctx.createGain();
     sink.gain.value = 0;
     const tap = { busId, processor, sink, left: [], right: [], sampleCount: 0, peak: 0 };
     processor.onaudioprocess = (e) => {
@@ -1040,7 +1036,7 @@ function startStemTaps({ bufferSize = 4096 } = {}) {
     };
     bus.output.connect(processor);
     processor.connect(sink);
-    sink.connect(audioCtx.destination);
+    sink.connect(engine.ctx.destination);
     return tap;
   }).filter(Boolean);
   STEM_TAPS.active = STEM_TAPS.taps.length > 0;
@@ -1063,11 +1059,11 @@ function stopStemTaps({ save = false, baseName = 'grnsh' } = {}) {
       tap.sink.disconnect();
     } catch (e) {}
     // Skip silent stems — an unused instrument shouldn't cost a download.
-    if (save && tap.sampleCount > 0 && tap.peak > 1e-5 && audioCtx) {
+    if (save && tap.sampleCount > 0 && tap.peak > 1e-5 && engine.ctx) {
       const left = mergeFloat32(tap.left, tap.sampleCount);
       const right = mergeFloat32(tap.right, tap.sampleCount);
       REC.downloadName = `${baseName}-stem-${tap.busId}.wav`;
-      downloadRecording(encodeWav(left, right, audioCtx.sampleRate));
+      downloadRecording(encodeWav(left, right, engine.ctx.sampleRate));
       written += 1;
     }
     tap.left = [];
@@ -1192,7 +1188,7 @@ function refreshBounceProgress() {
   }
   // elapsed / (elapsed + live remaining): honest under jumps — the bar dips
   // when a jump throws the song backward instead of pinning at 100%.
-  const elapsed = audioCtx ? REC.sampleCount / audioCtx.sampleRate : 0;
+  const elapsed = engine.ctx ? REC.sampleCount / engine.ctx.sampleRate : 0;
   if (BOUNCE.prevSongLoop) {
     setBounceProgress(elapsed / Math.max(0.001, BOUNCE.capSeconds));
     return;
@@ -1202,9 +1198,9 @@ function refreshBounceProgress() {
 }
 
 function muteBounceOutput() {
-  if (!master?.output || !audioCtx || BOUNCE.muted) return;
+  if (!engine.master?.output || !engine.ctx || BOUNCE.muted) return;
   try {
-    master.output.disconnect(audioCtx.destination);
+    engine.master.output.disconnect(engine.ctx.destination);
     BOUNCE.muted = true;
   } catch (e) {}
 }
@@ -1224,7 +1220,7 @@ async function bounceSong(opts = {}) {
     setStatus('song is empty — add loops to the song lane');
     return;
   }
-  if (audioCtx?.state === 'running') await stopTransport();
+  if (engine.ctx?.state === 'running') await stopTransport();
   BOUNCE.prevMode = PLAY.mode;
   BOUNCE.prevSongLoop = SONG.loop;
   BOUNCE.prevScheduleAheadTime = GEN4.scheduleAheadTime;
@@ -1248,7 +1244,7 @@ async function bounceSong(opts = {}) {
     SONG.loop = BOUNCE.prevSongLoop;
     await ensureTransportEngine();
     muteBounceOutput();
-    if (!started) await start();
+    if (!engine.started) await start();
     await startRecording({ bufferSize: BOUNCE_CAPTURE_BUFFER_SIZE });
     if (stems) startStemTaps({ bufferSize: BOUNCE_CAPTURE_BUFFER_SIZE });
     startGen4Sequencer();
@@ -1265,7 +1261,7 @@ async function bounceSong(opts = {}) {
         : `bounce ≈${formatSongClock(BOUNCE.songSeconds)} · max ${formatSongClock(BOUNCE.capSeconds)}`,
     );
     BOUNCE.pollTimer = setInterval(() => {
-      const elapsed = audioCtx ? REC.sampleCount / audioCtx.sampleRate : 0;
+      const elapsed = engine.ctx ? REC.sampleCount / engine.ctx.sampleRate : 0;
       if (GEN4.playing && elapsed > BOUNCE.capSeconds) {
         finishBounce(
           BOUNCE.prevSongLoop
@@ -1327,9 +1323,9 @@ function finishBounce(statusText, { save = true } = {}) {
   // The bounce booted the engine; a bounce always begins from a stopped
   // transport, so return to silence instead of leaving the granulars running.
   Promise.resolve(stopTransport()).finally(() => {
-    if (!restoreMonitor || !master?.output || !audioCtx) return;
+    if (!restoreMonitor || !engine.master?.output || !engine.ctx) return;
     try {
-      master.output.connect(audioCtx.destination);
+      engine.master.output.connect(engine.ctx.destination);
     } catch (e) {}
   });
   refreshBounceUI();
@@ -1342,7 +1338,7 @@ function refreshBounceUI() {
   btn.classList.toggle('active', BOUNCE.active);
   btn.title = BOUNCE.active
     ? 'Cancel bounce'
-    : `Bounce song to WAV — ${BOUNCE_RENDER.stems ? 'master + per-instrument stems' : 'master only'} (set in ⚙ options; ⇧-click for the other mode)`;
+    : `Bounce song to WAV — ${BOUNCE_RENDER.stems ? 'engine.master + per-instrument stems' : 'engine.master only'} (set in ⚙ options; ⇧-click for the other mode)`;
   refreshBounceProgress();
 }
 
@@ -1476,7 +1472,7 @@ function drawGenParamFeedback(c, gi, W, H, cx, sw) {
 }
 
 function drawGenCaptureHint(c, gi, W, H, frozen = state[gi]?.freeze) {
-  if (gi > 1 || frozen || !started || getSourceState(gi)?.mode !== 'mic') return;
+  if (gi > 1 || frozen || !engine.started || getSourceState(gi)?.mode !== 'mic') return;
   const label = '● LIVE BUFFER · CLICK TO STOP';
 
   c.save();
@@ -1520,7 +1516,7 @@ function drawGenVizEmpty(gi) {
   c.fillStyle = '#9aa3a3';
   c.font = '500 10px ui-monospace, monospace';
   c.fillText('or drop a .wav file here', W / 2, H / 2 + 9);
-  if (!started) {
+  if (!engine.started) {
     c.fillStyle = '#5a5a5a';
     c.font = '500 9px ui-monospace, monospace';
     c.fillText('press play to start', W / 2, H / 2 + 27);
@@ -1581,7 +1577,7 @@ function drawGenVizStatic(gi) {
     0.01,
     source.mode === 'file'
       ? source.durationSec
-      : data.length / (source.frozenData?.sampleRate || audioCtx?.sampleRate || 48000),
+      : data.length / (source.frozenData?.sampleRate || engine.ctx?.sampleRate || 48000),
   );
   const posX = Math.max(0, Math.min(1, 1 - state[gi].positionSec / dur)) * W;
   c.strokeStyle = line;
@@ -2005,7 +2001,7 @@ function anyMicSourceSelected() {
 }
 
 function canFreezeGenerator(genIdx) {
-  return started && getSourceState(genIdx)?.mode === 'mic';
+  return engine.started && getSourceState(genIdx)?.mode === 'mic';
 }
 
 function refreshGeneratorCaptureUI(genIdx) {
@@ -2055,7 +2051,7 @@ function toggleGeneratorFreeze(genIdx) {
 }
 
 function getGranularStatusText() {
-  const micCount = granularInputSource
+  const micCount = engine.granularInputSource
     ? GRANULAR_SOURCES.filter((source) => source.mode === 'mic').length
     : 0;
   const fileSources = GRANULAR_SOURCES.filter(
@@ -2081,16 +2077,16 @@ function refreshSourceModeUI(genIdx) {
 // Boot everything transport playback needs: audio graph, drum nodes AND the
 // granular worklet — so restored file buffers / frozen takes sound on ▶ play.
 async function ensureTransportEngine() {
-  if (!node) await ensureGranularEngine();
+  if (!engine.node) await ensureGranularEngine();
   else await ensureAudioEngine();
   if (!GEN4.nodes) buildGen4Nodes();
   startGenVizLoop();
   startLFOLoop();
-  if (!started) setStatus('playing');
+  if (!engine.started) setStatus('playing');
 }
 
 function setGranularRunning() {
-  started = true;
+  engine.started = true;
   refreshSongTransportUI();
   refreshGeneratorUI(0);
   refreshGeneratorUI(1);
@@ -2342,7 +2338,7 @@ function lerpGens(a, b, t) {
 }
 
 function sendParams(genIdx) {
-  if (!node) return;
+  if (!engine.node) return;
   // The worklet hears the audible loop's sound: in song mode with follow off,
   // the loop being edited (state) differs from the one sounding.
   const audibleGens = getAudibleLoop()?.gens?.[genIdx];
@@ -2356,13 +2352,13 @@ function sendParams(genIdx) {
       : null;
   if (morphTo && morphTo !== base) base = lerpGens(base, morphTo, SONG_MORPH.t);
   const effective = getEffectiveGeneratorParams(genIdx, base);
-  node.port.postMessage({ type: 'params', gen: genIdx, value: effective });
+  engine.node.port.postMessage({ type: 'params', gen: genIdx, value: effective });
 }
 
 function applyGen3Modulation() {
-  if (!GEN3.nodes || !audioCtx) return;
+  if (!GEN3.nodes || !engine.ctx) return;
   const effective = getEffectiveGen3Params();
-  GEN3.nodes.gain.gain.setTargetAtTime(effective.gain, audioCtx.currentTime, 0.02);
+  GEN3.nodes.gain.gain.setTargetAtTime(effective.gain, engine.ctx.currentTime, 0.02);
   GEN3.activeNotes.forEach((entry) => {
     applyGen3VoicePitch(entry, effective);
   });
@@ -2397,14 +2393,14 @@ function applyFxModulationMapped() {
 }
 
 function applyMixerPanModulationMapped() {
-  if (!audioCtx) return;
+  if (!engine.ctx) return;
   lfoMappings.forEach(({ genIdx, key }) => {
     if (genIdx !== 5) return;
     const [busId, param] = key.split(':');
     if (param !== 'pan' || !FX_BUS_IDS.includes(busId)) return;
     fxBuses[busId]?.mixer?.pan.pan.setTargetAtTime(
       getEffectiveMixerPan(busId),
-      audioCtx.currentTime,
+      engine.ctx.currentTime,
       0.01,
     );
   });
@@ -3157,11 +3153,11 @@ const VIZ = {
 };
 
 function ensureVizAnalyser() {
-  if (vizAnalyser || !audioCtx || !master?.output) return;
-  vizAnalyser = audioCtx.createAnalyser();
+  if (vizAnalyser || !engine.ctx || !engine.master?.output) return;
+  vizAnalyser = engine.ctx.createAnalyser();
   vizAnalyser.fftSize = 2048;
   vizAnalyser.smoothingTimeConstant = 0.84;
-  master.output.connect(vizAnalyser);
+  engine.master.output.connect(vizAnalyser);
   VIZ.freqBuf = new Uint8Array(vizAnalyser.frequencyBinCount);
   VIZ.timeBuf = new Uint8Array(vizAnalyser.fftSize);
 }
@@ -3217,8 +3213,8 @@ function applyVizEvent(ev) {
 }
 
 function processVizEvents() {
-  if (!audioCtx) return;
-  const now = audioCtx.currentTime;
+  if (!engine.ctx) return;
+  const now = engine.ctx.currentTime;
   const evs = VIZGL.events;
   let i = 0;
   while (i < evs.length) {
@@ -3880,7 +3876,7 @@ function refreshGen3KeyStates() {
 }
 
 function buildGen3Nodes() {
-  const ac = audioCtx;
+  const ac = engine.ctx;
   const gain = ac.createGain();
   gain.gain.setValueAtTime(getEffectiveGen3Params().gain, ac.currentTime);
   const analyser = ac.createAnalyser();
@@ -3914,7 +3910,7 @@ function stopGen3Voice(voice) {
 
 function createGen3SourceNode(freq, ov = null, sound = getGen3SoundState()) {
   if (!GEN3.nodes) return null;
-  const ac = audioCtx;
+  const ac = engine.ctx;
   const effective = getEffectiveGen3Params(sound);
   let src;
   if (sound.type === 'noise') {
@@ -3938,20 +3934,20 @@ function createGen3SourceNode(freq, ov = null, sound = getGen3SoundState()) {
 }
 
 function applyGen3VoicePitch(voice, effective = getEffectiveGen3Params()) {
-  if (!voice?.source || !audioCtx) return;
+  if (!voice?.source || !engine.ctx) return;
   if ('frequency' in voice.source && voice.source.frequency) {
     voice.source.frequency.setValueAtTime(
       voice.freq * Math.pow(2, (voice.ov?.pitch ?? effective.pitch) / 12),
-      audioCtx.currentTime,
+      engine.ctx.currentTime,
     );
   }
   if ('detune' in voice.source && voice.source.detune) {
-    voice.source.detune.setValueAtTime(voice.ov?.detune ?? effective.detune, audioCtx.currentTime);
+    voice.source.detune.setValueAtTime(voice.ov?.detune ?? effective.detune, engine.ctx.currentTime);
   }
 }
 
 function applyGen3Envelope(envelope, ov = null, sound = getGen3SoundState()) {
-  const now = audioCtx.currentTime;
+  const now = engine.ctx.currentTime;
   const effective = getEffectiveGen3Params(sound);
   const attack = ov?.attack ?? sound.attack;
   const decay = ov?.decay ?? effective.decay;
@@ -3975,8 +3971,8 @@ function applyGen3Envelope(envelope, ov = null, sound = getGen3SoundState()) {
 function createGen3Voice(freq, ov = null, sound = getGen3SoundState()) {
   if (!GEN3.nodes) return { source: null, envelope: null, releaseTimer: null };
   const source = createGen3SourceNode(freq, ov, sound);
-  const envelope = audioCtx.createGain();
-  envelope.gain.setValueAtTime(0, audioCtx.currentTime);
+  const envelope = engine.ctx.createGain();
+  envelope.gain.setValueAtTime(0, engine.ctx.currentTime);
   source.connect(envelope);
   envelope.connect(GEN3.nodes.gain);
   applyGen3Envelope(envelope, ov, sound);
@@ -3985,12 +3981,12 @@ function createGen3Voice(freq, ov = null, sound = getGen3SoundState()) {
 }
 
 function releaseGen3Voice(voice) {
-  if (!voice?.source || !voice.envelope || !audioCtx) {
+  if (!voice?.source || !voice.envelope || !engine.ctx) {
     stopGen3Voice(voice);
     return;
   }
 
-  const now = audioCtx.currentTime;
+  const now = engine.ctx.currentTime;
   const release = voice.ov?.release ?? voice.sound?.release ?? GEN3.release;
   const stopAfterMs = Math.max(0, release * 1000) + 60;
 
@@ -4128,10 +4124,10 @@ function getGen3ArpNotes(sound) {
 
 function scheduleGen3ArpNote(time, midi, sound, stepDuration) {
   const session = GEN3_ARP_RUNTIME.session;
-  const delayMs = Math.max(0, time - audioCtx.currentTime) * 1000;
+  const delayMs = Math.max(0, time - engine.ctx.currentTime) * 1000;
   const gateMs = Math.max(8, stepDuration * clamp(sound.arpGate, 0.1, 1) * 1000);
   setTimeout(() => {
-    if (!audioCtx || !GEN4.playing || session !== GEN3_ARP_RUNTIME.session) return;
+    if (!engine.ctx || !GEN4.playing || session !== GEN3_ARP_RUNTIME.session) return;
     if (GEN3.activeNotes.has(midi)) removeGen3Note(midi);
     addGen3Note(midi, midiToFreqHz(midi), null, sound, gateMs);
   }, delayMs);
@@ -5036,8 +5032,8 @@ window.addEventListener('mouseup', () => {
 });
 
 function buildGen4Nodes() {
-  if (!audioCtx || GEN4.nodes) return;
-  const ac = audioCtx;
+  if (!engine.ctx || GEN4.nodes) return;
+  const ac = engine.ctx;
 
   const noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
   const noiseData = noiseBuf.getChannelData(0);
@@ -5070,8 +5066,8 @@ function gen4SetChannelMuted(ci, muted) {
   ch.muted = muted;
 
   const outputs = [GEN4.nodes?.channelFxOuts?.[ci], GEN4.nodes?.channelDryOuts?.[ci]].filter(Boolean);
-  if (outputs.length && audioCtx) {
-    const now = audioCtx.currentTime;
+  if (outputs.length && engine.ctx) {
+    const now = engine.ctx.currentTime;
     outputs.forEach((out) => {
       out.gain.cancelScheduledValues(now);
       out.gain.setTargetAtTime(muted ? 0 : 1, now, 0.005);
@@ -5107,7 +5103,7 @@ function gen4DistortionCurve(amount) {
 
 function gen4TriggerKick(time, velocity, p, dest) {
   KICK_SC.envelope = 1.0;
-  const ac = audioCtx;
+  const ac = engine.ctx;
   const osc = ac.createOscillator();
   osc.type = 'sine';
   osc.frequency.setValueAtTime(p.tune * (1 + p.punch * 4), time);
@@ -5133,7 +5129,7 @@ function gen4TriggerKick(time, velocity, p, dest) {
 }
 
 function gen4TriggerSnare(time, velocity, p, dest) {
-  const ac = audioCtx;
+  const ac = engine.ctx;
 
   const osc = ac.createOscillator();
   osc.type = 'triangle';
@@ -5167,7 +5163,7 @@ function gen4TriggerSnare(time, velocity, p, dest) {
 }
 
 function gen4TriggerHat(time, velocity, p, dest) {
-  const ac = audioCtx;
+  const ac = engine.ctx;
   const noise = ac.createBufferSource();
   noise.buffer = GEN4.nodes.noiseBuf;
 
@@ -5195,7 +5191,7 @@ function gen4TriggerHat(time, velocity, p, dest) {
 }
 
 function gen4TriggerPerc(time, velocity, p, dest) {
-  const ac = audioCtx;
+  const ac = engine.ctx;
   const modFreq = p.tune * p.ratio;
 
   const mod = ac.createOscillator();
@@ -5232,7 +5228,7 @@ function gen4TriggerOsc(
   locks = null,
   sound = getGen3SoundState(),
 ) {
-  if (!audioCtx || sound.sustainMode || sound.arpEnabled || midis.size === 0) return;
+  if (!engine.ctx || sound.sustainMode || sound.arpEnabled || midis.size === 0) return;
   // Per-step gen3 param locks — only known synth keys ride along as voice
   // overrides (locks can also carry _fxSend and the like).
   let ov = null;
@@ -5244,10 +5240,10 @@ function gen4TriggerOsc(
   // Snapshot the chord now — in song mode the bound loop may change before the
   // scheduled timeout fires.
   const notes = [...midis];
-  const delayMs = Math.max(0, time - audioCtx.currentTime) * 1000;
+  const delayMs = Math.max(0, time - engine.ctx.currentTime) * 1000;
   setTimeout(() => {
     const oscChannel = GEN4.channels.find((channel) => channel.id === 'osc');
-    if (!audioCtx || oscChannel?.muted) return;
+    if (!engine.ctx || oscChannel?.muted) return;
     notes.forEach((midi) => {
       if (GEN3.activeNotes.has(midi)) removeGen3Note(midi);
       addGen3Note(midi, midiToFreqHz(midi), ov, sound);
@@ -5256,7 +5252,7 @@ function gen4TriggerOsc(
 }
 
 function gen4TriggerFmSynth(time, velocity, p, dest) {
-  const ac = audioCtx;
+  const ac = engine.ctx;
   const mod = ac.createOscillator();
   const modGain = ac.createGain();
   const carrier = ac.createOscillator();
@@ -5317,7 +5313,7 @@ function getGen4SmpSourceAudio(idx) {
     const rate =
       source.durationSec > 0
         ? source.bufferData.length / source.durationSec
-        : audioCtx.sampleRate;
+        : engine.ctx.sampleRate;
     return { data: source.bufferData, rate };
   }
   if (source.frozenData?.samples?.length) {
@@ -5327,16 +5323,16 @@ function getGen4SmpSourceAudio(idx) {
 }
 
 function getGen4SmpBuffer(idx) {
-  if (!audioCtx) return null;
+  if (!engine.ctx) return null;
   const audio = getGen4SmpSourceAudio(idx);
   if (!audio) return null;
   const slot = gen4SmpCache[idx];
-  if (slot.data !== audio.data || slot.ctx !== audioCtx) {
-    const rate = clamp(Math.round(audio.rate || audioCtx.sampleRate), 8000, 96000);
-    const buf = audioCtx.createBuffer(1, audio.data.length, rate);
+  if (slot.data !== audio.data || slot.ctx !== engine.ctx) {
+    const rate = clamp(Math.round(audio.rate || engine.ctx.sampleRate), 8000, 96000);
+    const buf = engine.ctx.createBuffer(1, audio.data.length, rate);
     buf.getChannelData(0).set(audio.data);
     slot.data = audio.data;
-    slot.ctx = audioCtx;
+    slot.ctx = engine.ctx;
     slot.buf = buf;
   }
   return slot.buf;
@@ -5345,7 +5341,7 @@ function getGen4SmpBuffer(idx) {
 function gen4TriggerSmp(time, velocity, p, dest) {
   const buf = getGen4SmpBuffer(p.source >= 0.5 ? 1 : 0);
   if (!buf) return; // nothing loaded or frozen on that input yet
-  const ac = audioCtx;
+  const ac = engine.ctx;
   const src = ac.createBufferSource();
   src.buffer = buf;
   const rate = Math.pow(2, p.pitch / 12);
@@ -5455,11 +5451,11 @@ function gen4FireChannel(ci, time, velocity, midi = null, loop = null, locks = n
 }
 
 function gen4ScheduleTick() {
-  if (!audioCtx || !GEN4.nodes || !GEN4.playing) return;
+  if (!engine.ctx || !GEN4.nodes || !GEN4.playing) return;
   const secPerStep = 60.0 / TRANSPORT.bpm / 4;
   const secPerOneTwentyEighth = 60.0 / TRANSPORT.bpm / 32;
   const scheduleHorizon = GEN4.scheduleAheadTime + secPerOneTwentyEighth * 8;
-  while (GEN4.nextStepTime < audioCtx.currentTime + scheduleHorizon) {
+  while (GEN4.nextStepTime < engine.ctx.currentTime + scheduleHorizon) {
     // The pattern to schedule from: the edited loop in loop mode, the loop at
     // the song cursor in song mode. Resolved per step so a pattern boundary
     // can hand off to the next arrangement entry mid-lookahead.
@@ -5510,7 +5506,7 @@ function gen4ScheduleTick() {
       const count = pat.stutter[step];
       const timing = clamp(Math.round(pat.timing?.[step] || 0), -8, 8);
       const stepTime = Math.max(
-        audioCtx.currentTime,
+        engine.ctx.currentTime,
         GEN4.nextStepTime + swingOffset + timing * secPerOneTwentyEighth,
       );
       for (let r = 0; r < count; r++) {
@@ -5627,8 +5623,8 @@ function gen4SetStepCount(n, { duplicateOnExpand = true } = {}) {
 
 function gen4DisplayTick() {
   gen4DisplayFrame = requestAnimationFrame(gen4DisplayTick);
-  if (!audioCtx || !GEN4.playing) return;
-  const now = audioCtx.currentTime;
+  if (!engine.ctx || !GEN4.playing) return;
+  const now = engine.ctx.currentTime;
   let audible = null;
   for (let i = gen4Schedule.length - 1; i >= 0; i--) {
     if (gen4Schedule[i].time <= now) {
@@ -5689,7 +5685,7 @@ function startGen4Sequencer() {
     LINK.stepAbs = linkJoinStep();
     GEN4.nextStepTime = linkStepAudioTime(LINK.stepAbs);
   } else {
-    GEN4.nextStepTime = audioCtx.currentTime + 0.01;
+    GEN4.nextStepTime = engine.ctx.currentTime + 0.01;
   }
   GEN4.schedulerTimer = setInterval(gen4ScheduleTick, GEN4.scheduleInterval);
   gen4ScheduleTick();
@@ -8068,39 +8064,39 @@ function applyInstrumentMixState() {
     const mix = INSTRUMENT_MIX[busId];
     const audible = !mix.muted && (!hasSolo || mix.solo);
     const bus = fxBuses[busId];
-    if (bus && audioCtx) {
+    if (bus && engine.ctx) {
       if (bus.mixer.eqEnabled !== mix.eqEnabled) reconnectInstrumentEq(busId);
       // Drop any ramp frozen by a suspended context before targeting anew.
-      bus.output.gain.cancelScheduledValues(audioCtx.currentTime);
+      bus.output.gain.cancelScheduledValues(engine.ctx.currentTime);
       bus.output.gain.setTargetAtTime(
         audible && mix.gainDb > -59.9 ? dbToLinear(clamp(mix.gainDb, -60, 6)) : 0,
-        audioCtx.currentTime,
+        engine.ctx.currentTime,
         0.01,
       );
-      bus.mixer.pan.pan.setTargetAtTime(getEffectiveMixerPan(busId), audioCtx.currentTime, 0.01);
+      bus.mixer.pan.pan.setTargetAtTime(getEffectiveMixerPan(busId), engine.ctx.currentTime, 0.01);
       bus.mixer.low.gain.setTargetAtTime(
         clamp(mix.eqLow, -18, 18),
-        audioCtx.currentTime,
+        engine.ctx.currentTime,
         0.02,
       );
       bus.mixer.lowMid.gain.setTargetAtTime(
         clamp(mix.eqLowMid, -18, 18),
-        audioCtx.currentTime,
+        engine.ctx.currentTime,
         0.02,
       );
       bus.mixer.mid.gain.setTargetAtTime(
         clamp(mix.eqMid, -18, 18),
-        audioCtx.currentTime,
+        engine.ctx.currentTime,
         0.02,
       );
       bus.mixer.presence.gain.setTargetAtTime(
         clamp(mix.eqPresence, -18, 18),
-        audioCtx.currentTime,
+        engine.ctx.currentTime,
         0.02,
       );
       bus.mixer.high.gain.setTargetAtTime(
         clamp(mix.eqHigh, -18, 18),
-        audioCtx.currentTime,
+        engine.ctx.currentTime,
         0.02,
       );
     }
@@ -8695,8 +8691,8 @@ function mixerMeterFrame(timestamp) {
     if (strip) paintMixerMeter(strip.meter, fxBuses[busId]?.mixer?.meter, timestamp);
   });
   if (MIXER.master) {
-    paintMixerMeter(MIXER.master.meter, master?.meter, timestamp);
-    const amount = Math.abs(master?.limiter?.comp?.reduction || 0);
+    paintMixerMeter(MIXER.master.meter, engine.master?.meter, timestamp);
+    const amount = Math.abs(engine.master?.limiter?.comp?.reduction || 0);
     MIXER.master.reduction.textContent = `${amount.toFixed(1)} dB`;
   }
   MIXER.raf = requestAnimationFrame(mixerMeterFrame);
@@ -8736,7 +8732,6 @@ let activeBus = 'gen0';
 
 // Per-bus audio node graphs, created in ensureAudioEngine(), nulled in stop().
 const fxBuses = { gen0: null, gen1: null, gen3: null, gen4: null };
-let master = null; // { sum, limiter, output } — global tail of the mix
 
 // Live alias to the active bus state, kept in sync by setActiveBus(). Lets the FX
 // UI/refresh code keep referring to FX.* without knowing which bus is active.
@@ -9930,8 +9925,8 @@ function updateSongMorph(audible) {
     if (loop && nextLoop && nextLoop !== loop) {
       const stepCount = Math.max(1, loop.gen4?.stepCount || 16);
       const secPerStep = 60 / TRANSPORT.bpm / 4;
-      const stepFrac = audioCtx
-        ? clamp((audioCtx.currentTime - audible.time) / secPerStep, 0, 1)
+      const stepFrac = engine.ctx
+        ? clamp((engine.ctx.currentTime - audible.time) / secPerStep, 0, 1)
         : 0;
       const totalCycles = Math.max(1, entry.repeats);
       const cycles = Math.min(span, totalCycles);
@@ -10049,7 +10044,7 @@ function renderSongPlayhead(repeat = -1) {
 }
 
 function isTransportOn() {
-  return GEN4.playing || (started && audioCtx?.state === 'running');
+  return GEN4.playing || (engine.started && engine.ctx?.state === 'running');
 }
 
 function refreshSongTransportUI() {
@@ -10068,7 +10063,7 @@ function refreshSongTransportUI() {
 async function stopTransport() {
   stopGen4Sequencer();
   stopAllGen3Notes();
-  if (audioCtx && audioCtx.state === 'running') await audioCtx.suspend();
+  if (engine.ctx && engine.ctx.state === 'running') await engine.ctx.suspend();
   refreshSongTransportUI();
 }
 
@@ -10082,7 +10077,7 @@ async function stripPlayToggle() {
     setStatus('stopped');
   } else {
     await ensureTransportEngine();
-    if (!started) await start();
+    if (!engine.started) await start();
     startGen4Sequencer();
     setStatus('playing');
   }
@@ -10186,8 +10181,8 @@ function linkSecPerStep() {
 // Map a shared-timeline instant to this machine's audio clock, compensating
 // the local output latency so the *sound* lines up, not just the schedule.
 function linkSharedToAudioTime(ts) {
-  const out = audioCtx.outputLatency || audioCtx.baseLatency || 0;
-  return audioCtx.currentTime + (ts - linkNow()) - out;
+  const out = engine.ctx.outputLatency || engine.ctx.baseLatency || 0;
+  return engine.ctx.currentTime + (ts - linkNow()) - out;
 }
 
 function linkStepAudioTime(stepAbs) {
@@ -10227,7 +10222,7 @@ async function linkRemoteStart() {
   LINK.applyingRemote = true;
   try {
     await ensureTransportEngine();
-    if (!started) await start();
+    if (!engine.started) await start();
     startGen4Sequencer();
     setStatus('playing (link)');
   } finally {
@@ -11531,8 +11526,8 @@ function updateSongOrbitProgress(audible) {
   if (!songOrbitEls || !songExpandedEl) return;
   const { progress, dot, byId } = songOrbitEls;
   const entry = SONG.entries[audible.entryIdx];
-  const node = entry && byId.get(entry.id);
-  if (!node) {
+  const orbitNode = entry && byId.get(entry.id);
+  if (!orbitNode) {
     progress.setAttribute('d', '');
     dot.setAttribute('opacity', '0');
     return;
@@ -11543,8 +11538,8 @@ function updateSongOrbitProgress(audible) {
   // clock (the schedule entry carries its exact scheduled time) — stepping by
   // whole 16ths reads as lag.
   const secPerStep = 60 / TRANSPORT.bpm / 4;
-  const stepFrac = audioCtx
-    ? clamp((audioCtx.currentTime - audible.time) / secPerStep, 0, 1)
+  const stepFrac = engine.ctx
+    ? clamp((engine.ctx.currentTime - audible.time) / secPerStep, 0, 1)
     : 0;
   const cycleFrac = clamp((audible.step + stepFrac) / stepCount, 0, 1);
   const frac = clamp(
@@ -11553,7 +11548,7 @@ function updateSongOrbitProgress(audible) {
     0.999,
   );
   const span = (Math.PI * 2) / Math.max(1, SONG.entries.length);
-  const a0 = node.angle;
+  const a0 = orbitNode.angle;
   const a = a0 + span * frac;
   const p0 = songOrbitPos(a0);
   const p = songOrbitPos(a);
@@ -13294,8 +13289,8 @@ function renderBackPanelConnections() {
   }
 
   // ── Limiter gain reduction meter ──
-  if (BACK_PANEL.limiterValueEl && BACK_PANEL.limiterFill && master?.limiter?.comp) {
-    const reduction = Math.abs(master.limiter.comp.reduction || 0);
+  if (BACK_PANEL.limiterValueEl && BACK_PANEL.limiterFill && engine.master?.limiter?.comp) {
+    const reduction = Math.abs(engine.master.limiter.comp.reduction || 0);
     BACK_PANEL.limiterValueEl.textContent = `${formatNumericValue(reduction, 1)} dB`;
     BACK_PANEL.limiterFill.style.setProperty('--source-level', `${Math.min(1, reduction / 12)}`);
   }
@@ -13404,7 +13399,7 @@ function refreshBackPanelState() {
     (() => {
       const module = BACK_PANEL.audioModules.get('gen-1');
       module.subtitleEl.textContent = `${Math.round(state[0].density)}/s • ${formatNumericValue(state[0].grainSizeMs, 0)}ms`;
-      module.el.classList.toggle('active', started);
+      module.el.classList.toggle('active', engine.started);
     })();
   BACK_PANEL.audioModules.get('input-2') &&
     (() => {
@@ -13421,7 +13416,7 @@ function refreshBackPanelState() {
     (() => {
       const module = BACK_PANEL.audioModules.get('gen-2');
       module.subtitleEl.textContent = `${Math.round(state[1].density)}/s • ${formatNumericValue(state[1].grainSizeMs, 0)}ms`;
-      module.el.classList.toggle('active', started);
+      module.el.classList.toggle('active', engine.started);
     })();
   BACK_PANEL.audioModules.get('gen-3') &&
     (() => {
@@ -13433,8 +13428,8 @@ function refreshBackPanelState() {
   BACK_PANEL.audioModules.get('mix') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('mix');
-      module.subtitleEl.textContent = `${started ? 'front bus live' : 'standby'} • ${lfoMappings.size} mod route${lfoMappings.size === 1 ? '' : 's'}`;
-      module.el.classList.toggle('active', started || GEN3.activeNotes.size > 0);
+      module.subtitleEl.textContent = `${engine.started ? 'front bus live' : 'standby'} • ${lfoMappings.size} mod route${lfoMappings.size === 1 ? '' : 's'}`;
+      module.el.classList.toggle('active', engine.started || GEN3.activeNotes.size > 0);
     })();
   BACK_PANEL.audioModules.get('grainarp') &&
     (() => {
@@ -13505,8 +13500,8 @@ function refreshBackPanelState() {
     (() => {
       const module = BACK_PANEL.audioModules.get('output');
       module.subtitleEl.textContent =
-        started || GEN3.activeNotes.size > 0 ? getGranularStatusText() : 'idle';
-      module.el.classList.toggle('active', started || GEN3.activeNotes.size > 0);
+        engine.started || GEN3.activeNotes.size > 0 ? getGranularStatusText() : 'idle';
+      module.el.classList.toggle('active', engine.started || GEN3.activeNotes.size > 0);
     })();
 
   BACK_PANEL.targetValues.forEach((valueEl, routeKey) => {
@@ -15827,7 +15822,7 @@ function setPanelView(mode) {
   // Self-heal the audible state: entering mastering suspends the main
   // context, which can freeze bus/channel gain ramps mid-flight — re-assert
   // the mix on every view change so nothing stays stuck half-silent.
-  if (audioCtx) {
+  if (engine.ctx) {
     applyInstrumentMixState();
     GEN4.channels.forEach((ch, ci) => gen4SetChannelMuted(ci, ch.muted));
   }
@@ -16101,7 +16096,7 @@ function buildLFOSection(lfoIdx) {
 // Build the global master tail once: every bus output sums into master.sum,
 // which feeds the single limiter and the master output gain → destination.
 function buildMaster() {
-  const ac = audioCtx;
+  const ac = engine.ctx;
   const sum = ac.createGain();
   const limiter = ac.createDynamicsCompressor();
   limiter.threshold.setValueAtTime(LIMITER.threshold, ac.currentTime);
@@ -16126,20 +16121,20 @@ function buildMaster() {
   meterSplit.connect(meterR, 1);
   meterL.connect(meterMerge, 0, 0);
   meterR.connect(meterMerge, 0, 1);
-  master = {
+  engine.master = {
     sum,
     limiter: { comp: limiter, output: masterOut },
     output: meterMerge,
     meter: { split: meterSplit, left: meterL, right: meterR, merge: meterMerge },
   };
-  return master;
+  return engine.master;
 }
 
 // Build one instrument's independent effect chain. Its output sums into the
 // shared master tail. The effect order between input and output is rewired
 // live by reconnectFxChain(busId).
 function buildBusFx(busId) {
-  const ac = audioCtx;
+  const ac = engine.ctx;
   const st = fxStates[busId];
 
   // Stable entry/exit nodes: the generator connects to `input` once, movable
@@ -16220,7 +16215,7 @@ function buildBusFx(busId) {
   };
 
   // This bus's tail sums into the shared master limiter, once and for good.
-  meterMerge.connect(master.sum);
+  meterMerge.connect(engine.master.sum);
 
   reconnectFxChain(busId);
   applyAllFx(busId);
@@ -16289,7 +16284,7 @@ function reconnectFxChain(busId = activeBus) {
 function applyUnitState(id, busId = activeBus) {
   const nodes = fxBuses[busId]?.[id];
   const unit = FX_UNITS_BY_ID.get(id);
-  if (nodes && unit?.applyAll) unit.applyAll(nodes, { ac: audioCtx, state: fxStates[busId][id] });
+  if (nodes && unit?.applyAll) unit.applyAll(nodes, { ac: engine.ctx, state: fxStates[busId][id] });
 }
 
 function applyFx(id, key, val, busId = activeBus) {
@@ -16304,21 +16299,21 @@ function applyFx(id, key, val, busId = activeBus) {
     return;
   }
   FX_UNITS_BY_ID.get(id)?.apply?.(nodes, key, val, {
-    ac: audioCtx,
+    ac: engine.ctx,
     state: fxStates[busId][id],
   });
 }
 
 // Apply one master-limiter parameter (the limiter is global, not per-bus).
 function applyLimiter(key, val) {
-  if (!master?.limiter) return;
-  const t = audioCtx.currentTime;
-  if (key === 'threshold') master.limiter.comp.threshold.setTargetAtTime(val, t, 0.02);
-  if (key === 'attack') master.limiter.comp.attack.setTargetAtTime(val, t, 0.02);
-  if (key === 'release') master.limiter.comp.release.setTargetAtTime(val, t, 0.02);
-  if (key === 'ratio') master.limiter.comp.ratio.setTargetAtTime(val, t, 0.02);
-  if (key === 'knee') master.limiter.comp.knee.setTargetAtTime(val, t, 0.02);
-  if (key === 'output') master.limiter.output.gain.setTargetAtTime(val, t, 0.02);
+  if (!engine.master?.limiter) return;
+  const t = engine.ctx.currentTime;
+  if (key === 'threshold') engine.master.limiter.comp.threshold.setTargetAtTime(val, t, 0.02);
+  if (key === 'attack') engine.master.limiter.comp.attack.setTargetAtTime(val, t, 0.02);
+  if (key === 'release') engine.master.limiter.comp.release.setTargetAtTime(val, t, 0.02);
+  if (key === 'ratio') engine.master.limiter.comp.ratio.setTargetAtTime(val, t, 0.02);
+  if (key === 'knee') engine.master.limiter.comp.knee.setTargetAtTime(val, t, 0.02);
+  if (key === 'output') engine.master.limiter.output.gain.setTargetAtTime(val, t, 0.02);
 }
 
 function applyLimiterAll() {
@@ -16483,7 +16478,7 @@ function applyPreset(preset, { resetSources = true } = {}) {
         if (mode !== 'file' && mode !== 'mic') return;
         getSourceState(genIdx).mode = mode;
         refreshSourceModeUI(genIdx);
-        if (node) syncGranularSourceState(genIdx);
+        if (engine.node) syncGranularSourceState(genIdx);
       });
       if (!anyMicSourceSelected()) disconnectGranularInput({ stopTracks: true });
     }
@@ -16871,7 +16866,7 @@ function captureExportAudioBinary() {
       audio[`gen${genIdx}`] = {
         mode: 'file',
         samples: addSamples(source.bufferData),
-        sampleRate: audioCtx?.sampleRate || 48000,
+        sampleRate: engine.ctx?.sampleRate || 48000,
         durationSec: source.durationSec,
         fileName: source.fileName,
       };
@@ -17900,24 +17895,24 @@ async function start() {
 async function ensureGranularEngine() {
   await ensureAudioEngine();
   await ensureGranularModule();
-  const isNewNode = !node;
+  const isNewNode = !engine.node;
   if (isNewNode) {
-    node = new AudioWorkletNode(audioCtx, 'granular-processor', {
+    engine.node = new AudioWorkletNode(engine.ctx, 'granular-processor', {
       numberOfInputs: 1,
       numberOfOutputs: 2,
       outputChannelCount: [2, 2],
     });
     // Granular 1 (output 0) and Granular 2 (output 1) feed their own FX buses.
-    node.connect(fxBuses.gen0.input, 0);
-    node.connect(fxBuses.gen1.input, 1);
-    node.port.onmessage = (e) => {
+    engine.node.connect(fxBuses.gen0.input, 0);
+    engine.node.connect(fxBuses.gen1.input, 1);
+    engine.node.port.onmessage = (e) => {
       if (!e.data) return;
       if (e.data.type === 'viz') drawViz(e.data);
       else if (e.data.type === 'frozen-dump') {
         setGenFrozenData(e.data.gen, {
           samples: e.data.buffer,
           frozenAt: e.data.frozenAt || 0,
-          sampleRate: audioCtx?.sampleRate || 48000,
+          sampleRate: engine.ctx?.sampleRate || 48000,
         });
       }
     };
@@ -17930,19 +17925,19 @@ async function ensureGranularEngine() {
     sendParams(0);
     sendParams(1);
   }
-  return node;
+  return engine.node;
 }
 
 function disconnectGranularInput({ stopTracks = false } = {}) {
-  if (granularInputSource) {
+  if (engine.granularInputSource) {
     try {
-      granularInputSource.disconnect();
+      engine.granularInputSource.disconnect();
     } catch (e) {}
-    granularInputSource = null;
+    engine.granularInputSource = null;
   }
-  if (stopTracks && micStream) {
-    micStream.getTracks().forEach((t) => t.stop());
-    micStream = null;
+  if (stopTracks && engine.micStream) {
+    engine.micStream.getTracks().forEach((t) => t.stop());
+    engine.micStream = null;
   }
 }
 
@@ -17951,7 +17946,7 @@ function disconnectGranularInput({ stopTracks = false } = {}) {
 // before the granulator can hear or visualize it.
 function ensureInputGateNode() {
   if (INPUT_GATE.node) return INPUT_GATE.node;
-  const gate = audioCtx.createScriptProcessor(1024, 2, 2);
+  const gate = engine.ctx.createScriptProcessor(1024, 2, 2);
   gate.onaudioprocess = (e) => {
     const inp = e.inputBuffer;
     const out = e.outputBuffer;
@@ -17965,7 +17960,7 @@ function ensureInputGateNode() {
       INPUT_GATE.env = 1;
       return;
     }
-    const sr = audioCtx.sampleRate;
+    const sr = engine.ctx.sampleRate;
     const aCoef = 1 - Math.exp(-1 / Math.max(INPUT_GATE.attackMs * 0.001 * sr, 1));
     const rCoef = 1 - Math.exp(-1 / Math.max(INPUT_GATE.releaseMs * 0.001 * sr, 1));
     const thr = INPUT_GATE.threshold;
@@ -17983,14 +17978,14 @@ function ensureInputGateNode() {
     }
     INPUT_GATE.env = env;
   };
-  gate.connect(node);
+  gate.connect(engine.node);
   INPUT_GATE.node = gate;
   return gate;
 }
 
 async function ensureMicInput({ forceReconnect = false } = {}) {
-  if (!node) await ensureGranularEngine();
-  if (granularInputSource && micStream && !forceReconnect) return;
+  if (!engine.node) await ensureGranularEngine();
+  if (engine.granularInputSource && engine.micStream && !forceReconnect) return;
   disconnectGranularInput({ stopTracks: true });
   const audioConstraints = {
     echoCancellation: false,
@@ -18000,10 +17995,10 @@ async function ensureMicInput({ forceReconnect = false } = {}) {
   if (INPUT_SOURCE.selectedId && INPUT_SOURCE.selectedId !== 'default') {
     audioConstraints.deviceId = { exact: INPUT_SOURCE.selectedId };
   }
-  micStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-  granularInputSource = audioCtx.createMediaStreamSource(micStream);
-  granularInputSource.connect(ensureInputGateNode());
-  const activeDeviceId = micStream.getAudioTracks()[0]?.getSettings?.().deviceId;
+  engine.micStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+  engine.granularInputSource = engine.ctx.createMediaStreamSource(engine.micStream);
+  engine.granularInputSource.connect(ensureInputGateNode());
+  const activeDeviceId = engine.micStream.getAudioTracks()[0]?.getSettings?.().deviceId;
   if (activeDeviceId && INPUT_SOURCE.devices.some((device) => device.deviceId === activeDeviceId)) {
     INPUT_SOURCE.selectedId = activeDeviceId;
   }
@@ -18011,21 +18006,21 @@ async function ensureMicInput({ forceReconnect = false } = {}) {
 }
 
 async function syncGranularSourceState(genIdx) {
-  if (!node) return;
+  if (!engine.node) return;
   const source = getSourceState(genIdx);
   if (source.mode === 'file') {
     // No data yet → a silent stub, so the worklet never falls back to the
     // live input while the generator claims to be a file source.
     const workletBuffer = source.bufferData ? source.bufferData.slice() : new Float32Array(2048);
-    node.port.postMessage({ type: 'set-gen-source-buffer', gen: genIdx, buffer: workletBuffer }, [
+    engine.node.port.postMessage({ type: 'set-gen-source-buffer', gen: genIdx, buffer: workletBuffer }, [
       workletBuffer.buffer,
     ]);
   } else {
-    node.port.postMessage({ type: 'set-gen-source-mode', gen: genIdx, mode: 'live' });
+    engine.node.port.postMessage({ type: 'set-gen-source-mode', gen: genIdx, mode: 'live' });
     // Reinstate a persisted frozen take into the worklet's freeze buffer.
     if (source.frozenData && state[genIdx].freeze) {
       const buf = source.frozenData.samples.slice();
-      node.port.postMessage(
+      engine.node.port.postMessage(
         { type: 'restore-frozen', gen: genIdx, buffer: buf, frozenAt: source.frozenData.frozenAt },
         [buf.buffer],
       );
@@ -18034,7 +18029,7 @@ async function syncGranularSourceState(genIdx) {
 }
 
 async function syncGranularSourceStates() {
-  if (!node) return;
+  if (!engine.node) return;
   for (let genIdx = 0; genIdx < 2; genIdx++) {
     await syncGranularSourceState(genIdx);
   }
@@ -18050,7 +18045,7 @@ async function setGeneratorSourceMode(genIdx, mode) {
     setSourceDurationSec(genIdx, source.bufferData ? source.durationSec : LIVE_SOURCE_SECONDS);
     refreshSourceModeUI(genIdx);
     if (!source.bufferData) setStatus('file source — drop a .wav on the panel');
-    if (source.bufferData || node) {
+    if (source.bufferData || engine.node) {
       await ensureGranularEngine();
       await syncGranularSourceState(genIdx);
     }
@@ -18089,7 +18084,7 @@ async function loadGranularFile(genIdx, file) {
     setStatus(`loading ${file.name}…`);
     await ensureGranularEngine();
     const bytes = await file.arrayBuffer();
-    const decoded = await audioCtx.decodeAudioData(bytes);
+    const decoded = await engine.ctx.decodeAudioData(bytes);
     const mono = audioBufferToMono(decoded);
     const source = getSourceState(genIdx);
     source.mode = 'file';
@@ -18119,8 +18114,8 @@ function stop() {
   stopGen4Sequencer();
   GEN4.nodes = null;
   disconnectGranularInput({ stopTracks: true });
-  if (audioCtx) audioCtx.close();
-  audioCtx = node = master = null;
+  if (engine.ctx) engine.ctx.close();
+  engine.ctx = engine.node = engine.master = null;
   FX_BUS_IDS.forEach((id) => (fxBuses[id] = null));
   granularModulePromise = null;
   bitReducerModulePromise = null;
@@ -18129,7 +18124,7 @@ function stop() {
   grainArpModulePromise = null;
   pitchTremoloModulePromise = null;
   autotuneModulePromise = null;
-  started = false;
+  engine.started = false;
 
   // Reset freeze state for both generators.
   clearFreezeStates({ send: false });
@@ -18155,7 +18150,7 @@ function stop() {
 
 getInputSelect()?.addEventListener('change', async (e) => {
   INPUT_SOURCE.selectedId = e.target.value;
-  if (started && anyMicSourceSelected()) {
+  if (engine.started && anyMicSourceSelected()) {
     try {
       setStatus('switching input…');
       await ensureMicInput({ forceReconnect: true });
