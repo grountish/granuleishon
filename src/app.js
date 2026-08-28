@@ -1881,19 +1881,14 @@ const lfoShapeButtons = [new Map(), new Map()];
 const lfoSyncModeControls = [null, null];
 const gen3ShapeButtons = new Map();
 let gen3SusBtnEl = null;
-const filterModeButtons = new Map();
 let delaySyncModeControl = null;
 let pitchTremoloSyncModeControl = null;
-const pitchTremoloShapeButtons = new Map();
 let resonatorNoteModeControl = null;
 let beatRepeatSyncModeControl = null;
 let beatRepeatGridSyncModeControl = null;
 let grainArpGridSyncModeControl = null;
-let grainArpHoldButton = null;
-const grainArpPatternButtons = new Map();
 const fxSectionEls = new Map(); // effect id → its draggable section element
 let fxLimiterSection = null; // the pinned (non-draggable) limiter section
-const delayModeButtons = new Map();
 const genSourceModeButtons = [new Map(), new Map()];
 const POSITION_PARAM = PARAMS.find((p) => p.key === 'positionSec');
 const GRANULAR_SOURCES = [createGranularSourceState(), createGranularSourceState()];
@@ -11261,9 +11256,7 @@ function refreshDelayTimeUI() {
 
 function refreshPitchTremoloUI() {
   refreshSyncedFxControl(TEMPO_SYNCED_FX.pitchTremRate);
-  pitchTremoloShapeButtons.forEach((btn, shape) =>
-    btn.classList.toggle('active', BUS.fx.pitchtrem.shape === shape),
-  );
+  refreshFxModeRow('pitchtrem', 'shape');
 }
 
 function refreshBeatRepeatIntervalUI() {
@@ -11279,13 +11272,11 @@ function refreshGrainArpGridUI() {
 }
 
 function refreshGrainArpPatternUI() {
-  grainArpPatternButtons.forEach((btn, mode) =>
-    btn.classList.toggle('active', BUS.fx.grainarp.pattern === mode),
-  );
+  refreshFxModeRow('grainarp', 'pattern');
 }
 
 function refreshGrainArpHoldUI() {
-  grainArpHoldButton?.classList.toggle('active', !!BUS.fx.grainarp.hold);
+  refreshFxToggle('grainarp', 'hold');
 }
 
 function refreshResonatorFreqUI() {
@@ -11325,7 +11316,7 @@ function refreshResonatorIntervalUI() {
 }
 
 function refreshDelayModeUI() {
-  delayModeButtons.forEach((btn, mode) => btn.classList.toggle('active', BUS.fx.delay.mode === mode));
+  refreshFxModeRow('delay', 'mode');
 }
 
 function refreshLFOControlUI(lfoIdx) {
@@ -15252,7 +15243,7 @@ function refreshFilterUI() {
   ['cutoff', 'q', 'mix'].forEach((key) => {
     fxControlBindings.get(`filter:${key}`)?.setValue(BUS.fx.filter[key]);
   });
-  filterModeButtons.forEach((btn, mode) => btn.classList.toggle('active', BUS.fx.filter.mode === mode));
+  refreshFxModeRow('filter', 'mode');
   emit('state');
 }
 
@@ -16270,16 +16261,73 @@ function buildLimiterSection(container) {
 }
 
 // (Re)build the active bus's reorderable effect sections into #fx-effects.
+// Mode rows and latches declared by a unit — see the modeRows / toggles specs
+// in fx/units/*. One exclusive row per spec, plus any standalone toggles.
+const fxModeButtons = new Map(); // `${unitId}:${key}` -> Map(value -> button)
+
+function refreshFxModeRow(id, key) {
+  fxModeButtons
+    .get(`${id}:${key}`)
+    ?.forEach((btn, value) => btn.classList.toggle('active', BUS.fx[id][key] === value));
+}
+
+function buildFxModeRows(unit, content) {
+  (unit.modeRows || []).forEach((row) => {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'fx-mode-row';
+    const buttons = new Map();
+    row.options.forEach(([value, label]) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'fx-mode-btn' + (BUS.fx[unit.id][row.key] === value ? ' active' : '');
+      btn.textContent = label;
+      if (row.title) btn.title = row.title(label);
+      btn.addEventListener('click', () => {
+        markFxPresetCustom(unit.id);
+        BUS.fx[unit.id][row.key] = value;
+        applyUnitState(unit.id);
+        refreshFxModeRow(unit.id, row.key);
+        emit('state');
+      });
+      buttons.set(value, btn);
+      rowEl.appendChild(btn);
+    });
+    fxModeButtons.set(`${unit.id}:${row.key}`, buttons);
+    content.appendChild(rowEl);
+  });
+
+  (unit.toggles || []).forEach((toggle) => {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'fx-mode-row';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'fx-mode-btn' + (BUS.fx[unit.id][toggle.key] ? ' active' : '');
+    btn.textContent = toggle.label;
+    if (toggle.title) btn.title = toggle.title;
+    btn.addEventListener('click', () => {
+      if (toggle.marksPresetCustom !== false) markFxPresetCustom(unit.id);
+      BUS.fx[unit.id][toggle.key] = !BUS.fx[unit.id][toggle.key];
+      applyUnitState(unit.id);
+      refreshFxToggle(unit.id, toggle.key);
+      emit('state');
+    });
+    fxModeButtons.set(`${unit.id}:${toggle.key}`, new Map([[true, btn]]));
+    rowEl.appendChild(btn);
+    content.appendChild(rowEl);
+  });
+}
+
+function refreshFxToggle(id, key) {
+  fxModeButtons.get(`${id}:${key}`)?.get(true)?.classList.toggle('active', !!BUS.fx[id][key]);
+}
+
 function renderActiveBusFx() {
   const host = document.getElementById('fx-effects');
   if (!host) return;
   host.innerHTML = '';
   fxControlBindings.clear();
   fxSectionEls.clear();
-  filterModeButtons.clear();
-  delayModeButtons.clear();
-  grainArpPatternButtons.clear();
-  pitchTremoloShapeButtons.clear();
+  fxModeButtons.clear();
   pitchTremoloSyncModeControl = null;
   DEFAULT_FX_ORDER.forEach((effectId) => fxPresetSelects.delete(effectId));
 
@@ -16311,119 +16359,11 @@ function renderActiveBusFx() {
     header.insertBefore(powerBtn, header.firstChild);
     syncPower();
 
-    if (def.id === 'filter') {
-      const modeRow = document.createElement('div');
-      modeRow.className = 'fx-mode-row';
-      [
-        ['lowpass', 'LP'],
-        ['highpass', 'HP'],
-        ['bandpass', 'BP'],
-      ].forEach(([mode, label]) => {
-        const btn = document.createElement('button');
-        btn.className = 'fx-mode-btn' + (BUS.fx.filter.mode === mode ? ' active' : '');
-        btn.textContent = label;
-        btn.addEventListener('click', () => {
-          markFxPresetCustom(def.id);
-          BUS.fx.filter.mode = mode;
-          applyUnitState('filter');
-          refreshFilterUI();
-          emit('state');
-        });
-        filterModeButtons.set(mode, btn);
-        modeRow.appendChild(btn);
-      });
-      content.appendChild(modeRow);
-    }
 
-    if (def.id === 'delay') {
-      const modeRow = document.createElement('div');
-      modeRow.className = 'fx-mode-row';
-      [
-        ['stereo', 'Stereo'],
-        ['pingpong', 'PingPong'],
-      ].forEach(([mode, label]) => {
-        const btn = document.createElement('button');
-        btn.className = 'fx-mode-btn' + (BUS.fx.delay.mode === mode ? ' active' : '');
-        btn.type = 'button';
-        btn.textContent = label;
-        btn.addEventListener('click', () => {
-          markFxPresetCustom(def.id);
-          BUS.fx.delay.mode = mode;
-          applyUnitState('delay');
-          refreshDelayModeUI();
-          emit('state');
-        });
-        delayModeButtons.set(mode, btn);
-        modeRow.appendChild(btn);
-      });
-      content.appendChild(modeRow);
-    }
 
-    if (def.id === 'grainarp') {
-      const modeRow = document.createElement('div');
-      modeRow.className = 'fx-mode-row';
-      GRAINARP_PATTERNS.forEach(([mode, label]) => {
-        const btn = document.createElement('button');
-        btn.className = 'fx-mode-btn' + (BUS.fx.grainarp.pattern === mode ? ' active' : '');
-        btn.type = 'button';
-        btn.textContent = label;
-        btn.addEventListener('click', () => {
-          markFxPresetCustom(def.id);
-          BUS.fx.grainarp.pattern = mode;
-          applyUnitState('grainarp');
-          refreshGrainArpPatternUI();
-          emit('state');
-        });
-        grainArpPatternButtons.set(mode, btn);
-        modeRow.appendChild(btn);
-      });
-      content.appendChild(modeRow);
 
-      // HOLD latch — freezes the capture ring so the arp loops the latched
-      // material. A performance gesture, so it never marks the preset custom.
-      const holdRow = document.createElement('div');
-      holdRow.className = 'fx-mode-row';
-      grainArpHoldButton = document.createElement('button');
-      grainArpHoldButton.type = 'button';
-      grainArpHoldButton.className = 'fx-mode-btn' + (BUS.fx.grainarp.hold ? ' active' : '');
-      grainArpHoldButton.textContent = 'HOLD';
-      grainArpHoldButton.title = 'Freeze the capture ring — the arp keeps looping what it holds';
-      grainArpHoldButton.addEventListener('click', () => {
-        BUS.fx.grainarp.hold = !BUS.fx.grainarp.hold;
-        applyUnitState('grainarp');
-        refreshGrainArpHoldUI();
-        emit('state');
-      });
-      holdRow.appendChild(grainArpHoldButton);
-      content.appendChild(holdRow);
-    }
 
-    if (def.id === 'pitchtrem') {
-      const shapeRow = document.createElement('div');
-      shapeRow.className = 'fx-mode-row';
-      [
-        ['sine', 'SIN'],
-        ['tri', 'TRI'],
-        ['square', 'SQR'],
-        ['saw', 'SAW'],
-      ].forEach(([shape, label]) => {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'fx-mode-btn' + (BUS.fx.pitchtrem.shape === shape ? ' active' : '');
-        btn.textContent = label;
-        btn.title = `${label} waveform — shared by pitch sweep and auto-pan`;
-        btn.addEventListener('click', () => {
-          markFxPresetCustom(def.id);
-          BUS.fx.pitchtrem.shape = shape;
-          applyUnitState('pitchtrem');
-          refreshPitchTremoloUI();
-          emit('state');
-        });
-        pitchTremoloShapeButtons.set(shape, btn);
-        shapeRow.appendChild(btn);
-      });
-      content.appendChild(shapeRow);
-    }
+    buildFxModeRows(def, content);
 
     if (def.id === 'autotune') {
       const scaleRow = document.createElement('div');

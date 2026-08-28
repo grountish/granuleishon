@@ -18,6 +18,16 @@ export default {
   id: 'grainarp',
   label: 'Grain Arp',
   idleBypass: false,
+  modeRows: [{ key: 'pattern', options: GRAINARP_PATTERNS }],
+  // HOLD is a performance latch, so it never marks the preset custom.
+  toggles: [
+    {
+      key: 'hold',
+      label: 'HOLD',
+      title: 'Freeze the capture ring — the arp keeps looping what it holds',
+      marksPresetCustom: false,
+    },
+  ],
   params: [
     { key: 'grid', label: 'Grid', min: 10, max: 500, step: 1, value: 250, unit: 'ms' },
     { key: 'chance', label: 'Activity', min: 0, max: 1, step: 0.01, value: 1, unit: '' },

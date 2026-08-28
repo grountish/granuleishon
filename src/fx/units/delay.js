@@ -12,6 +12,15 @@ export default {
   id: 'delay',
   label: 'Delay',
   idleBypass: false,
+  modeRows: [
+    {
+      key: 'mode',
+      options: [
+        ['stereo', 'Stereo'],
+        ['pingpong', 'PingPong'],
+      ],
+    },
+  ],
   params: [
     { key: 'time', label: 'Time', min: 0, max: 1, step: 0.01, value: 0.3, unit: 's' },
     { key: 'feedback', label: 'Feedback', min: 0, max: 0.95, step: 0.01, value: 0.35, unit: '' },

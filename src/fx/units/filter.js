@@ -7,6 +7,17 @@ export default {
   id: 'filter',
   label: 'Filter',
   idleBypass: true,
+  // One row of exclusive mode buttons, bound to state.mode.
+  modeRows: [
+    {
+      key: 'mode',
+      options: [
+        ['lowpass', 'LP'],
+        ['highpass', 'HP'],
+        ['bandpass', 'BP'],
+      ],
+    },
+  ],
   params: [
     { key: 'cutoff', label: 'Cutoff', min: 80, max: 14000, step: 10, unit: 'Hz' },
     { key: 'q', label: 'Resonance', min: 0.1, max: 20, step: 0.1, unit: '' },

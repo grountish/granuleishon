@@ -13,6 +13,18 @@ export default {
   id: 'pitchtrem',
   label: 'Pitch + Auto Pan',
   idleBypass: true,
+  modeRows: [
+    {
+      key: 'shape',
+      options: [
+        ['sine', 'SIN'],
+        ['tri', 'TRI'],
+        ['square', 'SQR'],
+        ['saw', 'SAW'],
+      ],
+      title: (label) => `${label} waveform — shared by pitch sweep and auto-pan`,
+    },
+  ],
   params: [
     { key: 'pitch', label: 'Pitch center', min: -24, max: 24, step: 1, value: 0, unit: 'st' },
     { key: 'pitchDepth', label: 'Pitch sweep', min: 0, max: 24, step: 1, value: 0, unit: 'st' },
