@@ -1,6 +1,8 @@
 // Filter — parameter definitions, defaults and factory presets.
 // fx/registry.js composes these into the tables the app reads.
 
+import { formatNumericValue } from '../../core/util.js';
+
 export default {
   id: 'filter',
   label: 'Filter',
@@ -33,5 +35,9 @@ export default {
     input.connect(biquad);
     biquad.connect(wet);
     return { biquad };
+  },
+  // Back-panel line for this unit.
+  subtitle(st) {
+    return `${st.mode.toUpperCase()} • ${formatNumericValue(st.cutoff, 0)}Hz`;
   },
 };

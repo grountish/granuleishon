@@ -22,3 +22,10 @@ export function formatControlValue(spec, value) {
 export function formatMeterHz(f) {
   return f < 1000 ? `${Math.round(f)} Hz` : `${(f / 1000).toFixed(f >= 10000 ? 1 : 2)} kHz`;
 }
+
+// Same as formatControlValue, but tolerates a missing spec or a
+// non-numeric value — back-panel readouts run before everything is built.
+export function formatBackValue(spec, value) {
+  if (!spec || typeof value !== 'number' || Number.isNaN(value)) return 'n/a';
+  return formatControlValue(spec, value);
+}

@@ -64,6 +64,9 @@ export function makeReverbIR(ac, rv) {
   return buf;
 }
 
+import { formatBackValue } from '../../core/util.js';
+import { getFxParamDef } from '../registry.js';
+
 export default {
   id: 'reverb',
   label: 'Reverb',
@@ -118,5 +121,9 @@ export default {
     damp.connect(conv);
     conv.connect(wet);
     return { pre, hp, damp, conv };
+  },
+  // Back-panel line for this unit.
+  subtitle(st) {
+    return `${formatBackValue(getFxParamDef('reverb', 'mix'), st.mix)} wet`;
   },
 };

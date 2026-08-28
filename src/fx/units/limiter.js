@@ -1,6 +1,8 @@
 // Limiter — parameter definitions, defaults and factory presets.
 // fx/registry.js composes these into the tables the app reads.
 
+import { formatNumericValue } from '../../core/util.js';
+
 export default {
   id: 'limiter',
   label: 'Limiter',
@@ -34,4 +36,9 @@ export default {
       values: { threshold: -18, attack: 0.001, release: 0.06, ratio: 40, knee: 0, output: 0.95 },
     },
   ],
+  // Back-panel line for this unit.
+  subtitle(st) {
+    return `${formatNumericValue(st.ratio, 1)}:1 • ${formatNumericValue(st.threshold, 1)}dB`;
+  },
+  isActive: (st) => true,
 };

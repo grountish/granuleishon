@@ -11,6 +11,9 @@ export const GRAINARP_PATTERNS = [
   ['rand', 'RND'],
 ];
 
+import { formatBackValue } from '../../core/util.js';
+import { getFxParamDef } from '../registry.js';
+
 export default {
   id: 'grainarp',
   label: 'Grain Arp',
@@ -156,5 +159,9 @@ export default {
     input.connect(node);
     node.connect(wet);
     return { node };
+  },
+  // Back-panel line for this unit.
+  subtitle(st) {
+    return `${st.hold ? 'HOLD • ' : ''}${st.pattern.toUpperCase()} • ${formatBackValue(getFxParamDef('grainarp', 'mix'), st.mix)} wet`;
   },
 };

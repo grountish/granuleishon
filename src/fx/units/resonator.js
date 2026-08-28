@@ -3,6 +3,10 @@
 
 import { clamp } from '../../core/util.js';
 
+import { formatBackValue, formatNumericValue } from '../../core/util.js';
+import { formatMidiNote } from '../../core/theory.js';
+import { getFxParamDef } from '../registry.js';
+
 export default {
   id: 'resonator',
   label: 'Resonator',
@@ -155,5 +159,9 @@ export default {
     input.connect(node);
     node.connect(wet);
     return { node };
+  },
+  // Back-panel line for this unit.
+  subtitle(st) {
+    return `${st.noteMode ? formatMidiNote(st.note) : `${formatNumericValue(st.freq, 0)}Hz`} • ${formatBackValue(getFxParamDef('resonator', 'mix'), st.mix)} wet`;
   },
 };

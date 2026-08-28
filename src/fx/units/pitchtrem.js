@@ -5,6 +5,10 @@ import { clamp } from '../../core/util.js';
 
 const SHAPES = ['sine', 'tri', 'square', 'saw'];
 
+import { formatBackValue, formatNumericValue } from '../../core/util.js';
+import { getFxParamDef } from '../registry.js';
+import { getTempoStep } from '../../core/tempo.js';
+
 export default {
   id: 'pitchtrem',
   label: 'Pitch + Auto Pan',
@@ -135,5 +139,12 @@ export default {
     input.connect(node);
     node.connect(wet);
     return { node };
+  },
+  // Back-panel line for this unit.
+  subtitle(st) {
+    const rate = st.sync
+    ? getTempoStep(st.syncIndex).label
+    : `${formatNumericValue(st.rate, 2)}Hz`;
+    return `${st.pitch >= 0 ? '+' : ''}${formatNumericValue(st.pitch, 0)}st ±${formatNumericValue(st.pitchDepth, 0)} • ${rate} • ${formatBackValue(getFxParamDef('pitchtrem', 'mix'), st.mix)} wet`;
   },
 };

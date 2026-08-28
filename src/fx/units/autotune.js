@@ -4,6 +4,10 @@
 import { clamp } from '../../core/util.js';
 import { computeAutotuneMask } from '../../core/theory.js';
 
+import { AUTOTUNE_SCALE_OPTIONS, NOTE_NAMES } from '../../core/theory.js';
+import { formatBackValue, formatNumericValue } from '../../core/util.js';
+import { getFxParamDef } from '../registry.js';
+
 export default {
   id: 'autotune',
   label: 'Autotune',
@@ -54,5 +58,11 @@ export default {
     input.connect(node);
     node.connect(wet);
     return { node };
+  },
+  // Back-panel line for this unit.
+  subtitle(st) {
+    const scaleLabel =
+    AUTOTUNE_SCALE_OPTIONS.find(([id]) => id === st.scale)?.[1] || st.scale;
+    return `${NOTE_NAMES[st.root] || 'C'} ${scaleLabel} • ${formatNumericValue(st.speed, 0)}ms • ${formatBackValue(getFxParamDef('autotune', 'mix'), st.mix)} wet`;
   },
 };

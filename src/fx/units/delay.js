@@ -5,6 +5,9 @@ import { clamp } from '../../core/util.js';
 
 export const MAX_DELAY_SECONDS = 16;
 
+import { formatBackValue } from '../../core/util.js';
+import { getFxParamDef } from '../registry.js';
+
 export default {
   id: 'delay',
   label: 'Delay',
@@ -131,5 +134,9 @@ export default {
     pingMerge.connect(pingWetMode);
     pingWetMode.connect(wet);
     return { tap, fb, hpf, normalSend, normalFeedbackMode, normalWetMode, pingInputMode, pingL, pingR, pingLFb, pingRFb, pingLFeedbackMode, pingRFeedbackMode, pingLHpf, pingRHpf, pingWetMode };
+  },
+  // Back-panel line for this unit.
+  subtitle(st) {
+    return `${st.mode === 'pingpong' ? 'PINGPONG' : 'STEREO'} • ${formatBackValue(getFxParamDef('delay', 'mix'), st.mix)} wet`;
   },
 };

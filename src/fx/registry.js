@@ -95,3 +95,8 @@ export function buildUnitNodes(unit, ac, state, base) {
   const own = unit.build(ac, state, { input, wet, base }) || {};
   return { ...own, in: input, dry, wet, out };
 }
+
+// One unit's parameter definition, by id and key.
+export function getFxParamDef(id, key) {
+  return FX_DEFS.find((def) => def.id === id)?.params.find((param) => param.key === key) || null;
+}

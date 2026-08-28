@@ -1,6 +1,9 @@
 // Bit Reduce — parameter definitions, defaults and factory presets.
 // fx/registry.js composes these into the tables the app reads.
 
+import { formatBackValue, formatNumericValue } from '../../core/util.js';
+import { getFxParamDef } from '../registry.js';
+
 export default {
   id: 'bitreduce',
   label: 'Bit Reduce',
@@ -38,5 +41,9 @@ export default {
     input.connect(node);
     node.connect(wet);
     return { node };
+  },
+  // Back-panel line for this unit.
+  subtitle(st) {
+    return `${formatNumericValue(st.bits, 0)} bits • ${formatBackValue(getFxParamDef('bitreduce', 'mix'), st.mix)} wet`;
   },
 };

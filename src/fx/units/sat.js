@@ -13,6 +13,9 @@ export function makeSatCurve(drive) {
   return curve;
 }
 
+import { formatBackValue } from '../../core/util.js';
+import { getFxParamDef } from '../registry.js';
+
 export default {
   id: 'sat',
   label: 'Saturation',
@@ -42,4 +45,9 @@ export default {
     shaper.connect(wet);
     return { shaper };
   },
+  // Back-panel line for this unit.
+  subtitle(st) {
+    return `${formatBackValue(getFxParamDef('sat', 'drive'), st.drive)} drive`;
+  },
+  isActive: (st) => st.mix > 0.001 || st.drive > 0.001,
 };

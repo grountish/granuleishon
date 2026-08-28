@@ -6,6 +6,7 @@ import {
   quantize,
   formatNumericValue,
   formatControlValue,
+  formatBackValue,
   formatMeterHz,
 } from './core/util.js';
 import { rbjHighpass } from './core/dsp.js';
@@ -65,6 +66,7 @@ import {
 import { GRAINARP_PATTERNS } from './fx/units/grainarp.js';
 import { MAX_DELAY_SECONDS } from './fx/units/delay.js';
 import {
+  getFxParamDef,
   FX_UNITS,
   FX_UNITS_BY_ID,
   buildUnitNodes,
@@ -11473,9 +11475,6 @@ function initTempoDrag() {
   tempoBox.addEventListener('pointercancel', endDrag);
 }
 
-function getFxParamDef(id, key) {
-  return FX_DEFS.find((def) => def.id === id)?.params.find((param) => param.key === key) || null;
-}
 
 function getGen3ParamLabel(key) {
   if (key === 'gain') return 'Gain';
@@ -11486,10 +11485,6 @@ function getGen3ParamLabel(key) {
   return key;
 }
 
-function formatBackValue(spec, value) {
-  if (!spec || typeof value !== 'number' || Number.isNaN(value)) return 'n/a';
-  return formatControlValue(spec, value);
-}
 
 function getSelectedInputLabel() {
   const idx = INPUT_SOURCE.devices.findIndex(
@@ -12384,71 +12379,17 @@ function refreshBackPanelState() {
       module.subtitleEl.textContent = `${engine.started ? 'front bus live' : 'standby'} • ${lfoMappings.size} mod route${lfoMappings.size === 1 ? '' : 's'}`;
       module.el.classList.toggle('active', engine.started || GEN3.activeNotes.size > 0);
     })();
-  BACK_PANEL.audioModules.get('grainarp') &&
-    (() => {
-      const module = BACK_PANEL.audioModules.get('grainarp');
-      module.subtitleEl.textContent = `${BUS.fx.grainarp.hold ? 'HOLD • ' : ''}${BUS.fx.grainarp.pattern.toUpperCase()} • ${formatBackValue(getFxParamDef('grainarp', 'mix'), BUS.fx.grainarp.mix)} wet`;
-      module.el.classList.toggle('active', BUS.fx.grainarp.mix > 0.001);
-    })();
-  BACK_PANEL.audioModules.get('pitchtrem') &&
-    (() => {
-      const module = BACK_PANEL.audioModules.get('pitchtrem');
-      const rate = BUS.fx.pitchtrem.sync
-        ? getTempoStep(BUS.fx.pitchtrem.syncIndex).label
-        : `${formatNumericValue(BUS.fx.pitchtrem.rate, 2)}Hz`;
-      module.subtitleEl.textContent = `${BUS.fx.pitchtrem.pitch >= 0 ? '+' : ''}${formatNumericValue(BUS.fx.pitchtrem.pitch, 0)}st ±${formatNumericValue(BUS.fx.pitchtrem.pitchDepth, 0)} • ${rate} • ${formatBackValue(getFxParamDef('pitchtrem', 'mix'), BUS.fx.pitchtrem.mix)} wet`;
-      module.el.classList.toggle('active', BUS.fx.pitchtrem.mix > 0.001);
-    })();
-  BACK_PANEL.audioModules.get('autotune') &&
-    (() => {
-      const module = BACK_PANEL.audioModules.get('autotune');
-      const scaleLabel =
-        AUTOTUNE_SCALE_OPTIONS.find(([id]) => id === BUS.fx.autotune.scale)?.[1] || BUS.fx.autotune.scale;
-      module.subtitleEl.textContent = `${NOTE_NAMES[BUS.fx.autotune.root] || 'C'} ${scaleLabel} • ${formatNumericValue(BUS.fx.autotune.speed, 0)}ms • ${formatBackValue(getFxParamDef('autotune', 'mix'), BUS.fx.autotune.mix)} wet`;
-      module.el.classList.toggle('active', BUS.fx.autotune.mix > 0.001);
-    })();
-  BACK_PANEL.audioModules.get('delay') &&
-    (() => {
-      const module = BACK_PANEL.audioModules.get('delay');
-      module.subtitleEl.textContent = `${BUS.fx.delay.mode === 'pingpong' ? 'PINGPONG' : 'STEREO'} • ${formatBackValue(getFxParamDef('delay', 'mix'), BUS.fx.delay.mix)} wet`;
-      module.el.classList.toggle('active', BUS.fx.delay.mix > 0.001);
-    })();
-  BACK_PANEL.audioModules.get('filter') &&
-    (() => {
-      const module = BACK_PANEL.audioModules.get('filter');
-      module.subtitleEl.textContent = `${BUS.fx.filter.mode.toUpperCase()} • ${formatNumericValue(BUS.fx.filter.cutoff, 0)}Hz`;
-      module.el.classList.toggle('active', BUS.fx.filter.mix > 0.001);
-    })();
-  BACK_PANEL.audioModules.get('resonator') &&
-    (() => {
-      const module = BACK_PANEL.audioModules.get('resonator');
-      module.subtitleEl.textContent = `${BUS.fx.resonator.noteMode ? formatMidiNote(BUS.fx.resonator.note) : `${formatNumericValue(BUS.fx.resonator.freq, 0)}Hz`} • ${formatBackValue(getFxParamDef('resonator', 'mix'), BUS.fx.resonator.mix)} wet`;
-      module.el.classList.toggle('active', BUS.fx.resonator.mix > 0.001);
-    })();
-  BACK_PANEL.audioModules.get('bitreduce') &&
-    (() => {
-      const module = BACK_PANEL.audioModules.get('bitreduce');
-      module.subtitleEl.textContent = `${formatNumericValue(BUS.fx.bitreduce.bits, 0)} bits • ${formatBackValue(getFxParamDef('bitreduce', 'mix'), BUS.fx.bitreduce.mix)} wet`;
-      module.el.classList.toggle('active', BUS.fx.bitreduce.mix > 0.001);
-    })();
-  BACK_PANEL.audioModules.get('sat') &&
-    (() => {
-      const module = BACK_PANEL.audioModules.get('sat');
-      module.subtitleEl.textContent = `${formatBackValue(getFxParamDef('sat', 'drive'), BUS.fx.sat.drive)} drive`;
-      module.el.classList.toggle('active', BUS.fx.sat.mix > 0.001 || BUS.fx.sat.drive > 0.001);
-    })();
-  BACK_PANEL.audioModules.get('reverb') &&
-    (() => {
-      const module = BACK_PANEL.audioModules.get('reverb');
-      module.subtitleEl.textContent = `${formatBackValue(getFxParamDef('reverb', 'mix'), BUS.fx.reverb.mix)} wet`;
-      module.el.classList.toggle('active', BUS.fx.reverb.mix > 0.001);
-    })();
-  BACK_PANEL.audioModules.get('limiter') &&
-    (() => {
-      const module = BACK_PANEL.audioModules.get('limiter');
-      module.subtitleEl.textContent = `${formatNumericValue(LIMITER.ratio, 1)}:1 • ${formatNumericValue(LIMITER.threshold, 1)}dB`;
-      module.el.classList.toggle('active', true);
-    })();
+  // Each rack unit renders its own back-panel line — see fx/units/*.
+  FX_UNITS.forEach((unit) => {
+    const module = BACK_PANEL.audioModules.get(unit.id);
+    if (!module || !unit.subtitle) return;
+    const st = unit.id === 'limiter' ? LIMITER : BUS.fx[unit.id];
+    module.subtitleEl.textContent = unit.subtitle(st);
+    module.el.classList.toggle(
+      'active',
+      unit.isActive ? unit.isActive(st) : (st.mix ?? 0) > 0.001,
+    );
+  });
   BACK_PANEL.audioModules.get('output') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('output');
