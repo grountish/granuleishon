@@ -12,6 +12,7 @@ import { rbjHighpass, rbjLowShelf, rbjPeaking, biquadMagnitudeDb } from './core/
 import { encodeWav } from './render/wav.js';
 import { emit, on } from './core/events.js';
 import { mountMenuAtPointer } from './ui/popover.js';
+import { SYNC_FORMATTERS, syncedControlConfig } from './fx/tempo-sync.js';
 import { UI_VIEW } from './ui/view.js';
 import { LFOS, lfoMappings, STEP_SEQ, BACK_PANEL } from './modulation/state.js';
 import { VIZ } from './visual/state.js';
@@ -8632,39 +8633,44 @@ const LFO_RATE_SYNC_CONTROL = {
   step: 1,
   unit: '',
 };
-const PITCH_TREMOLO_RATE_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'pitchtrem').params.find(
-  (param) => param.key === 'rate',
-);
-const PITCH_TREMOLO_RATE_SYNC_CONTROL = {
-  key: 'rate',
-  label: 'Pan rate',
-  min: 0,
-  max: TEMPO_SYNC_STEPS.length - 1,
-  step: 1,
-  unit: '',
+// Tempo-syncable FX params. Each entry says where the free value, the sync
+// flag and the division index live in that unit's state, which table of
+// divisions it steps through, and how a synced step reads out.
+const TEMPO_SYNCED_FX = {
+  delayTime: { id: 'delay', key: 'time', flag: 'sync', index: 'syncIndex',
+    label: 'Time', steps: TEMPO_SYNC_STEPS, format: 'seconds',
+    mode: () => delaySyncModeControl },
+  pitchTremRate: { id: 'pitchtrem', key: 'rate', flag: 'sync', index: 'syncIndex',
+    label: 'Pan rate', steps: TEMPO_SYNC_STEPS, format: 'hz',
+    mode: () => pitchTremoloSyncModeControl },
+  beatRepeatInterval: { id: 'beatrepeat', key: 'interval', flag: 'sync', index: 'syncIndex',
+    label: 'Interval', steps: TEMPO_SYNC_STEPS, format: 'seconds',
+    mode: () => beatRepeatSyncModeControl },
+  beatRepeatGrid: { id: 'beatrepeat', key: 'grid', flag: 'gridSync', index: 'gridSyncIndex',
+    label: 'Grid', steps: GRAIN_SYNC_STEPS, format: 'grid',
+    mode: () => beatRepeatGridSyncModeControl },
+  grainArpGrid: { id: 'grainarp', key: 'grid', flag: 'gridSync', index: 'gridSyncIndex',
+    label: 'Grid', steps: GRAIN_SYNC_STEPS, format: 'grid',
+    mode: () => grainArpGridSyncModeControl },
 };
-const DELAY_TIME_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'delay').params.find(
-  (param) => param.key === 'time',
-);
-const DELAY_TIME_SYNC_CONTROL = {
-  key: 'time',
-  label: 'Time',
-  min: 0,
-  max: TEMPO_SYNC_STEPS.length - 1,
-  step: 1,
-  unit: '',
-};
-const BEATREPEAT_INTERVAL_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'beatrepeat').params.find(
-  (param) => param.key === 'interval',
-);
-const BEATREPEAT_INTERVAL_SYNC_CONTROL = {
-  key: 'interval',
-  label: 'Interval',
-  min: 0,
-  max: TEMPO_SYNC_STEPS.length - 1,
-  step: 1,
-  unit: '',
-};
+
+// Point one synced control at whichever mode its state is currently in.
+function refreshSyncedFxControl(spec) {
+  const control = fxControlBindings.get(`${spec.id}:${spec.key}`);
+  if (!control) return;
+  const st = BUS.fx[spec.id];
+  const isSync = !!st[spec.flag];
+  const free = getFxParamDef(spec.id, spec.key);
+  control.setConfig(
+    isSync
+      ? { ...syncedControlConfig(spec.key, spec.label, spec.steps), resetValue: st[spec.index] }
+      : { ...free, resetValue: st[spec.key] },
+  );
+  control.setFormatter(isSync ? SYNC_FORMATTERS[spec.format] : null);
+  control.setValue(isSync ? st[spec.index] : st[spec.key]);
+  spec.mode()?.setMode(isSync ? 'sync' : 'free');
+}
+
 const RESONATOR_FREQ_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'resonator').params.find(
   (param) => param.key === 'freq',
 );
@@ -8676,28 +8682,6 @@ const RESONATOR_FREQ_NOTE_CONTROL = {
   label: 'Note',
   min: RESONATOR_NOTE_MIN,
   max: RESONATOR_NOTE_MAX,
-  step: 1,
-  unit: '',
-};
-const BEATREPEAT_GRID_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'beatrepeat').params.find(
-  (param) => param.key === 'grid',
-);
-const BEATREPEAT_GRID_SYNC_CONTROL = {
-  key: 'grid',
-  label: 'Grid',
-  min: 0,
-  max: GRAIN_SYNC_STEPS.length - 1,
-  step: 1,
-  unit: '',
-};
-const GRAINARP_GRID_FREE_CONTROL = FX_DEFS.find((def) => def.id === 'grainarp').params.find(
-  (param) => param.key === 'grid',
-);
-const GRAINARP_GRID_SYNC_CONTROL = {
-  key: 'grid',
-  label: 'Grid',
-  min: 0,
-  max: GRAIN_SYNC_STEPS.length - 1,
   step: 1,
   unit: '',
 };
@@ -12036,93 +12020,26 @@ window.addEventListener('pointerdown', (e) => {
 });
 
 function refreshDelayTimeUI() {
-  const control = fxControlBindings.get('delay:time');
-  if (!control) return;
-  const isSync = !!BUS.fx.delay.sync;
-  control.setConfig(
-    isSync
-      ? { ...DELAY_TIME_SYNC_CONTROL, resetValue: BUS.fx.delay.syncIndex }
-      : { ...DELAY_TIME_FREE_CONTROL, resetValue: BUS.fx.delay.time },
-  );
-  control.setFormatter(
-    isSync
-      ? (v) => formatTempoSyncValue(v, (step) => formatTempoSeconds(beatsToSeconds(step.beats)))
-      : null,
-  );
-  control.setValue(isSync ? BUS.fx.delay.syncIndex : BUS.fx.delay.time);
-  delaySyncModeControl?.setMode(isSync ? 'sync' : 'free');
+  refreshSyncedFxControl(TEMPO_SYNCED_FX.delayTime);
 }
 
 function refreshPitchTremoloUI() {
-  const control = fxControlBindings.get('pitchtrem:rate');
-  if (control) {
-    const isSync = !!BUS.fx.pitchtrem.sync;
-    control.setConfig(
-      isSync
-        ? { ...PITCH_TREMOLO_RATE_SYNC_CONTROL, resetValue: BUS.fx.pitchtrem.syncIndex }
-        : { ...PITCH_TREMOLO_RATE_FREE_CONTROL, resetValue: BUS.fx.pitchtrem.rate },
-    );
-    control.setFormatter(
-      isSync
-        ? (v) =>
-            formatTempoSyncValue(
-              v,
-              (step) => `${formatNumericValue(1 / beatsToSeconds(step.beats), 2)}Hz`,
-            )
-        : null,
-    );
-    control.setValue(isSync ? BUS.fx.pitchtrem.syncIndex : BUS.fx.pitchtrem.rate);
-    pitchTremoloSyncModeControl?.setMode(isSync ? 'sync' : 'free');
-  }
+  refreshSyncedFxControl(TEMPO_SYNCED_FX.pitchTremRate);
   pitchTremoloShapeButtons.forEach((btn, shape) =>
     btn.classList.toggle('active', BUS.fx.pitchtrem.shape === shape),
   );
 }
 
 function refreshBeatRepeatIntervalUI() {
-  const control = fxControlBindings.get('beatrepeat:interval');
-  if (!control) return;
-  const isSync = !!BUS.fx.beatrepeat.sync;
-  control.setConfig(
-    isSync
-      ? { ...BEATREPEAT_INTERVAL_SYNC_CONTROL, resetValue: BUS.fx.beatrepeat.syncIndex }
-      : { ...BEATREPEAT_INTERVAL_FREE_CONTROL, resetValue: BUS.fx.beatrepeat.interval },
-  );
-  control.setFormatter(
-    isSync
-      ? (v) => formatTempoSyncValue(v, (step) => formatTempoSeconds(beatsToSeconds(step.beats)))
-      : null,
-  );
-  control.setValue(isSync ? BUS.fx.beatrepeat.syncIndex : BUS.fx.beatrepeat.interval);
-  beatRepeatSyncModeControl?.setMode(isSync ? 'sync' : 'free');
+  refreshSyncedFxControl(TEMPO_SYNCED_FX.beatRepeatInterval);
 }
 
 function refreshBeatRepeatGridUI() {
-  const control = fxControlBindings.get('beatrepeat:grid');
-  if (!control) return;
-  const isSync = !!BUS.fx.beatrepeat.gridSync;
-  control.setConfig(
-    isSync
-      ? { ...BEATREPEAT_GRID_SYNC_CONTROL, resetValue: BUS.fx.beatrepeat.gridSyncIndex }
-      : { ...BEATREPEAT_GRID_FREE_CONTROL, resetValue: BUS.fx.beatrepeat.grid },
-  );
-  control.setFormatter(isSync ? (v) => getGrainSyncStep(Math.round(v)).label : null);
-  control.setValue(isSync ? BUS.fx.beatrepeat.gridSyncIndex : BUS.fx.beatrepeat.grid);
-  beatRepeatGridSyncModeControl?.setMode(isSync ? 'sync' : 'free');
+  refreshSyncedFxControl(TEMPO_SYNCED_FX.beatRepeatGrid);
 }
 
 function refreshGrainArpGridUI() {
-  const control = fxControlBindings.get('grainarp:grid');
-  if (!control) return;
-  const isSync = !!BUS.fx.grainarp.gridSync;
-  control.setConfig(
-    isSync
-      ? { ...GRAINARP_GRID_SYNC_CONTROL, resetValue: BUS.fx.grainarp.gridSyncIndex }
-      : { ...GRAINARP_GRID_FREE_CONTROL, resetValue: BUS.fx.grainarp.grid },
-  );
-  control.setFormatter(isSync ? (v) => getGrainSyncStep(Math.round(v)).label : null);
-  control.setValue(isSync ? BUS.fx.grainarp.gridSyncIndex : BUS.fx.grainarp.grid);
-  grainArpGridSyncModeControl?.setMode(isSync ? 'sync' : 'free');
+  refreshSyncedFxControl(TEMPO_SYNCED_FX.grainArpGrid);
 }
 
 function refreshGrainArpPatternUI() {
