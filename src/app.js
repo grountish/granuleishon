@@ -3,8 +3,22 @@
 
 import { clamp, quantize, formatNumericValue, formatControlValue } from './core/util.js';
 import { encodeWav } from './render/wav.js';
+import {
+  THEME_STORAGE_KEY,
+  AUDIO_LATENCY_STORAGE_KEY,
+  PROJECT_STORAGE_KEY,
+  LEGACY_PRESET_STORAGE_KEY,
+  AUTOSAVE_STORAGE_KEY,
+  TOOLTIPS_STORAGE_KEY,
+  BOUNCE_RENDER_STORAGE_KEY,
+  BOUNCE_CAP_STORAGE_KEY,
+  SOLO_MODE_STORAGE_KEY,
+  MASTERING_HQ_STORAGE_KEY,
+} from './core/storage.js';
 import { FX_DEFS } from './fx/defs.js';
 import { FX_PRESETS } from './fx/presets.js';
+import { GEN4_DEFS, GEN4_PRESETS } from './instruments/gen4/defs.js';
+import { MASTERING_CONTROL_SPECS, MASTERING_EQ_BANDS } from './master/specs.js';
 import {
   BPM_BOUNDS,
   TRANSPORT,
@@ -34,8 +48,6 @@ import {
   computeAutotuneMask,
 } from './core/theory.js';
 
-const THEME_STORAGE_KEY = 'grnsh-theme-v1';
-const AUDIO_LATENCY_STORAGE_KEY = 'grnsh-audio-latency-v1';
 const AUDIO_LATENCY_HINTS = {
   low: 'interactive',
   balanced: 0.04,
@@ -131,9 +143,6 @@ const INPUT_GATE = {
 function dbToLinear(db) {
   return Math.pow(10, db / 20);
 }
-const PROJECT_STORAGE_KEY = 'grnsh-projects-v1';
-const LEGACY_PRESET_STORAGE_KEY = 'grnsh-presets-v1';
-const AUTOSAVE_STORAGE_KEY = 'grnsh-autosave-v1';
 const AUTOSAVE_INTERVAL_MS = 5000;
 let projectStore = []; // [{ name, data, savedAt }]
 let currentProjectName = null;
@@ -5083,166 +5092,7 @@ function buildOscPanel() {
 
 // ─── Gen 4: Glitch Drums ──────────────────────────────────────────────────
 
-const GEN4_DEFS = [
-  {
-    id: 'kick',
-    label: 'KICK',
-    color: '#e05858',
-    paramDefs: [
-      { key: 'tune', label: 'Tune', min: 30, max: 120, step: 1, value: 70, unit: 'Hz' },
-      { key: 'decay', label: 'Decay', min: 0.05, max: 1.0, step: 0.01, value: 0.85, unit: 's' },
-      { key: 'punch', label: 'Punch', min: 0, max: 1, step: 0.01, value: 0.36, unit: '' },
-      { key: 'drive', label: 'Drive', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
-      { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 1, unit: '' },
-    ],
-  },
-  {
-    id: 'snare',
-    label: 'SNR',
-    color: '#d4892a',
-    paramDefs: [
-      { key: 'tune', label: 'Tone', min: 100, max: 500, step: 5, value: 360, unit: 'Hz' },
-      { key: 'decay', label: 'Decay', min: 0.05, max: 0.8, step: 0.01, value: 0.09, unit: 's' },
-      { key: 'snap', label: 'Snap', min: 0, max: 1, step: 0.01, value: 1, unit: '' },
-      { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 0.96, unit: '' },
-    ],
-  },
-  {
-    id: 'hat',
-    label: 'HAT',
-    color: '#7ad860',
-    paramDefs: [
-      { key: 'decay', label: 'Decay', min: 0.005, max: 0.5, step: 0.005, value: 0.06, unit: 's' },
-      { key: 'tone', label: 'Tone', min: 3000, max: 16000, step: 200, value: 11200, unit: 'Hz' },
-      { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 0.6, unit: '' },
-    ],
-  },
-  {
-    id: 'perc',
-    label: 'PERC',
-    color: '#9f7de8',
-    paramDefs: [
-      { key: 'tune', label: 'Tune', min: 80, max: 800, step: 5, value: 165, unit: 'Hz' },
-      { key: 'ratio', label: 'Ratio', min: 0.5, max: 8, step: 0.1, value: 1.6, unit: '' },
-      { key: 'index', label: 'Index', min: 0, max: 10, step: 0.1, value: 1.6, unit: '' },
-      { key: 'decay', label: 'Decay', min: 0.03, max: 0.6, step: 0.01, value: 0.06, unit: 's' },
-      { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 0.7, unit: '' },
-    ],
-  },
-  {
-    id: 'osc',
-    label: 'OSC',
-    color: '#40b8d0',
-    paramDefs: [],
-  },
-  {
-    id: 'fm',
-    label: 'FM',
-    color: '#e06ab5',
-    paramDefs: [
-      { key: 'tune', label: 'Tune', min: 30, max: 1200, step: 1, value: 220, unit: 'Hz' },
-      { key: 'ratio', label: 'Ratio', min: 0.25, max: 8, step: 0.05, value: 2, unit: '' },
-      { key: 'index', label: 'Index', min: 0, max: 20, step: 0.1, value: 3, unit: '' },
-      { key: 'feedback', label: 'Feedback', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
-      { key: 'attack', label: 'Attack', min: 0.001, max: 1, step: 0.001, value: 0.005, unit: 's' },
-      { key: 'decay', label: 'Decay', min: 0.03, max: 2, step: 0.01, value: 0.35, unit: 's' },
-      {
-        key: 'modDecay',
-        label: 'Mod Decay',
-        min: 0.01,
-        max: 2,
-        step: 0.01,
-        value: 0.3,
-        unit: 's',
-      },
-      { key: 'tone', label: 'Tone', min: 200, max: 16000, step: 100, value: 12000, unit: 'Hz' },
-      { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 0.65, unit: '' },
-    ],
-  },
-  {
-    // Sampler lane — plays a slice of a granular input's audio (a loaded file
-    // or a frozen mic take). Start/length are fractions of that buffer.
-    id: 'smp',
-    label: 'SMP',
-    color: '#d8c94a',
-    paramDefs: [
-      { key: 'source', label: 'Source', min: 0, max: 1, step: 1, value: 0, unit: '' },
-      { key: 'start', label: 'Start', min: 0, max: 1, step: 0.001, value: 0, unit: '' },
-      { key: 'length', label: 'Length', min: 0.01, max: 1, step: 0.001, value: 0.25, unit: '' },
-      { key: 'pitch', label: 'Pitch', min: -24, max: 24, step: 1, value: 0, unit: 'st' },
-      { key: 'decay', label: 'Decay', min: 0.02, max: 2, step: 0.01, value: 0.8, unit: 's' },
-      { key: 'tone', label: 'Tone', min: 200, max: 16000, step: 100, value: 16000, unit: 'Hz' },
-      { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 0.8, unit: '' },
-    ],
-  },
-];
 
-const GEN4_PRESETS = {
-  kick: [
-    { name: 'Default', values: { tune: 70, decay: 0.85, punch: 0.36, drive: 0, gain: 1 } },
-    { name: 'Deep', values: { tune: 48, decay: 0.72, punch: 0.62, drive: 0.08, gain: 0.95 } },
-    { name: 'Tight', values: { tune: 82, decay: 0.18, punch: 0.78, drive: 0.05, gain: 0.9 } },
-    { name: 'Driven', values: { tune: 58, decay: 0.5, punch: 0.72, drive: 0.8, gain: 0.82 } },
-  ],
-  snare: [
-    { name: 'Default', values: { tune: 360, decay: 0.09, snap: 1, gain: 0.96 } },
-    { name: 'Tight', values: { tune: 310, decay: 0.11, snap: 0.9, gain: 0.9 } },
-    { name: 'Fat', values: { tune: 210, decay: 0.32, snap: 0.62, gain: 0.92 } },
-    { name: 'Bright', values: { tune: 440, decay: 0.18, snap: 1, gain: 0.78 } },
-  ],
-  hat: [
-    { name: 'Default', values: { decay: 0.06, tone: 11200, gain: 0.6 } },
-    { name: 'Closed', values: { decay: 0.025, tone: 13500, gain: 0.52 } },
-    { name: 'Open', values: { decay: 0.32, tone: 9800, gain: 0.55 } },
-    { name: 'Dark', values: { decay: 0.12, tone: 5200, gain: 0.7 } },
-  ],
-  perc: [
-    { name: 'Default', values: { tune: 165, ratio: 1.6, index: 1.6, decay: 0.06, gain: 0.7 } },
-    { name: 'Wood', values: { tune: 145, ratio: 1.4, index: 0.9, decay: 0.12, gain: 0.75 } },
-    { name: 'Bell', values: { tune: 330, ratio: 3.5, index: 4.8, decay: 0.45, gain: 0.6 } },
-    { name: 'Metal', values: { tune: 520, ratio: 6.2, index: 8.2, decay: 0.2, gain: 0.55 } },
-  ],
-  fm: [
-    {
-      name: 'Default',
-      values: { tune: 220, ratio: 2, index: 3, feedback: 0, attack: 0.005, decay: 0.35, modDecay: 0.3, tone: 12000, gain: 0.65 },
-    },
-    {
-      name: 'Sub Bass',
-      values: { tune: 55, ratio: 0.5, index: 1.2, feedback: 0.08, attack: 0.005, decay: 0.55, modDecay: 0.3, tone: 1800, gain: 0.8 },
-    },
-    {
-      name: 'Bell',
-      values: { tune: 440, ratio: 3.5, index: 8, feedback: 0.18, attack: 0.002, decay: 1.4, modDecay: 1.7, tone: 11000, gain: 0.55 },
-    },
-    {
-      name: 'Pluck',
-      values: { tune: 220, ratio: 2, index: 4, feedback: 0.05, attack: 0.001, decay: 0.16, modDecay: 0.08, tone: 6500, gain: 0.7 },
-    },
-    {
-      name: 'Zap',
-      values: { tune: 110, ratio: 5.25, index: 12, feedback: 0.55, attack: 0.001, decay: 0.22, modDecay: 0.06, tone: 14000, gain: 0.55 },
-    },
-  ],
-  smp: [
-    {
-      name: 'Default',
-      values: { source: 0, start: 0, length: 0.25, pitch: 0, decay: 0.8, tone: 16000, gain: 0.8 },
-    },
-    {
-      name: 'Chop',
-      values: { source: 0, start: 0, length: 0.08, pitch: 0, decay: 0.25, tone: 16000, gain: 0.85 },
-    },
-    {
-      name: 'Pad',
-      values: { source: 0, start: 0.1, length: 1, pitch: 0, decay: 2, tone: 9000, gain: 0.7 },
-    },
-    {
-      name: 'Dark Half',
-      values: { source: 0, start: 0.2, length: 0.35, pitch: -12, decay: 1.2, tone: 3200, gain: 0.8 },
-    },
-  ],
-};
 
 // ── Genre kits ── one selection sets every lane's sound AND writes a groove
 // into the edit loop's drum pattern (sound is global, the pattern lands in the
@@ -11004,11 +10854,9 @@ function closeSettingsMenu() {
 // When off, every title is stashed into data-saved-title, and a mutation
 // observer keeps stripping titles the app re-sets (step repaints, UI
 // refreshes) or adds on newly built elements.
-const TOOLTIPS_STORAGE_KEY = 'grnsh-tooltips-v1';
 const TOOLTIPS = { enabled: localStorage.getItem(TOOLTIPS_STORAGE_KEY) !== 'off' };
 
 // ── Bounce render mode ── master-only wav (default) or master + per-bus stems.
-const BOUNCE_RENDER_STORAGE_KEY = 'grnsh-bounce-stems-v1';
 const BOUNCE_RENDER = { stems: localStorage.getItem(BOUNCE_RENDER_STORAGE_KEY) === 'on' };
 
 function setBounceRenderStems(on) {
@@ -11018,7 +10866,6 @@ function setBounceRenderStems(on) {
 
 // ── Bounce length cap ── 'auto' = 4× the written song length; otherwise a
 // hard cut in seconds. Jump cycles can hold a bounce forever without one.
-const BOUNCE_CAP_STORAGE_KEY = 'grnsh-bounce-cap-v1';
 const BOUNCE_CAP = { value: localStorage.getItem(BOUNCE_CAP_STORAGE_KEY) || 'auto' };
 
 function setBounceCap(value) {
@@ -11028,7 +10875,6 @@ function setBounceCap(value) {
 
 // ── Solo mode ── additive (default): solos stack. Exclusive: soloing an
 // instrument clears every other solo so it sounds alone.
-const SOLO_MODE_STORAGE_KEY = 'grnsh-solo-additive-v1';
 const SOLO_MODE = { additive: localStorage.getItem(SOLO_MODE_STORAGE_KEY) !== 'off' };
 
 function setSoloAdditive(on) {
@@ -14428,7 +14274,6 @@ function refreshBackPanelState() {
 // (suspended on exit), and the final render happens in an OfflineAudioContext.
 // While the view is closed the feature costs zero CPU.
 
-const MASTERING_HQ_STORAGE_KEY = 'grnsh-master-hq-v1';
 
 const MASTERING = {
   built: false,
@@ -15862,147 +15707,11 @@ function drawMasteringWave() {
   }
 }
 
-const MASTERING_CONTROL_SPECS = [
-  {
-    id: 'comp',
-    section: 'Glue Comp',
-    controls: [
-      { key: 'compThreshold', label: 'Thresh', min: -40, max: 0, step: 0.5, unit: 'dB' },
-      { key: 'compRatio', label: 'Ratio', min: 1, max: 10, step: 0.5, unit: '' },
-      { key: 'compAttack', label: 'Attack', min: 0.001, max: 0.1, step: 0.001, unit: 's' },
-      { key: 'compRelease', label: 'Release', min: 0.05, max: 1, step: 0.01, unit: 's' },
-      { key: 'compMakeup', label: 'Makeup', min: 0, max: 12, step: 0.5, unit: 'dB' },
-    ],
-  },
-  {
-    id: 'opto',
-    section: 'Opto',
-    controls: [
-      { key: 'optoReduction', label: 'Reduction', min: 0, max: 40, step: 0.5, unit: 'dB' },
-      { key: 'optoMakeup', label: 'Gain', min: 0, max: 24, step: 0.5, unit: 'dB' },
-    ],
-  },
-  {
-    id: 'ott',
-    section: 'OTT',
-    controls: [
-      { key: 'ottDepth', label: 'Depth', min: 0, max: 100, step: 1, unit: '%' },
-      { key: 'ottTime', label: 'Time', min: 0.33, max: 3, step: 0.01, unit: 'x' },
-      { key: 'ottIn', label: 'In', min: -12, max: 12, step: 0.5, unit: 'dB' },
-      { key: 'ottOut', label: 'Out', min: -12, max: 12, step: 0.5, unit: 'dB' },
-      { key: 'ottLow', label: 'Low', min: -12, max: 12, step: 0.5, unit: 'dB' },
-      { key: 'ottMid', label: 'Mid', min: -12, max: 12, step: 0.5, unit: 'dB' },
-      { key: 'ottHigh', label: 'High', min: -12, max: 12, step: 0.5, unit: 'dB' },
-    ],
-  },
-  {
-    id: 'tape',
-    section: 'Tape',
-    controls: [
-      { key: 'tapeDrive', label: 'Drive', min: 0, max: 18, step: 0.5, unit: 'dB' },
-      { key: 'tapeBump', label: 'Bump', min: 0, max: 6, step: 0.5, unit: 'dB' },
-      { key: 'tapeRolloff', label: 'Rolloff', min: 8, max: 20, step: 0.5, unit: 'kHz' },
-      { key: 'tapeLevel', label: 'Level', min: -12, max: 12, step: 0.5, unit: 'dB' },
-    ],
-  },
-  {
-    id: 'sub',
-    section: 'Sub',
-    controls: [
-      { key: 'subTune', label: 'Tune', min: 40, max: 160, step: 1, unit: 'Hz' },
-      { key: 'subAmount', label: 'Amount', min: 0, max: 24, step: 0.5, unit: 'dB' },
-      { key: 'subMix', label: 'Mix', min: 0, max: 100, step: 1, unit: '%' },
-    ],
-  },
-  {
-    id: 'exciter',
-    section: 'Exciter',
-    controls: [
-      { key: 'excTune', label: 'Tune', min: 1000, max: 8000, step: 100, unit: 'Hz' },
-      { key: 'excHarmonics', label: 'Harmonics', min: 0, max: 24, step: 0.5, unit: 'dB' },
-      { key: 'excMix', label: 'Mix', min: 0, max: 50, step: 1, unit: '%' },
-    ],
-  },
-  {
-    id: 'width',
-    section: 'Width',
-    controls: [
-      { key: 'width', label: 'Width', min: 0, max: 2, step: 0.05, unit: '' },
-      { key: 'widthBassFreq', label: 'Bass Mono', min: 0, max: 300, step: 5, unit: 'Hz' },
-    ],
-  },
-  {
-    id: 'limit',
-    section: 'Limit',
-    controls: [
-      { key: 'drive', label: 'Drive', min: 0, max: 12, step: 0.5, unit: 'dB' },
-      { key: 'ceiling', label: 'Ceiling', min: -6, max: -0.1, step: 0.1, unit: 'dB' },
-      { key: 'outGain', label: 'Output', min: -12, max: 6, step: 0.5, unit: 'dB' },
-    ],
-  },
-];
 
 // ── Graphical EQ ── log-frequency response plot with five draggable,
 // fully-parametric band handles: horizontal = frequency, vertical = gain.
 // The compact control below the graph edits Q for the selected band.
 
-const MASTERING_EQ_BANDS = [
-  {
-    gainKey: 'lowGain',
-    threshKey: 'lowDynThresh',
-    rangeKey: 'lowDynRange',
-    freqKey: 'lowFreq',
-    qKey: 'lowQ',
-    label: 'LOW',
-    fmin: 20,
-    fmax: 300,
-    defaultQ: 0.7,
-  },
-  {
-    gainKey: 'lowMidGain',
-    threshKey: 'lowMidDynThresh',
-    rangeKey: 'lowMidDynRange',
-    freqKey: 'lowMidFreq',
-    qKey: 'lowMidQ',
-    label: 'LOW MID',
-    fmin: 80,
-    fmax: 1500,
-    defaultQ: 1,
-  },
-  {
-    gainKey: 'midGain',
-    threshKey: 'midDynThresh',
-    rangeKey: 'midDynRange',
-    freqKey: 'midFreq',
-    qKey: 'midQ',
-    label: 'MID',
-    fmin: 200,
-    fmax: 5000,
-    defaultQ: 0.7,
-  },
-  {
-    gainKey: 'highMidGain',
-    threshKey: 'highMidDynThresh',
-    rangeKey: 'highMidDynRange',
-    freqKey: 'highMidFreq',
-    qKey: 'highMidQ',
-    label: 'HIGH MID',
-    fmin: 800,
-    fmax: 12000,
-    defaultQ: 1,
-  },
-  {
-    gainKey: 'highGain',
-    threshKey: 'highDynThresh',
-    rangeKey: 'highDynRange',
-    freqKey: 'highFreq',
-    qKey: 'highQ',
-    label: 'HIGH',
-    fmin: 3000,
-    fmax: 18000,
-    defaultQ: 0.7,
-  },
-];
 const EQ_DB_RANGE = 12;
 const EQ_FMIN = 20;
 const EQ_FMAX = 20000;
