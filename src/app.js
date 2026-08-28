@@ -8,7 +8,7 @@ import {
   formatControlValue,
   formatMeterHz,
 } from './core/util.js';
-import { rbjHighpass, rbjLowShelf, rbjPeaking, biquadMagnitudeDb } from './core/dsp.js';
+import { rbjHighpass } from './core/dsp.js';
 import { encodeWav } from './render/wav.js';
 import { emit, on } from './core/events.js';
 import { mountMenuAtPointer } from './ui/popover.js';
@@ -31,7 +31,7 @@ import {
   fxBuses,
   BUS,
 } from './fx/state.js';
-import { setStatus, getStatusEl } from './ui/status.js';
+import { setStatus } from './ui/status.js';
 import { PARAMS, GEN_DEFAULTS, state } from './instruments/granular/state.js';
 import {
   PLAY,
@@ -72,7 +72,6 @@ import {
   FX_PRESETS,
   DEFAULT_FX_ORDER,
   FX_IDLE_BYPASS,
-  makeDefaultFxState,
 } from './fx/registry.js';
 import { GEN4_DEFS, GEN4_PRESETS } from './instruments/gen4/defs.js';
 import { GEN4 } from './instruments/gen4/state.js';
@@ -105,7 +104,6 @@ import {
   getTempoStep,
   getGrainSyncStep,
   beatsToSeconds,
-  formatTempoSeconds,
   formatTempoSyncValue,
 } from './core/tempo.js';
 import {
@@ -122,7 +120,6 @@ import {
   harmonizerSnapHz,
   harmonizerSnapOffset,
   AUTOTUNE_SCALE_OPTIONS,
-  computeAutotuneMask,
 } from './core/theory.js';
 
 const AUDIO_LATENCY_HINTS = {
@@ -185,7 +182,6 @@ let grainArpModulePromise = null;
 let pitchTremoloModulePromise = null;
 let autotuneModulePromise = null;
 const LIVE_SOURCE_SECONDS = 10;
-
 
 // dB <-> linear amplitude helper for the gate.
 function dbToLinear(db) {
@@ -2092,13 +2088,6 @@ function setGeneratorParam(genIdx, key, value, { send = true, deferMaxClamp = fa
   emit('state');
 }
 
-function getGrainSizeSyncMs(genIdx) {
-  return beatsToSeconds(getGrainSyncStep(state[genIdx].grainSizeSyncIndex).beats) * 1000;
-}
-function getDensitySyncValue(genIdx) {
-  return 1 / beatsToSeconds(getGrainSyncStep(state[genIdx].densitySyncIndex).beats);
-}
-
 function getEffectiveGeneratorParams(genIdx, base = state[genIdx]) {
   const effective = { ...base };
   if (effective.grainSizeSync)
@@ -2283,7 +2272,6 @@ function applyMappedModulationTargets() {
   }
   modVisualsActive = hasMappings;
 }
-
 
 function lerpGens(a, b, t) {
   const out = { ...(t < 0.5 ? a : b) };
@@ -3079,7 +3067,6 @@ const VIZ_STATES = [
   { label: 'void',    dur: [28, 50], trailAlpha: 0.020, warpMult: 0.85, orbitStr: 0.28, turbStr: 0.20, hueVel: 0.012, hueTarget: 270, maxP:  450, sat: 52, lum: 36 },
   { label: 'storm',   dur: [14, 24], trailAlpha: 0.092, warpMult: 2.20, orbitStr: 1.02, turbStr: 1.40, hueVel: 0.220, hueTarget: 320, maxP: 1800, sat: 90, lum: 58 },
 ];
-
 
 function ensureVizAnalyser() {
   if (vizAnalyser || !engine.ctx || !engine.master?.output) return;
@@ -4853,7 +4840,6 @@ function buildGen4PresetSelect(ci) {
   refreshGen4PresetSelection(ci);
   return select;
 }
-
 
 const trigScSourceBtns = new Map();
 let trigScInvBtn = null;
@@ -8611,7 +8597,6 @@ function stopMixerMeters() {
   MIXER.raf = null;
 }
 
-
 // ─── LFO ───────────────────────────────────────────────────────────────────
 
 const LFO_RATE_CURVE_EXP = 2.4;
@@ -8726,10 +8711,6 @@ function formatSequencerStepBeats(stepBeats) {
 
 function getSeqStepDurationFor(seq) {
   return beatsToSeconds(clampSequencerStepBeats(seq.stepBeats));
-}
-
-function getSeqStepDuration() {
-  return getSeqStepDurationFor(STEP_SEQ);
 }
 
 function refreshSequencerUI() {
@@ -9952,7 +9933,6 @@ function setSoloAdditive(on) {
   SOLO_MODE.additive = on;
   localStorage.setItem(SOLO_MODE_STORAGE_KEY, on ? 'on' : 'off');
 }
-
 
 const LINK_QUANTUM = 16; // machines join the grid on 16-step (one bar) boundaries
 const LINK_PEER_PREFIX = 'grnsh-link-';
