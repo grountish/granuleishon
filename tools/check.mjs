@@ -117,8 +117,22 @@ async function checkWorklets(files) {
   }
 }
 
+// ── 5. serve.py parses ──────────────────────────────────────────────────────
+// It re-execs itself when edited, so a syntax error there kills the dev server
+// mid-session rather than at a moment you are looking at it.
+async function checkServer() {
+  try {
+    await run('python3', ['-c', 'import ast,sys; ast.parse(open(sys.argv[1]).read())',
+      path.join(ROOT, 'serve.py')]);
+  } catch (err) {
+    const detail = String(err.stderr || err.message).trim().split('\n').slice(-2).join(' ');
+    note('serve.py', `does not parse — ${detail}`);
+  }
+}
+
 const files = (await Promise.all(SOURCE_DIRS.map(jsFiles))).flat();
 await checkSyntax(files);
+await checkServer();
 await checkImports(files);
 await checkDuplicates(files);
 await checkWorklets(files);
@@ -128,4 +142,4 @@ if (problems.length) {
   for (const { file, message } of problems) console.error(`  ${file}\n    ${message}`);
   process.exit(1);
 }
-console.log(`✓ ${files.length} files: parse, imports resolve, no duplicate declarations`);
+console.log(`✓ ${files.length} files + serve.py: parse, imports resolve, no duplicate declarations`);

@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """Dev server: caching disabled + live reload. Watched files (*.js, *.css,
 *.html) are stat-polled; the served page polls /__reload and refreshes
-itself whenever the change token moves."""
+itself whenever the change token moves.
+
+The server also watches its own source and re-execs when it changes. A
+long-running instance started before an edit to this file keeps running the
+old code, and the failure is silent: sources moved into src/ once while a
+server from before that change was still watching only the top level, so
+nothing auto-reloaded and the browser showed a stale build for days."""
 import http.server
 import os
+import sys
 
 WATCH_EXTS = ('.js', '.css', '.html')
+SELF = os.path.abspath(__file__)
+SELF_MTIME = os.stat(SELF).st_mtime_ns
 
 RELOAD_SNIPPET = b"""<script>
 (() => {
@@ -36,6 +45,21 @@ def watch_token():
     return str(newest).encode()
 
 
+def restart_if_self_changed():
+    """Re-exec when this file is edited, so the running server is never stale.
+
+    Called after the reply is written, so the poll that triggers it still gets
+    its answer; the page just retries half a second later. The listening socket
+    is not inheritable across exec, so the new process rebinds the port."""
+    try:
+        if os.stat(SELF).st_mtime_ns == SELF_MTIME:
+            return
+    except OSError:
+        return
+    print('serve.py changed — restarting', flush=True)
+    os.execv(sys.executable, [sys.executable, SELF])
+
+
 class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header('Cache-Control', 'no-store, must-revalidate')
@@ -53,6 +77,7 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/__reload':
             self.send_body(watch_token(), 'text/plain')
+            restart_if_self_changed()
             return
         # index.html gets the reload poller injected before </body>.
         if self.path in ('/', '/index.html'):
@@ -76,4 +101,6 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
 
 
 if __name__ == '__main__':
+    print(f'grnsh dev server — watching {"/".join(WATCH_EXTS)} under {os.getcwd()} '
+          f'and all subdirectories', flush=True)
     http.server.test(HandlerClass=NoCacheHandler, port=8000)
