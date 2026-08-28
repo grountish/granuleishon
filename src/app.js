@@ -11,6 +11,15 @@ import {
 import { rbjHighpass, rbjLowShelf, rbjPeaking, biquadMagnitudeDb } from './core/dsp.js';
 import { encodeWav } from './render/wav.js';
 import { engine } from './core/engine.js';
+import {
+  FX_BUS_IDS,
+  FX_BUS_LABELS,
+  fxStates,
+  LIMITER,
+  fxOrders,
+  fxBuses,
+  BUS,
+} from './fx/state.js';
 import { setStatus, getStatusEl } from './ui/status.js';
 import { PARAMS, GEN_DEFAULTS, state } from './instruments/granular/state.js';
 import {
@@ -257,32 +266,32 @@ function getBpmInput() {
   return document.getElementById('bpmInput');
 }
 
-function getDelayTimeSeconds(busId = activeBus) {
+function getDelayTimeSeconds(busId = BUS.active) {
   const d = fxStates[busId].delay;
   return clamp(d.sync ? beatsToSeconds(getTempoStep(d.syncIndex).beats) : d.time, 0, MAX_DELAY_SECONDS);
 }
 
-function getResonatorFreqHz(busId = activeBus) {
+function getResonatorFreqHz(busId = BUS.active) {
   const r = fxStates[busId].resonator;
   return clamp(r.noteMode ? midiToFreqHz(r.note) : r.freq, 40, 2000);
 }
 
-function getBeatRepeatIntervalSeconds(busId = activeBus) {
+function getBeatRepeatIntervalSeconds(busId = BUS.active) {
   const b = fxStates[busId].beatrepeat;
   return b.sync ? beatsToSeconds(getTempoStep(b.syncIndex).beats) : b.interval;
 }
 
-function getBeatRepeatGridSeconds(busId = activeBus) {
+function getBeatRepeatGridSeconds(busId = BUS.active) {
   const b = fxStates[busId].beatrepeat;
   return b.gridSync ? beatsToSeconds(getGrainSyncStep(b.gridSyncIndex).beats) : b.grid / 1000;
 }
 
-function getGrainArpGridSeconds(busId = activeBus) {
+function getGrainArpGridSeconds(busId = BUS.active) {
   const g = fxStates[busId].grainarp;
   return g.gridSync ? beatsToSeconds(getGrainSyncStep(g.gridSyncIndex).beats) : g.grid / 1000;
 }
 
-function getPitchTremoloRateHz(busId = activeBus) {
+function getPitchTremoloRateHz(busId = BUS.active) {
   const effect = fxStates[busId].pitchtrem;
   return effect.sync ? 1 / beatsToSeconds(getTempoStep(effect.syncIndex).beats) : effect.rate;
 }
@@ -2229,7 +2238,7 @@ function getModSourceScaledValue(sourceIdx) {
   return null;
 }
 
-function getBaseFxValue(id, key, busId = activeBus) {
+function getBaseFxValue(id, key, busId = BUS.active) {
   if (id === 'delay' && key === 'time') return getDelayTimeSeconds(busId);
   if (id === 'beatrepeat' && key === 'interval') return getBeatRepeatIntervalSeconds(busId);
   if (id === 'beatrepeat' && key === 'grid') return getBeatRepeatGridSeconds(busId);
@@ -2239,7 +2248,7 @@ function getBaseFxValue(id, key, busId = activeBus) {
   return fxStates[busId][id]?.[key];
 }
 
-function getEffectiveFxValue(id, key, busId = activeBus) {
+function getEffectiveFxValue(id, key, busId = BUS.active) {
   const base = getBaseFxValue(id, key, busId);
   // FX modulation routing is global across buses (one mapping wobbles every
   // bus's copy of the param, each added to that bus's own base value).
@@ -2434,11 +2443,11 @@ function refreshModulationVisuals() {
       control?.setModValue(null);
       return;
     }
-    if (id === 'delay' && key === 'time' && FX.delay.sync) {
+    if (id === 'delay' && key === 'time' && BUS.fx.delay.sync) {
       control?.setModValue(null);
       return;
     }
-    if (id === 'resonator' && key === 'freq' && FX.resonator.noteMode) {
+    if (id === 'resonator' && key === 'freq' && BUS.fx.resonator.noteMode) {
       // Knob is in note units while modulation runs in Hz — convert the
       // effective pitch back to MIDI so the mod ring still tracks.
       control?.setModValue(freqHzToMidi(getEffectiveFxValue(id, key)));
@@ -3759,7 +3768,7 @@ function buildUI() {
     const headerActions = panel.querySelector('.col-header > .gen-header-actions');
     if (headerActions) headerActions.appendChild(mixControls);
     else panel.querySelector('.col-header')?.appendChild(mixControls);
-    panel.classList.toggle('active-instrument', busId === activeBus);
+    panel.classList.toggle('active-instrument', busId === BUS.active);
     panel.addEventListener('click', () => setActiveBus(busId));
     container.appendChild(panel);
   });
@@ -7990,8 +7999,6 @@ function buildDrumPanel() {
 // Per-instrument FX buses. Each instrument (granular 1/2, synth, drums) owns an
 // independent effect chain; one instrument is "active" and its chain is shown and
 // edited in the FX column. All bus outputs sum into a single global master limiter.
-const FX_BUS_IDS = ['gen0', 'gen1', 'gen3', 'gen4'];
-const FX_BUS_LABELS = { gen0: 'Granular 1', gen1: 'Granular 2', gen3: 'Synth', gen4: 'Drums' };
 function makeDefaultInstrumentMixState() {
   return {
     muted: false,
@@ -8707,35 +8714,6 @@ function stopMixerMeters() {
   MIXER.raf = null;
 }
 
-// Source of truth for per-bus FX state — applied to audio nodes when they exist.
-const fxStates = {
-  gen0: makeDefaultFxState(),
-  gen1: makeDefaultFxState(),
-  gen3: makeDefaultFxState(),
-  gen4: makeDefaultFxState(),
-};
-
-// Global master limiter state (one limiter at the tail of the summed mix).
-const LIMITER = { threshold: -8, attack: 0.003, release: 0.12, ratio: 20, knee: 0, output: 0.96 };
-
-// Order of the reorderable effects between each bus input and bus output.
-// Mutated per-bus by drag-to-reorder; persisted in presets.
-const fxOrders = {
-  gen0: [...DEFAULT_FX_ORDER],
-  gen1: [...DEFAULT_FX_ORDER],
-  gen3: [...DEFAULT_FX_ORDER],
-  gen4: [...DEFAULT_FX_ORDER],
-};
-
-// Which bus the FX column currently shows/edits.
-let activeBus = 'gen0';
-
-// Per-bus audio node graphs, created in ensureAudioEngine(), nulled in stop().
-const fxBuses = { gen0: null, gen1: null, gen3: null, gen4: null };
-
-// Live alias to the active bus state, kept in sync by setActiveBus(). Lets the FX
-// UI/refresh code keep referring to FX.* without knowing which bus is active.
-let FX = fxStates[activeBus];
 
 // ─── LFO ───────────────────────────────────────────────────────────────────
 
@@ -12239,29 +12217,29 @@ window.addEventListener('pointerdown', (e) => {
 function refreshDelayTimeUI() {
   const control = fxControlBindings.get('delay:time');
   if (!control) return;
-  const isSync = !!FX.delay.sync;
+  const isSync = !!BUS.fx.delay.sync;
   control.setConfig(
     isSync
-      ? { ...DELAY_TIME_SYNC_CONTROL, resetValue: FX.delay.syncIndex }
-      : { ...DELAY_TIME_FREE_CONTROL, resetValue: FX.delay.time },
+      ? { ...DELAY_TIME_SYNC_CONTROL, resetValue: BUS.fx.delay.syncIndex }
+      : { ...DELAY_TIME_FREE_CONTROL, resetValue: BUS.fx.delay.time },
   );
   control.setFormatter(
     isSync
       ? (v) => formatTempoSyncValue(v, (step) => formatTempoSeconds(beatsToSeconds(step.beats)))
       : null,
   );
-  control.setValue(isSync ? FX.delay.syncIndex : FX.delay.time);
+  control.setValue(isSync ? BUS.fx.delay.syncIndex : BUS.fx.delay.time);
   delaySyncModeControl?.setMode(isSync ? 'sync' : 'free');
 }
 
 function refreshPitchTremoloUI() {
   const control = fxControlBindings.get('pitchtrem:rate');
   if (control) {
-    const isSync = !!FX.pitchtrem.sync;
+    const isSync = !!BUS.fx.pitchtrem.sync;
     control.setConfig(
       isSync
-        ? { ...PITCH_TREMOLO_RATE_SYNC_CONTROL, resetValue: FX.pitchtrem.syncIndex }
-        : { ...PITCH_TREMOLO_RATE_FREE_CONTROL, resetValue: FX.pitchtrem.rate },
+        ? { ...PITCH_TREMOLO_RATE_SYNC_CONTROL, resetValue: BUS.fx.pitchtrem.syncIndex }
+        : { ...PITCH_TREMOLO_RATE_FREE_CONTROL, resetValue: BUS.fx.pitchtrem.rate },
     );
     control.setFormatter(
       isSync
@@ -12272,78 +12250,78 @@ function refreshPitchTremoloUI() {
             )
         : null,
     );
-    control.setValue(isSync ? FX.pitchtrem.syncIndex : FX.pitchtrem.rate);
+    control.setValue(isSync ? BUS.fx.pitchtrem.syncIndex : BUS.fx.pitchtrem.rate);
     pitchTremoloSyncModeControl?.setMode(isSync ? 'sync' : 'free');
   }
   pitchTremoloShapeButtons.forEach((btn, shape) =>
-    btn.classList.toggle('active', FX.pitchtrem.shape === shape),
+    btn.classList.toggle('active', BUS.fx.pitchtrem.shape === shape),
   );
 }
 
 function refreshBeatRepeatIntervalUI() {
   const control = fxControlBindings.get('beatrepeat:interval');
   if (!control) return;
-  const isSync = !!FX.beatrepeat.sync;
+  const isSync = !!BUS.fx.beatrepeat.sync;
   control.setConfig(
     isSync
-      ? { ...BEATREPEAT_INTERVAL_SYNC_CONTROL, resetValue: FX.beatrepeat.syncIndex }
-      : { ...BEATREPEAT_INTERVAL_FREE_CONTROL, resetValue: FX.beatrepeat.interval },
+      ? { ...BEATREPEAT_INTERVAL_SYNC_CONTROL, resetValue: BUS.fx.beatrepeat.syncIndex }
+      : { ...BEATREPEAT_INTERVAL_FREE_CONTROL, resetValue: BUS.fx.beatrepeat.interval },
   );
   control.setFormatter(
     isSync
       ? (v) => formatTempoSyncValue(v, (step) => formatTempoSeconds(beatsToSeconds(step.beats)))
       : null,
   );
-  control.setValue(isSync ? FX.beatrepeat.syncIndex : FX.beatrepeat.interval);
+  control.setValue(isSync ? BUS.fx.beatrepeat.syncIndex : BUS.fx.beatrepeat.interval);
   beatRepeatSyncModeControl?.setMode(isSync ? 'sync' : 'free');
 }
 
 function refreshBeatRepeatGridUI() {
   const control = fxControlBindings.get('beatrepeat:grid');
   if (!control) return;
-  const isSync = !!FX.beatrepeat.gridSync;
+  const isSync = !!BUS.fx.beatrepeat.gridSync;
   control.setConfig(
     isSync
-      ? { ...BEATREPEAT_GRID_SYNC_CONTROL, resetValue: FX.beatrepeat.gridSyncIndex }
-      : { ...BEATREPEAT_GRID_FREE_CONTROL, resetValue: FX.beatrepeat.grid },
+      ? { ...BEATREPEAT_GRID_SYNC_CONTROL, resetValue: BUS.fx.beatrepeat.gridSyncIndex }
+      : { ...BEATREPEAT_GRID_FREE_CONTROL, resetValue: BUS.fx.beatrepeat.grid },
   );
   control.setFormatter(isSync ? (v) => getGrainSyncStep(Math.round(v)).label : null);
-  control.setValue(isSync ? FX.beatrepeat.gridSyncIndex : FX.beatrepeat.grid);
+  control.setValue(isSync ? BUS.fx.beatrepeat.gridSyncIndex : BUS.fx.beatrepeat.grid);
   beatRepeatGridSyncModeControl?.setMode(isSync ? 'sync' : 'free');
 }
 
 function refreshGrainArpGridUI() {
   const control = fxControlBindings.get('grainarp:grid');
   if (!control) return;
-  const isSync = !!FX.grainarp.gridSync;
+  const isSync = !!BUS.fx.grainarp.gridSync;
   control.setConfig(
     isSync
-      ? { ...GRAINARP_GRID_SYNC_CONTROL, resetValue: FX.grainarp.gridSyncIndex }
-      : { ...GRAINARP_GRID_FREE_CONTROL, resetValue: FX.grainarp.grid },
+      ? { ...GRAINARP_GRID_SYNC_CONTROL, resetValue: BUS.fx.grainarp.gridSyncIndex }
+      : { ...GRAINARP_GRID_FREE_CONTROL, resetValue: BUS.fx.grainarp.grid },
   );
   control.setFormatter(isSync ? (v) => getGrainSyncStep(Math.round(v)).label : null);
-  control.setValue(isSync ? FX.grainarp.gridSyncIndex : FX.grainarp.grid);
+  control.setValue(isSync ? BUS.fx.grainarp.gridSyncIndex : BUS.fx.grainarp.grid);
   grainArpGridSyncModeControl?.setMode(isSync ? 'sync' : 'free');
 }
 
 function refreshGrainArpPatternUI() {
   grainArpPatternButtons.forEach((btn, mode) =>
-    btn.classList.toggle('active', FX.grainarp.pattern === mode),
+    btn.classList.toggle('active', BUS.fx.grainarp.pattern === mode),
   );
 }
 
 function refreshGrainArpHoldUI() {
-  grainArpHoldButton?.classList.toggle('active', !!FX.grainarp.hold);
+  grainArpHoldButton?.classList.toggle('active', !!BUS.fx.grainarp.hold);
 }
 
 function refreshResonatorFreqUI() {
   const control = fxControlBindings.get('resonator:freq');
   if (!control) return;
-  const isNote = !!FX.resonator.noteMode;
+  const isNote = !!BUS.fx.resonator.noteMode;
   control.setConfig(
     isNote
-      ? { ...RESONATOR_FREQ_NOTE_CONTROL, resetValue: FX.resonator.note }
-      : { ...RESONATOR_FREQ_FREE_CONTROL, resetValue: FX.resonator.freq },
+      ? { ...RESONATOR_FREQ_NOTE_CONTROL, resetValue: BUS.fx.resonator.note }
+      : { ...RESONATOR_FREQ_FREE_CONTROL, resetValue: BUS.fx.resonator.freq },
   );
   control.setFormatter(
     isNote
@@ -12351,7 +12329,7 @@ function refreshResonatorFreqUI() {
           `${formatMidiNote(v)} • ${formatNumericValue(midiToFreqHz(Math.round(v)), 0)}Hz`
       : null,
   );
-  control.setValue(isNote ? FX.resonator.note : FX.resonator.freq);
+  control.setValue(isNote ? BUS.fx.resonator.note : BUS.fx.resonator.freq);
   resonatorNoteModeControl?.setMode(isNote ? 'note' : 'free');
   refreshResonatorIntervalUI();
 }
@@ -12362,7 +12340,7 @@ function refreshResonatorFreqUI() {
 function formatResonatorInterval(v) {
   const st = Math.round(v);
   const sign = st >= 0 ? '+' : '';
-  if (FX.resonator.noteMode) return `${sign}${st} • ${formatMidiNote(FX.resonator.note + st)}`;
+  if (BUS.fx.resonator.noteMode) return `${sign}${st} • ${formatMidiNote(BUS.fx.resonator.note + st)}`;
   return `${sign}${st} • ${formatNumericValue(getResonatorFreqHz() * Math.pow(2, st / 12), 0)}Hz`;
 }
 
@@ -12373,7 +12351,7 @@ function refreshResonatorIntervalUI() {
 }
 
 function refreshDelayModeUI() {
-  delayModeButtons.forEach((btn, mode) => btn.classList.toggle('active', FX.delay.mode === mode));
+  delayModeButtons.forEach((btn, mode) => btn.classList.toggle('active', BUS.fx.delay.mode === mode));
 }
 
 function refreshLFOControlUI(lfoIdx) {
@@ -13434,61 +13412,61 @@ function refreshBackPanelState() {
   BACK_PANEL.audioModules.get('grainarp') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('grainarp');
-      module.subtitleEl.textContent = `${FX.grainarp.hold ? 'HOLD • ' : ''}${FX.grainarp.pattern.toUpperCase()} • ${formatBackValue(getFxParamDef('grainarp', 'mix'), FX.grainarp.mix)} wet`;
-      module.el.classList.toggle('active', FX.grainarp.mix > 0.001);
+      module.subtitleEl.textContent = `${BUS.fx.grainarp.hold ? 'HOLD • ' : ''}${BUS.fx.grainarp.pattern.toUpperCase()} • ${formatBackValue(getFxParamDef('grainarp', 'mix'), BUS.fx.grainarp.mix)} wet`;
+      module.el.classList.toggle('active', BUS.fx.grainarp.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('pitchtrem') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('pitchtrem');
-      const rate = FX.pitchtrem.sync
-        ? getTempoStep(FX.pitchtrem.syncIndex).label
-        : `${formatNumericValue(FX.pitchtrem.rate, 2)}Hz`;
-      module.subtitleEl.textContent = `${FX.pitchtrem.pitch >= 0 ? '+' : ''}${formatNumericValue(FX.pitchtrem.pitch, 0)}st ±${formatNumericValue(FX.pitchtrem.pitchDepth, 0)} • ${rate} • ${formatBackValue(getFxParamDef('pitchtrem', 'mix'), FX.pitchtrem.mix)} wet`;
-      module.el.classList.toggle('active', FX.pitchtrem.mix > 0.001);
+      const rate = BUS.fx.pitchtrem.sync
+        ? getTempoStep(BUS.fx.pitchtrem.syncIndex).label
+        : `${formatNumericValue(BUS.fx.pitchtrem.rate, 2)}Hz`;
+      module.subtitleEl.textContent = `${BUS.fx.pitchtrem.pitch >= 0 ? '+' : ''}${formatNumericValue(BUS.fx.pitchtrem.pitch, 0)}st ±${formatNumericValue(BUS.fx.pitchtrem.pitchDepth, 0)} • ${rate} • ${formatBackValue(getFxParamDef('pitchtrem', 'mix'), BUS.fx.pitchtrem.mix)} wet`;
+      module.el.classList.toggle('active', BUS.fx.pitchtrem.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('autotune') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('autotune');
       const scaleLabel =
-        AUTOTUNE_SCALE_OPTIONS.find(([id]) => id === FX.autotune.scale)?.[1] || FX.autotune.scale;
-      module.subtitleEl.textContent = `${NOTE_NAMES[FX.autotune.root] || 'C'} ${scaleLabel} • ${formatNumericValue(FX.autotune.speed, 0)}ms • ${formatBackValue(getFxParamDef('autotune', 'mix'), FX.autotune.mix)} wet`;
-      module.el.classList.toggle('active', FX.autotune.mix > 0.001);
+        AUTOTUNE_SCALE_OPTIONS.find(([id]) => id === BUS.fx.autotune.scale)?.[1] || BUS.fx.autotune.scale;
+      module.subtitleEl.textContent = `${NOTE_NAMES[BUS.fx.autotune.root] || 'C'} ${scaleLabel} • ${formatNumericValue(BUS.fx.autotune.speed, 0)}ms • ${formatBackValue(getFxParamDef('autotune', 'mix'), BUS.fx.autotune.mix)} wet`;
+      module.el.classList.toggle('active', BUS.fx.autotune.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('delay') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('delay');
-      module.subtitleEl.textContent = `${FX.delay.mode === 'pingpong' ? 'PINGPONG' : 'STEREO'} • ${formatBackValue(getFxParamDef('delay', 'mix'), FX.delay.mix)} wet`;
-      module.el.classList.toggle('active', FX.delay.mix > 0.001);
+      module.subtitleEl.textContent = `${BUS.fx.delay.mode === 'pingpong' ? 'PINGPONG' : 'STEREO'} • ${formatBackValue(getFxParamDef('delay', 'mix'), BUS.fx.delay.mix)} wet`;
+      module.el.classList.toggle('active', BUS.fx.delay.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('filter') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('filter');
-      module.subtitleEl.textContent = `${FX.filter.mode.toUpperCase()} • ${formatNumericValue(FX.filter.cutoff, 0)}Hz`;
-      module.el.classList.toggle('active', FX.filter.mix > 0.001);
+      module.subtitleEl.textContent = `${BUS.fx.filter.mode.toUpperCase()} • ${formatNumericValue(BUS.fx.filter.cutoff, 0)}Hz`;
+      module.el.classList.toggle('active', BUS.fx.filter.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('resonator') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('resonator');
-      module.subtitleEl.textContent = `${FX.resonator.noteMode ? formatMidiNote(FX.resonator.note) : `${formatNumericValue(FX.resonator.freq, 0)}Hz`} • ${formatBackValue(getFxParamDef('resonator', 'mix'), FX.resonator.mix)} wet`;
-      module.el.classList.toggle('active', FX.resonator.mix > 0.001);
+      module.subtitleEl.textContent = `${BUS.fx.resonator.noteMode ? formatMidiNote(BUS.fx.resonator.note) : `${formatNumericValue(BUS.fx.resonator.freq, 0)}Hz`} • ${formatBackValue(getFxParamDef('resonator', 'mix'), BUS.fx.resonator.mix)} wet`;
+      module.el.classList.toggle('active', BUS.fx.resonator.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('bitreduce') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('bitreduce');
-      module.subtitleEl.textContent = `${formatNumericValue(FX.bitreduce.bits, 0)} bits • ${formatBackValue(getFxParamDef('bitreduce', 'mix'), FX.bitreduce.mix)} wet`;
-      module.el.classList.toggle('active', FX.bitreduce.mix > 0.001);
+      module.subtitleEl.textContent = `${formatNumericValue(BUS.fx.bitreduce.bits, 0)} bits • ${formatBackValue(getFxParamDef('bitreduce', 'mix'), BUS.fx.bitreduce.mix)} wet`;
+      module.el.classList.toggle('active', BUS.fx.bitreduce.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('sat') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('sat');
-      module.subtitleEl.textContent = `${formatBackValue(getFxParamDef('sat', 'drive'), FX.sat.drive)} drive`;
-      module.el.classList.toggle('active', FX.sat.mix > 0.001 || FX.sat.drive > 0.001);
+      module.subtitleEl.textContent = `${formatBackValue(getFxParamDef('sat', 'drive'), BUS.fx.sat.drive)} drive`;
+      module.el.classList.toggle('active', BUS.fx.sat.mix > 0.001 || BUS.fx.sat.drive > 0.001);
     })();
   BACK_PANEL.audioModules.get('reverb') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('reverb');
-      module.subtitleEl.textContent = `${formatBackValue(getFxParamDef('reverb', 'mix'), FX.reverb.mix)} wet`;
-      module.el.classList.toggle('active', FX.reverb.mix > 0.001);
+      module.subtitleEl.textContent = `${formatBackValue(getFxParamDef('reverb', 'mix'), BUS.fx.reverb.mix)} wet`;
+      module.el.classList.toggle('active', BUS.fx.reverb.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('limiter') &&
     (() => {
@@ -16248,7 +16226,7 @@ function fxUnitIdle(busId, id) {
   return true;
 }
 
-function syncFxIdleSplice(id, busId = activeBus) {
+function syncFxIdleSplice(id, busId = BUS.active) {
   if (!FX_IDLE_BYPASS.has(id) || !fxBuses[busId]) return;
   const should = fxStates[busId][id]?.enabled !== false && !fxUnitIdle(busId, id);
   if (should !== fxPlugged[busId].has(id)) reconnectFxChain(busId);
@@ -16260,7 +16238,7 @@ function reconcileFxIdleSplices() {
   });
 }
 
-function reconnectFxChain(busId = activeBus) {
+function reconnectFxChain(busId = BUS.active) {
   const bus = fxBuses[busId];
   if (!bus) return;
   bus.input.disconnect();
@@ -16281,13 +16259,13 @@ function reconnectFxChain(busId = activeBus) {
 
 // Push a unit's non-param state (filter type, delay mode, arp pattern/hold,
 // tremolo shape, autotune mask) to its nodes. The unit owns what that means.
-function applyUnitState(id, busId = activeBus) {
+function applyUnitState(id, busId = BUS.active) {
   const nodes = fxBuses[busId]?.[id];
   const unit = FX_UNITS_BY_ID.get(id);
   if (nodes && unit?.applyAll) unit.applyAll(nodes, { ac: engine.ctx, state: fxStates[busId][id] });
 }
 
-function applyFx(id, key, val, busId = activeBus) {
+function applyFx(id, key, val, busId = BUS.active) {
   const nodes = fxBuses[busId]?.[id];
   if (!nodes) return;
   if (key === 'mix') {
@@ -16321,7 +16299,7 @@ function applyLimiterAll() {
 }
 
 // Apply all reorderable-effect params for one bus from its state (no limiter).
-function applyAllFx(busId = activeBus) {
+function applyAllFx(busId = BUS.active) {
   FX_DEFS.forEach(({ id, params }) => {
     if (id === 'limiter') return;
     params.forEach(({ key }) => applyFx(id, key, getBaseFxValue(id, key, busId), busId));
@@ -16356,9 +16334,9 @@ function refreshLFOUI() {
 
 function refreshFilterUI() {
   ['cutoff', 'q', 'mix'].forEach((key) => {
-    fxControlBindings.get(`filter:${key}`)?.setValue(FX.filter[key]);
+    fxControlBindings.get(`filter:${key}`)?.setValue(BUS.fx.filter[key]);
   });
-  filterModeButtons.forEach((btn, mode) => btn.classList.toggle('active', FX.filter.mode === mode));
+  filterModeButtons.forEach((btn, mode) => btn.classList.toggle('active', BUS.fx.filter.mode === mode));
   refreshBackPanelState();
 }
 
@@ -16414,7 +16392,7 @@ function capturePreset() {
       FX_BUS_IDS.map((busId) => [busId, { ...INSTRUMENT_MIX[busId] }]),
     ),
     limiter: { ...LIMITER },
-    activeBus,
+    BUS.active,
     lfos: LFOS.map(({ label, rate, sync, syncIndex, shape, depth }) => ({
       label,
       rate,
@@ -16559,14 +16537,14 @@ function applyPreset(preset, { resetSources = true } = {}) {
     refreshMixerControls();
   }
 
-  if (preset.activeBus && FX_BUS_IDS.includes(preset.activeBus)) activeBus = preset.activeBus;
-  FX = fxStates[activeBus];
+  if (preset.activeBus && FX_BUS_IDS.includes(preset.activeBus)) BUS.active = preset.activeBus;
+  BUS.fx = fxStates[BUS.active];
   // Rebuild the FX column for the active bus (controls take their loaded values).
   renderActiveBusFx();
   updateFxActiveLabel();
   refreshFilterUI();
   document.querySelectorAll('#generators [data-bus]').forEach((el) => {
-    el.classList.toggle('active-instrument', el.dataset.bus === activeBus);
+    el.classList.toggle('active-instrument', el.dataset.bus === BUS.active);
   });
 
   if (preset.lfos) {
@@ -17211,7 +17189,7 @@ const limiterControls = new Map(); // master-limiter controls (global section)
 const fxPresetSelects = new Map();
 
 function getFxPresetState(effectId) {
-  return effectId === 'limiter' ? LIMITER : FX[effectId];
+  return effectId === 'limiter' ? LIMITER : BUS.fx[effectId];
 }
 
 function getMatchingFxPresetIndex(effectId) {
@@ -17245,7 +17223,7 @@ function applyFxPreset(effectId, presetIndex) {
     limiterControls.forEach((control, key) => control.setValue(LIMITER[key]));
     refreshFxPresetSelection(effectId);
   } else {
-    applyAllFx(activeBus);
+    applyAllFx(BUS.active);
     applyFxModulation();
     renderActiveBusFx();
   }
@@ -17390,7 +17368,7 @@ function renderActiveBusFx() {
   DEFAULT_FX_ORDER.forEach((effectId) => fxPresetSelects.delete(effectId));
 
   const fxDefById = new Map(FX_DEFS.map((def) => [def.id, def]));
-  fxOrders[activeBus].forEach((fxId) => {
+  fxOrders[BUS.active].forEach((fxId) => {
     const def = fxDefById.get(fxId);
     if (!def) return;
     const { section, header, content, toggle } = createFxSection(def.label);
@@ -17403,16 +17381,16 @@ function renderActiveBusFx() {
     powerBtn.className = 'fx-power';
     powerBtn.title = 'On/off — off unplugs the unit from the chain (saves CPU)';
     const syncPower = () => {
-      const on = FX[def.id].enabled !== false;
+      const on = BUS.fx[def.id].enabled !== false;
       powerBtn.classList.toggle('active', on);
       section.classList.toggle('fx-off', !on);
       powerBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
     };
     powerBtn.addEventListener('click', (event) => {
       event.stopPropagation();
-      FX[def.id].enabled = FX[def.id].enabled === false;
+      BUS.fx[def.id].enabled = BUS.fx[def.id].enabled === false;
       syncPower();
-      reconnectFxChain(activeBus);
+      reconnectFxChain(BUS.active);
     });
     header.insertBefore(powerBtn, header.firstChild);
     syncPower();
@@ -17426,11 +17404,11 @@ function renderActiveBusFx() {
         ['bandpass', 'BP'],
       ].forEach(([mode, label]) => {
         const btn = document.createElement('button');
-        btn.className = 'fx-mode-btn' + (FX.filter.mode === mode ? ' active' : '');
+        btn.className = 'fx-mode-btn' + (BUS.fx.filter.mode === mode ? ' active' : '');
         btn.textContent = label;
         btn.addEventListener('click', () => {
           markFxPresetCustom(def.id);
-          FX.filter.mode = mode;
+          BUS.fx.filter.mode = mode;
           applyUnitState('filter');
           refreshFilterUI();
           refreshBackPanelState();
@@ -17449,12 +17427,12 @@ function renderActiveBusFx() {
         ['pingpong', 'PingPong'],
       ].forEach(([mode, label]) => {
         const btn = document.createElement('button');
-        btn.className = 'fx-mode-btn' + (FX.delay.mode === mode ? ' active' : '');
+        btn.className = 'fx-mode-btn' + (BUS.fx.delay.mode === mode ? ' active' : '');
         btn.type = 'button';
         btn.textContent = label;
         btn.addEventListener('click', () => {
           markFxPresetCustom(def.id);
-          FX.delay.mode = mode;
+          BUS.fx.delay.mode = mode;
           applyUnitState('delay');
           refreshDelayModeUI();
           refreshBackPanelState();
@@ -17470,12 +17448,12 @@ function renderActiveBusFx() {
       modeRow.className = 'fx-mode-row';
       GRAINARP_PATTERNS.forEach(([mode, label]) => {
         const btn = document.createElement('button');
-        btn.className = 'fx-mode-btn' + (FX.grainarp.pattern === mode ? ' active' : '');
+        btn.className = 'fx-mode-btn' + (BUS.fx.grainarp.pattern === mode ? ' active' : '');
         btn.type = 'button';
         btn.textContent = label;
         btn.addEventListener('click', () => {
           markFxPresetCustom(def.id);
-          FX.grainarp.pattern = mode;
+          BUS.fx.grainarp.pattern = mode;
           applyUnitState('grainarp');
           refreshGrainArpPatternUI();
           refreshBackPanelState();
@@ -17491,11 +17469,11 @@ function renderActiveBusFx() {
       holdRow.className = 'fx-mode-row';
       grainArpHoldButton = document.createElement('button');
       grainArpHoldButton.type = 'button';
-      grainArpHoldButton.className = 'fx-mode-btn' + (FX.grainarp.hold ? ' active' : '');
+      grainArpHoldButton.className = 'fx-mode-btn' + (BUS.fx.grainarp.hold ? ' active' : '');
       grainArpHoldButton.textContent = 'HOLD';
       grainArpHoldButton.title = 'Freeze the capture ring — the arp keeps looping what it holds';
       grainArpHoldButton.addEventListener('click', () => {
-        FX.grainarp.hold = !FX.grainarp.hold;
+        BUS.fx.grainarp.hold = !BUS.fx.grainarp.hold;
         applyUnitState('grainarp');
         refreshGrainArpHoldUI();
         refreshBackPanelState();
@@ -17515,12 +17493,12 @@ function renderActiveBusFx() {
       ].forEach(([shape, label]) => {
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'fx-mode-btn' + (FX.pitchtrem.shape === shape ? ' active' : '');
+        btn.className = 'fx-mode-btn' + (BUS.fx.pitchtrem.shape === shape ? ' active' : '');
         btn.textContent = label;
         btn.title = `${label} waveform — shared by pitch sweep and auto-pan`;
         btn.addEventListener('click', () => {
           markFxPresetCustom(def.id);
-          FX.pitchtrem.shape = shape;
+          BUS.fx.pitchtrem.shape = shape;
           applyUnitState('pitchtrem');
           refreshPitchTremoloUI();
           refreshBackPanelState();
@@ -17543,10 +17521,10 @@ function renderActiveBusFx() {
         opt.textContent = name;
         rootSelect.appendChild(opt);
       });
-      rootSelect.value = `${FX.autotune.root}`;
+      rootSelect.value = `${BUS.fx.autotune.root}`;
       rootSelect.addEventListener('change', () => {
         markFxPresetCustom(def.id);
-        FX.autotune.root = clamp(Number(rootSelect.value) || 0, 0, 11);
+        BUS.fx.autotune.root = clamp(Number(rootSelect.value) || 0, 0, 11);
         applyUnitState('autotune');
         refreshBackPanelState();
       });
@@ -17559,10 +17537,10 @@ function renderActiveBusFx() {
         opt.textContent = label;
         scaleSelect.appendChild(opt);
       });
-      scaleSelect.value = FX.autotune.scale;
+      scaleSelect.value = BUS.fx.autotune.scale;
       scaleSelect.addEventListener('change', () => {
         markFxPresetCustom(def.id);
-        FX.autotune.scale = scaleSelect.value;
+        BUS.fx.autotune.scale = scaleSelect.value;
         applyUnitState('autotune');
         refreshBackPanelState();
       });
@@ -17579,14 +17557,14 @@ function renderActiveBusFx() {
       const isMappable = !!getFxParamBounds(def.id, p.key);
       const control = makeControlRow(
         p,
-        FX[def.id][p.key],
+        BUS.fx[def.id][p.key],
         (v) => {
           markFxPresetCustom(def.id);
           if (def.id === 'delay' && p.key === 'time') {
-            if (FX.delay.sync) {
-              FX.delay.syncIndex = Math.round(v);
+            if (BUS.fx.delay.sync) {
+              BUS.fx.delay.syncIndex = Math.round(v);
             } else {
-              FX.delay.time = v;
+              BUS.fx.delay.time = v;
             }
             if (isMappable) applyFxModulation();
             else applyFx('delay', 'time', getBaseFxValue('delay', 'time'));
@@ -17595,10 +17573,10 @@ function renderActiveBusFx() {
             return;
           }
           if (def.id === 'beatrepeat' && p.key === 'interval') {
-            if (FX.beatrepeat.sync) {
-              FX.beatrepeat.syncIndex = Math.round(v);
+            if (BUS.fx.beatrepeat.sync) {
+              BUS.fx.beatrepeat.syncIndex = Math.round(v);
             } else {
-              FX.beatrepeat.interval = v;
+              BUS.fx.beatrepeat.interval = v;
             }
             applyFx('beatrepeat', 'interval', getBaseFxValue('beatrepeat', 'interval'));
             refreshModulationVisuals();
@@ -17606,10 +17584,10 @@ function renderActiveBusFx() {
             return;
           }
           if (def.id === 'beatrepeat' && p.key === 'grid') {
-            if (FX.beatrepeat.gridSync) {
-              FX.beatrepeat.gridSyncIndex = Math.round(v);
+            if (BUS.fx.beatrepeat.gridSync) {
+              BUS.fx.beatrepeat.gridSyncIndex = Math.round(v);
             } else {
-              FX.beatrepeat.grid = v;
+              BUS.fx.beatrepeat.grid = v;
             }
             applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
             refreshModulationVisuals();
@@ -17617,10 +17595,10 @@ function renderActiveBusFx() {
             return;
           }
           if (def.id === 'grainarp' && p.key === 'grid') {
-            if (FX.grainarp.gridSync) {
-              FX.grainarp.gridSyncIndex = Math.round(v);
+            if (BUS.fx.grainarp.gridSync) {
+              BUS.fx.grainarp.gridSyncIndex = Math.round(v);
             } else {
-              FX.grainarp.grid = v;
+              BUS.fx.grainarp.grid = v;
             }
             applyFx('grainarp', 'grid', getBaseFxValue('grainarp', 'grid'));
             refreshModulationVisuals();
@@ -17628,10 +17606,10 @@ function renderActiveBusFx() {
             return;
           }
           if (def.id === 'pitchtrem' && p.key === 'rate') {
-            if (FX.pitchtrem.sync) {
-              FX.pitchtrem.syncIndex = Math.round(v);
+            if (BUS.fx.pitchtrem.sync) {
+              BUS.fx.pitchtrem.syncIndex = Math.round(v);
             } else {
-              FX.pitchtrem.rate = v;
+              BUS.fx.pitchtrem.rate = v;
             }
             if (isMappable) applyFxModulation();
             else applyFx('pitchtrem', 'rate', getBaseFxValue('pitchtrem', 'rate'));
@@ -17640,10 +17618,10 @@ function renderActiveBusFx() {
             return;
           }
           if (def.id === 'resonator' && p.key === 'freq') {
-            if (FX.resonator.noteMode) {
-              FX.resonator.note = Math.round(v);
+            if (BUS.fx.resonator.noteMode) {
+              BUS.fx.resonator.note = Math.round(v);
             } else {
-              FX.resonator.freq = v;
+              BUS.fx.resonator.freq = v;
             }
             if (isMappable) applyFxModulation();
             else applyFx('resonator', 'freq', getBaseFxValue('resonator', 'freq'));
@@ -17652,7 +17630,7 @@ function renderActiveBusFx() {
             refreshBackPanelState();
             return;
           }
-          FX[def.id][p.key] = v;
+          BUS.fx[def.id][p.key] = v;
           if (isMappable) applyFxModulation();
           else applyFx(def.id, p.key, v);
           refreshModulationVisuals();
@@ -17664,9 +17642,9 @@ function renderActiveBusFx() {
       content.appendChild(control);
 
       if (def.id === 'delay' && p.key === 'time') {
-        delaySyncModeControl = buildSyncModeRow(FX.delay.sync, (mode) => {
+        delaySyncModeControl = buildSyncModeRow(BUS.fx.delay.sync, (mode) => {
           markFxPresetCustom(def.id);
-          FX.delay.sync = mode === 'sync';
+          BUS.fx.delay.sync = mode === 'sync';
           refreshDelayTimeUI();
           if (isMappable) applyFxModulation();
           else applyFx('delay', 'time', getBaseFxValue('delay', 'time'));
@@ -17677,9 +17655,9 @@ function renderActiveBusFx() {
       }
 
       if (def.id === 'pitchtrem' && p.key === 'rate') {
-        pitchTremoloSyncModeControl = buildSyncModeRow(FX.pitchtrem.sync, (mode) => {
+        pitchTremoloSyncModeControl = buildSyncModeRow(BUS.fx.pitchtrem.sync, (mode) => {
           markFxPresetCustom(def.id);
-          FX.pitchtrem.sync = mode === 'sync';
+          BUS.fx.pitchtrem.sync = mode === 'sync';
           refreshPitchTremoloUI();
           if (isMappable) applyFxModulation();
           else applyFx('pitchtrem', 'rate', getBaseFxValue('pitchtrem', 'rate'));
@@ -17690,9 +17668,9 @@ function renderActiveBusFx() {
       }
 
       if (def.id === 'beatrepeat' && p.key === 'interval') {
-        beatRepeatSyncModeControl = buildSyncModeRow(FX.beatrepeat.sync, (mode) => {
+        beatRepeatSyncModeControl = buildSyncModeRow(BUS.fx.beatrepeat.sync, (mode) => {
           markFxPresetCustom(def.id);
-          FX.beatrepeat.sync = mode === 'sync';
+          BUS.fx.beatrepeat.sync = mode === 'sync';
           refreshBeatRepeatIntervalUI();
           applyFx('beatrepeat', 'interval', getBaseFxValue('beatrepeat', 'interval'));
           refreshModulationVisuals();
@@ -17702,9 +17680,9 @@ function renderActiveBusFx() {
       }
 
       if (def.id === 'beatrepeat' && p.key === 'grid') {
-        beatRepeatGridSyncModeControl = buildSyncModeRow(FX.beatrepeat.gridSync, (mode) => {
+        beatRepeatGridSyncModeControl = buildSyncModeRow(BUS.fx.beatrepeat.gridSync, (mode) => {
           markFxPresetCustom(def.id);
-          FX.beatrepeat.gridSync = mode === 'sync';
+          BUS.fx.beatrepeat.gridSync = mode === 'sync';
           refreshBeatRepeatGridUI();
           applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
           refreshModulationVisuals();
@@ -17714,9 +17692,9 @@ function renderActiveBusFx() {
       }
 
       if (def.id === 'grainarp' && p.key === 'grid') {
-        grainArpGridSyncModeControl = buildSyncModeRow(FX.grainarp.gridSync, (mode) => {
+        grainArpGridSyncModeControl = buildSyncModeRow(BUS.fx.grainarp.gridSync, (mode) => {
           markFxPresetCustom(def.id);
-          FX.grainarp.gridSync = mode === 'sync';
+          BUS.fx.grainarp.gridSync = mode === 'sync';
           refreshGrainArpGridUI();
           applyFx('grainarp', 'grid', getBaseFxValue('grainarp', 'grid'));
           refreshModulationVisuals();
@@ -17727,10 +17705,10 @@ function renderActiveBusFx() {
 
       if (def.id === 'resonator' && p.key === 'freq') {
         resonatorNoteModeControl = buildSyncModeRow(
-          FX.resonator.noteMode,
+          BUS.fx.resonator.noteMode,
           (mode) => {
             markFxPresetCustom(def.id);
-            FX.resonator.noteMode = mode === 'note';
+            BUS.fx.resonator.noteMode = mode === 'note';
             refreshResonatorFreqUI();
             if (isMappable) applyFxModulation();
             else applyFx('resonator', 'freq', getBaseFxValue('resonator', 'freq'));
@@ -17769,15 +17747,15 @@ function renderActiveBusFx() {
 
 function updateFxActiveLabel() {
   const el = document.getElementById('fxActiveLabel');
-  if (el) el.textContent = FX_BUS_LABELS[activeBus] || '';
+  if (el) el.textContent = FX_BUS_LABELS[BUS.active] || '';
 }
 
 // Make an instrument the active one: its chain fills the FX column. Controls
 // inside a panel keep working — clicking anywhere in a panel just selects it.
 function setActiveBus(busId) {
   if (!FX_BUS_IDS.includes(busId)) return;
-  activeBus = busId;
-  FX = fxStates[activeBus];
+  BUS.active = busId;
+  BUS.fx = fxStates[BUS.active];
   document.querySelectorAll('#generators [data-bus]').forEach((el) => {
     el.classList.toggle('active-instrument', el.dataset.bus === busId);
   });
@@ -17861,11 +17839,11 @@ function commitFxOrderFromDom() {
   DEFAULT_FX_ORDER.forEach((id) => {
     if (!order.includes(id)) order.push(id);
   });
-  fxOrders[activeBus] = order;
-  reconnectFxChain(activeBus);
+  fxOrders[BUS.active] = order;
+  reconnectFxChain(BUS.active);
 }
 
-function setFxOrder(order, busId = activeBus) {
+function setFxOrder(order, busId = BUS.active) {
   if (!Array.isArray(order)) return;
   const next = order.filter((id) => DEFAULT_FX_ORDER.includes(id));
   DEFAULT_FX_ORDER.forEach((id) => {
@@ -17873,7 +17851,7 @@ function setFxOrder(order, busId = activeBus) {
   });
   fxOrders[busId] = next;
   reconnectFxChain(busId);
-  if (busId === activeBus) renderActiveBusFx();
+  if (busId === BUS.active) renderActiveBusFx();
 }
 
 async function start() {
