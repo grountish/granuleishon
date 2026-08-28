@@ -2,85 +2,92 @@
 
 ## Status
 
-- [x] **Phase 1 — ES modules.** `main.js` → `src/app.js` loaded with
-      `type="module"`; processors → `worklets/`; `serve.py` watches
-      subdirectories. (`b57979b`)
-- [~] **Phase 2 — leaf modules.** Done: `core/util.js`, `core/theory.js`,
-      `core/tempo.js`, `core/storage.js`, `render/wav.js`,
-      `instruments/gen4/defs.js`, `master/specs.js`, `visual/vizgl.js`.
-      (`d5de822`, `c2a8221`, `7e88088`, `0d58d36`, `8762694`)
-      **Blocked on phase 3:** everything left couples to the engine
-      (`audioCtx`, `master`, `started`) or to a shared state object
-      (`MASTERING`, `VIZ`, `UI_VIEW`, `state`) — see the coupling table below.
-- [~] **Phase 3 — own the globals.** (`0d03082`, `51a6806`, `e5d3ac8`)
-      Key discovery: a **SCREAMING_CASE state object needs no rename at all** —
-      moving the declaration into a module and importing it is enough, which
-      is far cheaper than the engine rename this phase was scoped around.
-      Done that way: `master/state.js` (MASTERING, its module ids, the
-      pristine defaults snapshot, the factory chains), `core/dsp.js` (RBJ
-      biquad math shared by the LUFS meter and the EQ plot), and
-      `master/eq-plot.js` — which the mastering-state move unblocked.
-      **Still to do:** the lowercase engine vars, which *do* need renaming:
-      `audioCtx` (121 refs), `master` (133), `node` (44), `started` (25).
-      Only one local shadows any of them (`const node` in the orbit view), so
-      the rename is mechanical — but it is the one genuinely risky step left,
-      and it gates the FX chain, metering, transport/viz and mastering-view
-      sections.
-- [x] **Phase 4 — FX unit registry.** (`4933a73`, `4d1a0a3`, `14ec0fb`) Each
-      effect declares itself in `src/fx/units/*.js` — data, `build`, `apply`,
-      `applyAll` — and `fx/registry.js` derives `FX_DEFS`, `FX_PRESETS`,
-      `DEFAULT_FX_ORDER`, `FX_IDLE_BYPASS`, `makeDefaultFxState` and the
-      wet/dry scaffold. `buildBusFx` went 389 → 87 lines and names no
-      effect; `applyFx` lost its ten-branch if-chain (mix is handled once,
-      since every unit crossfades identically); the six `apply*Mode` helpers
-      collapsed into one `applyUnitState`. The unit contract takes the audio
-      context as an argument, which is why this phase did not need phase 3.
-      **Still in app.js:** `extraUI` (the per-effect mode rows and selects in
-      `renderActiveBusFx`) and `subtitle` (the back-panel lines) — both are
-      DOM-facing and want the phase-6 event bus first.
-- [ ] Phases 5–7.
+- [x] **Phase 1 — ES modules.** `main.js` → `src/app.js` with `type="module"`;
+      processors → `worklets/`; `serve.py` watches subdirectories. (`b57979b`)
+- [~] **Phase 2 — leaf modules.** `core/{util,theory,tempo,storage,dsp,input,events,engine}`,
+      `render/{wav,state}`, `ui/{status,view,popover}`, `visual/{vizgl,state}`,
+      `master/{specs,state,eq-plot}`, `mixer/state`, `link/state`,
+      `modulation/state`, `sequencing/state`, `instruments/*`.
+      **Not moved:** the knob widget and control row — see below.
+- [x] **Phase 3 — own the globals.** Two different problems, two solutions.
+      A `const` container that is *mutated but never reassigned* crosses a
+      module boundary under its own name, so ~20 of them moved with **no
+      rename at all**. Only genuinely reassigned bindings needed renaming:
+      `audioCtx`/`node`/`master`/`started`/`micStream`/`granularInputSource`
+      became fields on `engine` (`core/engine.js`), and `activeBus`/`FX`
+      became `BUS.active`/`BUS.fx` (`fx/state.js`).
+- [x] **Phase 4 — FX unit registry.** Each effect declares itself in one file
+      under `src/fx/units/` — data, `build`, `apply`, `applyAll` — and
+      `fx/registry.js` derives every table plus the wet/dry scaffold.
+      `buildBusFx` went 389 → 87 lines and names no effect.
+      **Still in app.js:** `extraUI` and the back-panel `subtitle` lines.
+- [ ] **Phase 5 — feature folders.** Barely started, and it is now the bulk of
+      what is left. See "What remains" below.
+- [~] **Phase 6 — shared abstractions.** Done: **E** the event bus
+      (`core/events.js`, 65 `refreshBackPanelState()` calls → `emit('state')`),
+      **D** floating-menu positioning (`ui/popover.js`, 6 copies → 1),
+      **C** tempo-synced params (`fx/tempo-sync.js`, 10 consts and 5 refresh
+      functions → one table). **Not done: A** (`bindParamControls` across the
+      five param families) and **B** (per-module `serialize`/`restore`).
+- [x] **Phase 7 — CSS.** `style.css` is now 12 `@import`s into `styles/*.css`,
+      verified byte-identical in import order so no rule changed precedence.
 
-`src/app.js` is down from 21,273 to 18,512 lines with 23 modules carved out.
+`src/app.js`: **21,273 → 18,044 lines**, with 41 JS modules and 12 stylesheets
+split out.
 
-Measured coupling of the sections still in `app.js` — how many app.js-local
-names each still reaches for. Low numbers are the cheap next extractions:
+## What remains
+
+Phase 5 is the long tail: roughly 18k lines of interdependent UI and DSP code
+still in `app.js`. Everything now blocking it is **function-level** coupling,
+not state — the state extraction is finished. The table below is the work
+queue, ordered by how many `app.js`-local names each section still reaches for.
+
+Two things make the rest harder than what came before, and both are why it
+stopped here rather than being pushed through:
+
+1. **Cycles.** Moving a section that calls back into `app.js` needs either the
+   callee moved with it (cluster the whole feature) or the call inverted
+   through the event bus. Neither is mechanical, so each section needs a
+   judgement call rather than a scripted move.
+2. **No test suite.** Every step so far was verifiable by construction — pure
+   moves diffed line-for-line, renames diffed against the previous revision,
+   imports checked against actual exports. Feature clustering cannot be
+   verified that way, so it wants manual testing per step.
+
+The deferred phase-6 items are riskier than the ones done: **A** touches every
+param control in the app, and **B** touches preset serialization, where a
+mistake silently corrupts saved projects rather than breaking loudly.
+
+The knob widget and control row are still in `app.js` for the same reason they
+were at the start: they reach into modulation visuals and the knob context
+menu, so they want their feature cluster moved with them.
 
 | section | ext refs | lines |
 | --- | --- | --- |
-| LFO | 5 | 250 |
-| Transport-locked events | 8 | 578 |
-| Song block context menu (cycles / remove) | 9 | 141 |
-| Song entry ops | 9 | 269 |
-| Note generators | 9 | 314 |
-| Mastering view | 9 | 663 |
-| Metering | 16 | 675 |
-| FX Chain | 19 | 755 |
-| Harmonizer | 20 | 308 |
-| LAN Link | 24 | 371 |
-| Song bounce | 27 | 269 |
-| Trig conditions | 31 | 294 |
-| Knob | 34 | 364 |
-| Song cursor / playback | 36 | 308 |
-| Gen 3: Oscillator | 40 | 759 |
-| Song morph | 42 | 423 |
-| Visualizer (per-generator) | 51 | 1,025 |
-| Loops & Song Arrangement | 52 | 826 |
-| Genre kits | 59 | 1,291 |
-| Audio clip persistence | 61 | 524 |
-| Orbit view | 61 | 828 |
-| Lane transforms | 76 | 1,297 |
-| Project file export/import | 83 | 952 |
-| Mod source context menu (right-click a knob's map LED) | 88 | 1,359 |
-| FX reordering (drag & drop) | 112 | 556 |
-| Mastering persistence | 149 | 1,979 |
-
-The knob widget and control row stay put for now: they reach into modulation
-visuals and the knob context menu, so they want the phase-6 event bus first.
-
-Duplicates collapsed while moving (phase 2 so far): `midiNoteToFrequency` ≡
-`midiToFreqHz`, `GEN4_ROOT_NAMES` ≡ `NOTE_NAMES`, a third inline copy of the
-pitch formula in `OSC_NOTES`, `frequencyToMidi` restating `freqHzToMidi`, and
-`formatResonatorNote` ≡ a separate `formatMidiNote`.
+| Song entry ops | 4 | 269 |
+| Transport-locked events | 4 | 578 |
+| Note generators | 5 | 314 |
+| Mastering view | 8 | 660 |
+| LFO | 9 | 194 |
+| Metering | 12 | 672 |
+| FX Chain | 12 | 712 |
+| Harmonizer | 15 | 308 |
+| Song bounce | 16 | 254 |
+| Solo mode | 16 | 358 |
+| Song cursor / playback | 22 | 308 |
+| Trig conditions | 25 | 294 |
+| Knob | 30 | 364 |
+| Gen 3: Oscillator | 31 | 738 |
+| Visualizer (per-generator) | 35 | 1,384 |
+| Genre kits | 43 | 1,244 |
+| Loops & Song Arrangement | 44 | 789 |
+| Audio clip persistence | 46 | 524 |
+| Orbit view | 48 | 828 |
+| Mod source context menu (right-click a knob's map LED) | 55 | 1,292 |
+| Project file export/import | 69 | 952 |
+| Lane transforms | 72 | 1,297 |
+| FX reordering (drag & drop) | 91 | 556 |
+| Mastering persistence | 122 | 1,979 |
 
 ## Where we are
 
