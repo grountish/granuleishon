@@ -75,6 +75,7 @@ import {
 } from './fx/registry.js';
 import { GEN4_DEFS, GEN4_PRESETS } from './instruments/gen4/defs.js';
 import { GEN4 } from './instruments/gen4/state.js';
+import { gen4Ui } from './instruments/gen4/editor-state.js';
 import { GEN3 } from './instruments/gen3/state.js';
 import { MASTERING_CONTROL_SPECS, MASTERING_EQ_BANDS } from './master/specs.js';
 import {
@@ -4397,7 +4398,7 @@ function buildOscPanel() {
         if (stepLocks) {
           stepLocks[p.key] = v;
           control.classList.add('parameter-locked');
-          gen4ApplyStepBtn(gen4LockSelection.ci, gen4LockSelection.si);
+          gen4ApplyStepBtn(gen4Ui.lockSelection.ci, gen4Ui.lockSelection.si);
           refreshGen4LockEditor();
           return;
         }
@@ -4734,7 +4735,7 @@ function applyGen4Preset(ci, presetIndex) {
     gen4ControlBindings[ci].get(key)?.setValue(value);
   });
   for (let si = 0; si < 32; si++) gen4ApplyStepBtn(ci, si);
-  if (ci === gen4SelectedNoteChannel && gen4EditorMode === 'notes') {
+  if (ci === gen4Ui.selectedNoteChannel && gen4Ui.editorMode === 'notes') {
     for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
   }
   refreshGen4PresetSelection(ci);
@@ -4808,7 +4809,7 @@ function applyGen4KitPreset(presetIndex) {
     for (let si = 0; si < 32; si++) gen4ApplyStepBtn(ci, si);
   });
   gen4RefreshStepDisplay();
-  if (gen4EditorMode === 'notes') refreshGen4NoteEditor();
+  if (gen4Ui.editorMode === 'notes') refreshGen4NoteEditor();
   refreshGen4LockEditor();
   emit('state');
 }
@@ -4862,23 +4863,8 @@ const GEN4_NOTE_MIN = 24;
 const GEN4_NOTE_MAX = 127;
 const gen4EditorModeButtons = new Map();
 const gen4NoteLaneButtons = new Map();
-let gen4EditorMode = 'grid';
-let gen4SelectedNoteChannel = Math.max(
-  0,
-  GEN4_DEFS.findIndex((def) => def.id === 'fm'),
-);
-let gen4GridEl = null;
-let gen4HintsEl = null;
-let gen4NoteEditorEl = null;
-let gen4NoteRollEl = null;
-let gen4NoteStepNumberEls = []; // roll header numbers — double as lock-step selectors
 let gen4NotePencilBtn = null;
-let gen4NotePencilEnabled = true;
 let gen4GenTab = 'euc'; // which generator's controls the toolbar shows
-let gen4NoteCellEls = Array.from({ length: 32 }, () => new Map());
-let gen4NotePlayheadStep = -1;
-let gen4LockSelection = null;
-let gen4LockClearBtn = null;
 const gen4NoteDrawState = {
   active: false,
   action: 'draw',
@@ -5449,7 +5435,7 @@ function gen4RefreshStepDisplay() {
       el.classList.toggle('step-inactive', inactive);
     }
   });
-  if (gen4EditorMode === 'notes') refreshGen4NotePlayhead();
+  if (gen4Ui.editorMode === 'notes') refreshGen4NotePlayhead();
 }
 
 function gen4IsStepDefault(ch, stepIdx) {
@@ -5512,9 +5498,9 @@ function gen4SetStepCount(n, { duplicateOnExpand = true } = {}) {
   gen4StepCountBtns.forEach((btn) =>
     btn.classList.toggle('active', Number(btn.dataset.steps) === n),
   );
-  if (gen4EditorMode === 'notes') {
+  if (gen4Ui.editorMode === 'notes') {
     for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
-    gen4NoteRollEl?.querySelectorAll('.drum-note-step-number').forEach((el, si) => {
+    gen4Ui.noteRollEl?.querySelectorAll('.drum-note-step-number').forEach((el, si) => {
       el.classList.toggle('step-inactive', si >= n);
     });
   }
@@ -5751,13 +5737,13 @@ function getGen4NoteFocusMidi(ci) {
 }
 
 function refreshGen4NoteStep(stepIdx) {
-  const ch = GEN4.channels[gen4SelectedNoteChannel];
+  const ch = GEN4.channels[gen4Ui.selectedNoteChannel];
   const selectedMidi = ch.steps[stepIdx] ? ch.notes[stepIdx] : null;
   const inheritedMidi =
     ch.steps[stepIdx] && !Number.isFinite(selectedMidi)
-      ? clamp(getGen4BaseMidi(gen4SelectedNoteChannel), GEN4_NOTE_MIN, GEN4_NOTE_MAX)
+      ? clamp(getGen4BaseMidi(gen4Ui.selectedNoteChannel), GEN4_NOTE_MIN, GEN4_NOTE_MAX)
       : null;
-  gen4NoteCellEls[stepIdx].forEach((cell, midi) => {
+  gen4Ui.noteCellEls[stepIdx].forEach((cell, midi) => {
     cell.classList.toggle('on', midi === selectedMidi);
     cell.classList.toggle('inherited', midi === inheritedMidi);
     cell.classList.toggle('step-inactive', stepIdx >= GEN4.stepCount);
@@ -5766,10 +5752,10 @@ function refreshGen4NoteStep(stepIdx) {
 
 function editGen4NoteCell(stepIdx, midi, action) {
   if (stepIdx >= GEN4.stepCount) return;
-  const ch = GEN4.channels[gen4SelectedNoteChannel];
+  const ch = GEN4.channels[gen4Ui.selectedNoteChannel];
   const currentMidi = Number.isFinite(ch.notes[stepIdx])
     ? ch.notes[stepIdx]
-    : clamp(getGen4BaseMidi(gen4SelectedNoteChannel), GEN4_NOTE_MIN, GEN4_NOTE_MAX);
+    : clamp(getGen4BaseMidi(gen4Ui.selectedNoteChannel), GEN4_NOTE_MIN, GEN4_NOTE_MAX);
 
   if (action === 'erase') {
     if (!ch.steps[stepIdx] || currentMidi !== midi) return;
@@ -5785,7 +5771,7 @@ function editGen4NoteCell(stepIdx, midi, action) {
     ch.notes[stepIdx] = midi;
   }
 
-  gen4ApplyStepBtn(gen4SelectedNoteChannel, stepIdx);
+  gen4ApplyStepBtn(gen4Ui.selectedNoteChannel, stepIdx);
   refreshGen4NoteStep(stepIdx);
 }
 
@@ -5801,23 +5787,23 @@ function editGen4NoteCellFromElement(cell) {
 }
 
 function refreshGen4NotePlayhead() {
-  gen4NoteCellEls[gen4NotePlayheadStep]?.forEach((cell) => cell.classList.remove('current'));
-  gen4NotePlayheadStep =
+  gen4Ui.noteCellEls[gen4Ui.notePlayheadStep]?.forEach((cell) => cell.classList.remove('current'));
+  gen4Ui.notePlayheadStep =
     GEN4.displayStep >= 0 && GEN4.displayStep < GEN4.stepCount ? GEN4.displayStep : -1;
-  gen4NoteCellEls[gen4NotePlayheadStep]?.forEach((cell) => cell.classList.add('current'));
+  gen4Ui.noteCellEls[gen4Ui.notePlayheadStep]?.forEach((cell) => cell.classList.add('current'));
 }
 
 function refreshGen4NoteEditor() {
   gen4EditorModeButtons.forEach((btn, mode) => {
-    btn.classList.toggle('active', mode === gen4EditorMode);
+    btn.classList.toggle('active', mode === gen4Ui.editorMode);
   });
   gen4NoteLaneButtons.forEach((btn, ci) => {
-    btn.classList.toggle('active', ci === gen4SelectedNoteChannel);
+    btn.classList.toggle('active', ci === gen4Ui.selectedNoteChannel);
   });
-  if (gen4GridEl) gen4GridEl.hidden = gen4EditorMode === 'notes';
-  if (gen4HintsEl) gen4HintsEl.hidden = gen4EditorMode === 'notes';
-  if (gen4NoteEditorEl) gen4NoteEditorEl.hidden = gen4EditorMode !== 'notes';
-  if (gen4EditorMode === 'notes') {
+  if (gen4Ui.gridEl) gen4Ui.gridEl.hidden = gen4Ui.editorMode === 'notes';
+  if (gen4Ui.hintsEl) gen4Ui.hintsEl.hidden = gen4Ui.editorMode === 'notes';
+  if (gen4Ui.noteEditorEl) gen4Ui.noteEditorEl.hidden = gen4Ui.editorMode !== 'notes';
+  if (gen4Ui.editorMode === 'notes') {
     for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
     refreshGen4NotePlayhead();
   }
@@ -5830,9 +5816,9 @@ function hasGen4StepLocks(ci, si) {
 // The OSC channel has no drum-panel knobs — its locks are edited through the
 // gen3 panel itself. Non-null while lock mode has an OSC step selected.
 function getGen3StepLockTarget() {
-  if (!gen4LockSelection) return null;
-  if (GEN4_DEFS[gen4LockSelection.ci]?.id !== 'osc') return null;
-  return GEN4.channels[gen4LockSelection.ci].locks[gen4LockSelection.si] || null;
+  if (!gen4Ui.lockSelection) return null;
+  if (GEN4_DEFS[gen4Ui.lockSelection.ci]?.id !== 'osc') return null;
+  return GEN4.channels[gen4Ui.lockSelection.ci].locks[gen4Ui.lockSelection.si] || null;
 }
 
 function refreshGen4LockEditor() {
@@ -5840,11 +5826,11 @@ function refreshGen4LockEditor() {
     for (let si = 0; si < 32; si++) {
       gen4StepEls[ci][si]?.classList.toggle(
         'lock-selected',
-        gen4LockSelection?.ci === ci && gen4LockSelection?.si === si,
+        gen4Ui.lockSelection?.ci === ci && gen4Ui.lockSelection?.si === si,
       );
     }
-    const selected = gen4LockSelection?.ci === ci;
-    const locks = selected ? GEN4.channels[ci].locks[gen4LockSelection.si] : null;
+    const selected = gen4Ui.lockSelection?.ci === ci;
+    const locks = selected ? GEN4.channels[ci].locks[gen4Ui.lockSelection.si] : null;
     def.paramDefs.forEach(({ key }) => {
       const control = gen4ControlBindings[ci].get(key);
       if (!control) return;
@@ -5875,26 +5861,26 @@ function refreshGen4LockEditor() {
   });
   // Roll header numbers double as lock selectors for the current lane; the
   // whole column tints so the selected slot reads at a glance.
-  gen4NoteStepNumberEls.forEach((el, si) => {
+  gen4Ui.noteStepNumberEls.forEach((el, si) => {
     el?.classList.toggle(
       'lock-selected',
-      gen4LockSelection?.ci === gen4SelectedNoteChannel && gen4LockSelection?.si === si,
+      gen4Ui.lockSelection?.ci === gen4Ui.selectedNoteChannel && gen4Ui.lockSelection?.si === si,
     );
   });
-  gen4NoteCellEls.forEach((cells, si) => {
-    const on = gen4LockSelection?.ci === gen4SelectedNoteChannel && gen4LockSelection?.si === si;
+  gen4Ui.noteCellEls.forEach((cells, si) => {
+    const on = gen4Ui.lockSelection?.ci === gen4Ui.selectedNoteChannel && gen4Ui.lockSelection?.si === si;
     cells.forEach((cell) => cell.classList.toggle('lock-selected', on));
   });
-  if (gen4LockClearBtn) {
-    gen4LockClearBtn.hidden = !gen4LockSelection;
-    gen4LockClearBtn.disabled =
-      !gen4LockSelection || !hasGen4StepLocks(gen4LockSelection.ci, gen4LockSelection.si);
+  if (gen4Ui.lockClearBtn) {
+    gen4Ui.lockClearBtn.hidden = !gen4Ui.lockSelection;
+    gen4Ui.lockClearBtn.disabled =
+      !gen4Ui.lockSelection || !hasGen4StepLocks(gen4Ui.lockSelection.ci, gen4Ui.lockSelection.si);
   }
 }
 
 function selectGen4LockStep(ci, si) {
   if (!GEN4.channels[ci]?.steps[si]) return;
-  gen4LockSelection = { ci, si };
+  gen4Ui.lockSelection = { ci, si };
   gen4ParamSections.get(ci)?.setCollapsed(false);
   refreshGen4LockEditor();
 }
@@ -5902,8 +5888,8 @@ function selectGen4LockStep(ci, si) {
 // Same-step select again → deselect. The single entry point for both the
 // grid's alt+click and the roll header's click.
 function toggleGen4LockStep(ci, si) {
-  if (gen4LockSelection?.ci === ci && gen4LockSelection?.si === si) {
-    gen4LockSelection = null;
+  if (gen4Ui.lockSelection?.ci === ci && gen4Ui.lockSelection?.si === si) {
+    gen4Ui.lockSelection = null;
     refreshGen4LockEditor();
     return;
   }
@@ -5915,14 +5901,14 @@ function toggleGen4LockStep(ci, si) {
 // note (see ensureGen4LockStepActive). Clicking the selected slot again
 // deselects; clicking a different row of an empty selected slot re-aims it.
 function selectGen4NoteSlot(si, midi = null) {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const active = GEN4.channels[ci]?.steps[si];
-  const sameSlot = gen4LockSelection?.ci === ci && gen4LockSelection?.si === si;
-  if (sameSlot && (active || (gen4LockSelection.pendingMidi ?? null) === midi)) {
+  const sameSlot = gen4Ui.lockSelection?.ci === ci && gen4Ui.lockSelection?.si === si;
+  if (sameSlot && (active || (gen4Ui.lockSelection.pendingMidi ?? null) === midi)) {
     clearGen4LockSelection();
     return;
   }
-  gen4LockSelection = { ci, si, pendingMidi: midi };
+  gen4Ui.lockSelection = { ci, si, pendingMidi: midi };
   gen4ParamSections.get(ci)?.setCollapsed(false);
   refreshGen4LockEditor();
 }
@@ -5931,28 +5917,28 @@ function selectGen4NoteSlot(si, midi = null) {
 // clicked row, else inheriting the lane's base note. Returns the slot's
 // locks object.
 function ensureGen4LockStepActive() {
-  if (!gen4LockSelection) return null;
-  const { ci, si, pendingMidi } = gen4LockSelection;
+  if (!gen4Ui.lockSelection) return null;
+  const { ci, si, pendingMidi } = gen4Ui.lockSelection;
   const ch = GEN4.channels[ci];
   if (!ch) return null;
   if (!ch.steps[si]) {
     ch.steps[si] = true;
     ch.notes[si] = Number.isFinite(pendingMidi) ? pendingMidi : null;
     gen4ApplyStepBtn(ci, si);
-    if (ci === gen4SelectedNoteChannel) refreshGen4NoteStep(si);
+    if (ci === gen4Ui.selectedNoteChannel) refreshGen4NoteStep(si);
   }
   return ch.locks[si];
 }
 
 function clearGen4LockSelection() {
-  if (!gen4LockSelection) return;
-  gen4LockSelection = null;
+  if (!gen4Ui.lockSelection) return;
+  gen4Ui.lockSelection = null;
   refreshGen4LockEditor();
 }
 
 function clearSelectedGen4Locks() {
-  if (!gen4LockSelection) return;
-  const { ci, si } = gen4LockSelection;
+  if (!gen4Ui.lockSelection) return;
+  const { ci, si } = gen4Ui.lockSelection;
   GEN4.channels[ci].locks[si] = {};
   gen4ApplyStepBtn(ci, si);
   refreshGen4LockEditor();
@@ -6250,7 +6236,7 @@ function fitGen4NotesToScale() {
     setStatus('pick a scale first');
     return;
   }
-  const ch = GEN4.channels[gen4SelectedNoteChannel];
+  const ch = GEN4.channels[gen4Ui.selectedNoteChannel];
   if (!ch) return;
   let changed = 0;
   for (let si = 0; si < 32; si++) {
@@ -6261,9 +6247,9 @@ function fitGen4NotesToScale() {
       changed += 1;
     }
   }
-  for (let si = 0; si < 32; si++) gen4ApplyStepBtn(gen4SelectedNoteChannel, si);
+  for (let si = 0; si < 32; si++) gen4ApplyStepBtn(gen4Ui.selectedNoteChannel, si);
   renderGen4NoteRoll();
-  const label = GEN4_DEFS[gen4SelectedNoteChannel]?.label || 'lane';
+  const label = GEN4_DEFS[gen4Ui.selectedNoteChannel]?.label || 'lane';
   setStatus(
     changed > 0
       ? `${label}: fitted ${changed} note${changed === 1 ? '' : 's'} to ${NOTE_NAMES[GEN4_SCALE.root]} ${GEN4_SCALES.find(([id]) => id === GEN4_SCALE.scale)?.[1].toLowerCase()}`
@@ -6301,7 +6287,7 @@ function repaintGen4NoteLane(ci) {
 }
 
 function generateGen4Euclid(pulses, rotation) {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   const steps = GEN4.stepCount;
@@ -6322,7 +6308,7 @@ function generateGen4Euclid(pulses, rotation) {
 // 5-over-4, 7-over-4 etc. play exactly, not grid-quantized. First hit of the
 // cycle is accented. Notes already sitting on a surviving step are kept.
 function generateGen4Polyrhythm(hits, rotation) {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   const n = GEN4.stepCount;
@@ -6420,7 +6406,7 @@ function gen4ArpVelocity(shape, si, stepCount, cycleHit, seqLen) {
 }
 
 function generateGen4Arp({ mode, octaves, everyN, repeat, velShape, chance, ratchet = 'off' }) {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   const chord = getGen4ArpChord();
@@ -6482,7 +6468,7 @@ function generateGen4Arp({ mode, octaves, everyN, repeat, velShape, chance, ratc
 // snapped to the scale. Rhythm: 'keep' reuses the lane's rhythm when one
 // exists; a numeric density regenerates it.
 function generateGen4Melody(contour, density) {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   const n = GEN4.stepCount;
@@ -6539,7 +6525,7 @@ function getGen4BassRoot(range) {
 }
 
 function generateGen4Bass(style) {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   const range = getGen4LaneMidiRange(ci);
@@ -6610,7 +6596,7 @@ function stepMidiInScale(midi, dir) {
 }
 
 function rotateGen4Lane(dir) {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   const n = GEN4.stepCount;
@@ -6623,7 +6609,7 @@ function rotateGen4Lane(dir) {
 }
 
 function reverseGen4Lane() {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   const n = GEN4.stepCount;
@@ -6636,7 +6622,7 @@ function reverseGen4Lane() {
 }
 
 function invertGen4Lane() {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   const pitched = [];
@@ -6658,7 +6644,7 @@ function invertGen4Lane() {
 }
 
 function transposeGen4Lane(delta) {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   let changed = 0;
@@ -6683,7 +6669,7 @@ function transposeGen4Lane(delta) {
 }
 
 function humanizeGen4Lane() {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   for (let si = 0; si < GEN4.stepCount; si++) {
@@ -6698,7 +6684,7 @@ function humanizeGen4Lane() {
 }
 
 function glitchGen4Lane() {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   for (let si = 0; si < GEN4.stepCount; si++) {
@@ -6716,7 +6702,7 @@ function glitchGen4Lane() {
 // Call & response: copy the first half over the second, then mutate the copy
 // (drops, scale-step shifts, octave jumps) so B answers A.
 function callResponseGen4Lane() {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   const half = Math.floor(GEN4.stepCount / 2);
@@ -6754,7 +6740,7 @@ function callResponseGen4Lane() {
 // a few new ones (they inherit the lane's base note). Press repeatedly to
 // drift a pattern instead of rewriting it.
 function mutateGen4Lane() {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   for (let si = 0; si < GEN4.stepCount; si++) {
@@ -6782,7 +6768,7 @@ function mutateGen4Lane() {
 
 // Drop every second active step — halve the density, keep the feel.
 function thinGen4Lane() {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   let keep = true;
@@ -6797,7 +6783,7 @@ function thinGen4Lane() {
 
 // Each note echoes onto the following free step, quiet and slightly unsure.
 function echoGen4Lane() {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   const n = GEN4.stepCount;
@@ -6820,7 +6806,7 @@ function echoGen4Lane() {
 
 // Rhythmic negative: fire exactly where the lane was silent.
 function flipGen4Rhythm() {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   for (let si = 0; si < GEN4.stepCount; si++) {
@@ -6837,7 +6823,7 @@ function flipGen4Rhythm() {
 
 // Ghost notes: quiet, unreliable hits sprinkled into empty steps.
 function ghostGen4Lane() {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   let added = 0;
@@ -6856,7 +6842,7 @@ function ghostGen4Lane() {
 // Groove template: blend velocities toward a 16th-grid accent map
 // (quarters strong, eighths medium, offbeats soft).
 function grooveGen4Lane() {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   for (let si = 0; si < GEN4.stepCount; si++) {
@@ -6872,7 +6858,7 @@ function grooveGen4Lane() {
 // Build ramp: probability rises across the bar, so each cycle starts sparse
 // and fills in toward the turnaround.
 function rampGen4Lane() {
-  const ci = gen4SelectedNoteChannel;
+  const ci = gen4Ui.selectedNoteChannel;
   const ch = GEN4.channels[ci];
   if (!ch) return;
   const n = GEN4.stepCount;
@@ -6886,14 +6872,14 @@ function rampGen4Lane() {
 }
 
 function renderGen4NoteRoll() {
-  if (!gen4NoteRollEl) return;
-  gen4NoteRollEl.textContent = '';
-  gen4NoteCellEls = Array.from({ length: 32 }, () => new Map());
-  gen4NotePlayheadStep = -1;
-  const def = GEN4_DEFS[gen4SelectedNoteChannel];
-  const ch = GEN4.channels[gen4SelectedNoteChannel];
-  const laneRange = getGen4LaneMidiRange(gen4SelectedNoteChannel);
-  gen4NoteEditorEl?.style.setProperty('--ch-color', def.color);
+  if (!gen4Ui.noteRollEl) return;
+  gen4Ui.noteRollEl.textContent = '';
+  gen4Ui.noteCellEls = Array.from({ length: 32 }, () => new Map());
+  gen4Ui.notePlayheadStep = -1;
+  const def = GEN4_DEFS[gen4Ui.selectedNoteChannel];
+  const ch = GEN4.channels[gen4Ui.selectedNoteChannel];
+  const laneRange = getGen4LaneMidiRange(gen4Ui.selectedNoteChannel);
+  gen4Ui.noteEditorEl?.style.setProperty('--ch-color', def.color);
   // Rows: the lane's playable window, plus any assigned note that fell
   // outside it (legacy patterns, imports) — a hit must never be invisible.
   const assigned = new Set();
@@ -6913,7 +6899,7 @@ function renderGen4NoteRoll() {
   corner.className = 'drum-note-label';
   corner.textContent = 'Note';
   stepHeader.appendChild(corner);
-  gen4NoteStepNumberEls = new Array(32).fill(null);
+  gen4Ui.noteStepNumberEls = new Array(32).fill(null);
   for (let si = 0; si < 32; si++) {
     const number = document.createElement('span');
     number.className = 'drum-note-step-number';
@@ -6924,10 +6910,10 @@ function renderGen4NoteRoll() {
       if (si >= GEN4.stepCount) return;
       selectGen4NoteSlot(si);
     });
-    gen4NoteStepNumberEls[si] = number;
+    gen4Ui.noteStepNumberEls[si] = number;
     stepHeader.appendChild(number);
   }
-  gen4NoteRollEl.appendChild(stepHeader);
+  gen4Ui.noteRollEl.appendChild(stepHeader);
   refreshGen4LockEditor();
 
   const scaleActive = !!getGen4ScaleIntervals();
@@ -6956,28 +6942,28 @@ function renderGen4NoteRoll() {
       cell.classList.toggle('on', ch.steps[si] && ch.notes[si] === midi);
       cell.classList.toggle('step-inactive', si >= GEN4.stepCount);
       cell.addEventListener('click', () => {
-        if (gen4NotePencilEnabled) return;
+        if (gen4Ui.notePencilEnabled) return;
         if (si >= GEN4.stepCount) return;
         // Pencil off = select mode: pick the slot for param editing; a knob
         // tweak on an empty slot creates this row's note with that value.
         selectGen4NoteSlot(si, midi);
       });
-      gen4NoteCellEls[si].set(midi, cell);
+      gen4Ui.noteCellEls[si].set(midi, cell);
       row.appendChild(cell);
     }
-    gen4NoteRollEl.appendChild(row);
+    gen4Ui.noteRollEl.appendChild(row);
   });
 
-  const requestedFocusMidi = getGen4NoteFocusMidi(gen4SelectedNoteChannel);
+  const requestedFocusMidi = getGen4NoteFocusMidi(gen4Ui.selectedNoteChannel);
   const focusMidi = visibleMidis.reduce(
     (closest, midi) =>
       Math.abs(midi - requestedFocusMidi) < Math.abs(closest - requestedFocusMidi) ? midi : closest,
     visibleMidis[0],
   );
   requestAnimationFrame(() => {
-    const rowHeight = gen4NoteRollEl.firstElementChild?.getBoundingClientRect().height || 18;
+    const rowHeight = gen4Ui.noteRollEl.firstElementChild?.getBoundingClientRect().height || 18;
     const targetY = (visibleMidis.indexOf(focusMidi) + 1) * rowHeight;
-    gen4NoteRollEl.scrollTop = Math.max(0, targetY - gen4NoteRollEl.clientHeight * 0.45);
+    gen4Ui.noteRollEl.scrollTop = Math.max(0, targetY - gen4Ui.noteRollEl.clientHeight * 0.45);
   });
   for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
   refreshGen4NotePlayhead();
@@ -6985,7 +6971,7 @@ function renderGen4NoteRoll() {
 
 function setGen4NoteChannel(ci) {
   if (!GEN4_DEFS[ci] || GEN4_DEFS[ci].id === 'osc') return;
-  gen4SelectedNoteChannel = ci;
+  gen4Ui.selectedNoteChannel = ci;
   gen4NoteLaneButtons.forEach((btn, idx) => btn.classList.toggle('active', idx === ci));
   // The selected instrument's param panel opens; the rest fold away.
   gen4ParamSections.forEach(({ setCollapsed }, idx) => setCollapsed(idx !== ci));
@@ -6994,8 +6980,8 @@ function setGen4NoteChannel(ci) {
 
 function setGen4EditorMode(mode) {
   if (mode !== 'grid' && mode !== 'notes') return;
-  gen4EditorMode = mode;
-  if (mode === 'notes' && gen4NoteCellEls.every((cells) => cells.size === 0)) {
+  gen4Ui.editorMode = mode;
+  if (mode === 'notes' && gen4Ui.noteCellEls.every((cells) => cells.size === 0)) {
     renderGen4NoteRoll();
   }
   refreshGen4NoteEditor();
@@ -7096,9 +7082,9 @@ function buildGen4NoteEditor() {
   pencil.setAttribute('aria-label', 'Pencil tool');
   pencil.setAttribute('aria-pressed', 'true');
   pencil.addEventListener('click', () => {
-    gen4NotePencilEnabled = !gen4NotePencilEnabled;
-    pencil.classList.toggle('active', gen4NotePencilEnabled);
-    pencil.setAttribute('aria-pressed', String(gen4NotePencilEnabled));
+    gen4Ui.notePencilEnabled = !gen4Ui.notePencilEnabled;
+    pencil.classList.toggle('active', gen4Ui.notePencilEnabled);
+    pencil.setAttribute('aria-pressed', String(gen4Ui.notePencilEnabled));
   });
   lanes.appendChild(pencil);
   gen4NotePencilBtn = pencil;
@@ -7395,16 +7381,16 @@ function buildGen4NoteEditor() {
   const roll = document.createElement('div');
   roll.className = 'drum-note-roll';
   roll.addEventListener('pointerdown', (event) => {
-    if (!gen4NotePencilEnabled || event.button !== 0) return;
+    if (!gen4Ui.notePencilEnabled || event.button !== 0) return;
     const cell = event.target.closest('.drum-note-cell');
     if (!cell || cell.classList.contains('step-inactive')) return;
     event.preventDefault();
     const stepIdx = Number(cell.dataset.step);
     const midi = Number(cell.dataset.midi);
-    const ch = GEN4.channels[gen4SelectedNoteChannel];
+    const ch = GEN4.channels[gen4Ui.selectedNoteChannel];
     const currentMidi = Number.isFinite(ch.notes[stepIdx])
       ? ch.notes[stepIdx]
-      : clamp(getGen4BaseMidi(gen4SelectedNoteChannel), GEN4_NOTE_MIN, GEN4_NOTE_MAX);
+      : clamp(getGen4BaseMidi(gen4Ui.selectedNoteChannel), GEN4_NOTE_MIN, GEN4_NOTE_MAX);
     gen4NoteDrawState.active = true;
     gen4NoteDrawState.action = ch.steps[stepIdx] && currentMidi === midi ? 'erase' : 'draw';
     gen4NoteDrawState.pointerId = event.pointerId;
@@ -7426,8 +7412,8 @@ function buildGen4NoteEditor() {
   roll.addEventListener('pointerup', finishPencilGesture);
   roll.addEventListener('pointercancel', finishPencilGesture);
   editor.append(lanes, genRow, editRow, roll);
-  gen4NoteEditorEl = editor;
-  gen4NoteRollEl = roll;
+  gen4Ui.noteEditorEl = editor;
+  gen4Ui.noteRollEl = roll;
   return editor;
 }
 
@@ -7478,22 +7464,22 @@ function buildDrumPanel() {
     btn.type = 'button';
     btn.className = 'drum-editor-mode-btn';
     btn.textContent = label;
-    btn.classList.toggle('active', gen4EditorMode === mode);
+    btn.classList.toggle('active', gen4Ui.editorMode === mode);
     btn.addEventListener('click', () => setGen4EditorMode(mode));
     gen4EditorModeButtons.set(mode, btn);
     editorModeGroup.appendChild(btn);
   });
   actions.appendChild(editorModeGroup);
 
-  gen4LockClearBtn = document.createElement('button');
-  gen4LockClearBtn.type = 'button';
-  gen4LockClearBtn.className = 'drum-lock-clear-btn';
-  gen4LockClearBtn.textContent = 'CLR';
-  gen4LockClearBtn.title = 'Clear parameter locks on the selected step';
-  gen4LockClearBtn.disabled = true;
-  gen4LockClearBtn.hidden = true;
-  gen4LockClearBtn.addEventListener('click', clearSelectedGen4Locks);
-  actions.appendChild(gen4LockClearBtn);
+  gen4Ui.lockClearBtn = document.createElement('button');
+  gen4Ui.lockClearBtn.type = 'button';
+  gen4Ui.lockClearBtn.className = 'drum-lock-clear-btn';
+  gen4Ui.lockClearBtn.textContent = 'CLR';
+  gen4Ui.lockClearBtn.title = 'Clear parameter locks on the selected step';
+  gen4Ui.lockClearBtn.disabled = true;
+  gen4Ui.lockClearBtn.hidden = true;
+  gen4Ui.lockClearBtn.addEventListener('click', clearSelectedGen4Locks);
+  actions.appendChild(gen4Ui.lockClearBtn);
 
   const variationGroup = document.createElement('div');
   variationGroup.className = 'drum-variation-group';
@@ -7642,12 +7628,12 @@ function buildDrumPanel() {
     '<span class="drum-hint" title="Knobs write to the selected step; Esc deselects">' +
     '<span class="drum-hint-key">alt + click</span> param-lock</span>';
   panel.appendChild(hints);
-  gen4HintsEl = hints;
+  gen4Ui.hintsEl = hints;
 
   // Step grid
   const grid = document.createElement('div');
   grid.className = 'drum-grid';
-  gen4GridEl = grid;
+  gen4Ui.gridEl = grid;
 
   GEN4_DEFS.forEach((def, ci) => {
     const ch = GEN4.channels[ci];
@@ -7743,8 +7729,8 @@ function buildDrumPanel() {
           ch.stutter[si] = 1;
           ch.probability[si] = 1.0;
           ch.condition[si] = 0;
-          if (gen4LockSelection?.ci === ci && gen4LockSelection?.si === si) {
-            gen4LockSelection = null;
+          if (gen4Ui.lockSelection?.ci === ci && gen4Ui.lockSelection?.si === si) {
+            gen4Ui.lockSelection = null;
             refreshGen4LockEditor();
           }
         }
@@ -7798,11 +7784,11 @@ function buildDrumPanel() {
       fxBtn.title = 'Send to FX chain — click to bypass the drum effects';
       gen4FxSendBtns[ci] = fxBtn;
       fxBtn.addEventListener('click', () => {
-        if (gen4LockSelection?.ci === ci) {
+        if (gen4Ui.lockSelection?.ci === ci) {
           const locks = ensureGen4LockStepActive();
           if (!locks) return;
           locks._fxSend = Object.hasOwn(locks, '_fxSend') ? !locks._fxSend : !ch.fxSend;
-          gen4ApplyStepBtn(ci, gen4LockSelection.si);
+          gen4ApplyStepBtn(ci, gen4Ui.lockSelection.si);
           refreshGen4LockEditor();
           return;
         }
@@ -7846,12 +7832,12 @@ function buildDrumPanel() {
         p,
         ch.params[p.key],
         (v) => {
-          if (gen4LockSelection?.ci === ci) {
+          if (gen4Ui.lockSelection?.ci === ci) {
             const locks = ensureGen4LockStepActive();
             if (!locks) return;
             locks[p.key] = v;
             ctrl.classList.add('parameter-locked');
-            gen4ApplyStepBtn(ci, gen4LockSelection.si);
+            gen4ApplyStepBtn(ci, gen4Ui.lockSelection.si);
             refreshGen4LockEditor();
             return;
           }
@@ -7859,7 +7845,7 @@ function buildDrumPanel() {
           ch.params[p.key] = v;
           if (p.key === 'tune' || p.key === 'tone' || (def.id === 'smp' && p.key === 'pitch')) {
             for (let si = 0; si < 32; si++) gen4ApplyStepBtn(ci, si);
-            if (ci === gen4SelectedNoteChannel && gen4EditorMode === 'notes') {
+            if (ci === gen4Ui.selectedNoteChannel && gen4Ui.editorMode === 'notes') {
               for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
             }
           }
@@ -9189,7 +9175,7 @@ function setGen4Variation(index) {
   loop.gen4.activeVariation = index;
   loop.gen4.stepCount = pattern.stepCount;
   loop.gen4.channels = pattern.channels;
-  gen4LockSelection = null;
+  gen4Ui.lockSelection = null;
   bindEditLoop();
   refreshGen4VariationUI();
 }
@@ -9215,7 +9201,7 @@ function regenerateGen4Variation(index) {
     const pattern = loop.gen4.variations[index];
     loop.gen4.stepCount = pattern.stepCount;
     loop.gen4.channels = pattern.channels;
-    gen4LockSelection = null;
+    gen4Ui.lockSelection = null;
     bindEditLoop();
   }
   setStatus(`variation ${index === 1 ? 'B' : 'C'} generated again`);
@@ -9497,7 +9483,7 @@ function bindEditLoop() {
     for (let si = 0; si < 32; si++) gen4ApplyStepBtn(ci, si);
   });
   gen4RefreshStepDisplay();
-  if (gen4EditorMode === 'notes') refreshGen4NoteEditor();
+  if (gen4Ui.editorMode === 'notes') refreshGen4NoteEditor();
   refreshGen4LockEditor();
 
   if (gen3SoundShouldFollowEditLoop) {
@@ -9518,7 +9504,7 @@ function selectEditLoop(index) {
   if (index < 0 || index >= LOOPS.list.length) return;
   if (index !== LOOPS.editIndex) {
     LOOPS.editIndex = index;
-    gen4LockSelection = null;
+    gen4Ui.lockSelection = null;
     if (gen4FillState.active && PLAY.mode === 'loop') clearGen4Fill();
     bindEditLoop();
   }
