@@ -10,6 +10,15 @@ import {
 } from './core/util.js';
 import { rbjHighpass, rbjLowShelf, rbjPeaking, biquadMagnitudeDb } from './core/dsp.js';
 import { encodeWav } from './render/wav.js';
+import { setStatus, getStatusEl } from './ui/status.js';
+import {
+  PLAY,
+  LOOPS,
+  SONG,
+  SONG_REPEAT_CYCLE,
+  SONG_CONDITIONS,
+  SONG_JUMP_COUNTS,
+} from './sequencing/state.js';
 import {
   VIZGL,
   VIZGL_SCENES,
@@ -209,9 +218,6 @@ const BACK_PANEL = {
   connFrame: null,
 };
 
-function getStatusEl() {
-  return document.getElementById('status');
-}
 
 function getRecordBtn() {
   return document.getElementById('recordBtn');
@@ -253,29 +259,7 @@ function getBpmInput() {
   return document.getElementById('bpmInput');
 }
 
-let statusToastTimer = null;
 
-function setStatus(text) {
-  const status = getStatusEl();
-  if (status) {
-    const statusText = status.querySelector('.status-text') || status;
-    statusText.textContent = text;
-    status.title = text;
-    status.dataset.message = text;
-    status.classList.remove('status-overflow', 'status-toast-visible');
-    if (statusToastTimer) clearTimeout(statusToastTimer);
-    requestAnimationFrame(() => {
-      if (status.dataset.message !== text || statusText.scrollWidth <= statusText.clientWidth) {
-        return;
-      }
-      status.classList.add('status-overflow', 'status-toast-visible');
-      statusToastTimer = setTimeout(() => {
-        status.classList.remove('status-toast-visible');
-        statusToastTimer = null;
-      }, 5000);
-    });
-  }
-}
 
 function getDelayTimeSeconds(busId = activeBus) {
   const d = fxStates[busId].delay;
@@ -9129,40 +9113,6 @@ function setSequencerSharedAcrossLoops(on, { announce = true } = {}) {
 // directly. Playback instead resolves patterns through getSchedulerLoop(),
 // which in song mode follows the arrangement cursor.
 
-const PLAY = { mode: 'loop' }; // 'loop' | 'song'
-
-const LOOPS = {
-  list: [],
-  editIndex: 0,
-  counter: 0,
-};
-
-const SONG = {
-  entries: [], // [{ id, loopId, repeats, prob, cond, variation, fill, jump }]
-  loop: true, // cycle the arrangement when it reaches the end
-  follow: true, // while a song plays, show the loop that is sounding
-  // Scheduler position (runs ahead of audio). variation is the pattern pick
-  // resolved for this visit (-1 = the loop's own); fillPattern caches the
-  // auto-fill generated for the entry's final cycle; jump is the destination
-  // entry id decided when the entry started (null = continue linear).
-  cursor: { entryIdx: 0, repeat: 0, variation: -1, fillPattern: null, jump: null },
-  audibleEntryIdx: -1, // entry actually sounding right now
-  entryCounter: 0,
-  runtime: new Map(), // entry id → { visits, jumpsTaken }, playback counters
-  lastJump: null, // { from, to } entry ids of the latest jump taken (lane viz)
-};
-
-const SONG_REPEAT_CYCLE = [1, 2, 4, 8, 16];
-// Song-level play conditions, counted per visit to the entry — same idea as
-// step trig conditions, one level up: 1:2 plays the 1st of every 2 visits.
-const SONG_CONDITIONS = [
-  { id: 'always', label: '—' },
-  { id: '1:2', label: '1:2', a: 1, b: 2 },
-  { id: '2:2', label: '2:2', a: 2, b: 2 },
-  { id: '1:4', label: '1:4', a: 1, b: 4 },
-  { id: '4:4', label: '4:4', a: 4, b: 4 },
-];
-const SONG_JUMP_COUNTS = [0, 1, 2, 4, 8]; // 0 = unlimited
 const songBlockEls = new Map(); // entry id → block element
 let songPlayBtnEl = null;
 let songAddBtnEl = null;
