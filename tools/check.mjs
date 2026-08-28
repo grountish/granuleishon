@@ -142,40 +142,96 @@ function codeOnly(src) {
   return out;
 }
 
-// ── 5. No module reaches back into a name that only app.js declares ────────
-// The gap a parser leaves: a function moved into a module still referencing
-// something left behind compiles fine, then throws ReferenceError when run.
-// Rather than attempt real scope analysis, this asks one precise question —
-// does a module name something that only app.js declares and it did not
-// import? A module's own local with a colliding name would be a false
-// positive, and is worth a look anyway.
+// ── 5. Every name a file uses is local, imported, or a known global ────────
+// The gap a parser leaves: a moved function that left a dependency behind
+// compiles fine and throws ReferenceError the first time it runs. Real scope
+// analysis is out of scope here, so this reports only names it can be
+// confident about — ones another module exports, or ones only app.js declares.
+// A local coincidentally sharing such a name is a false positive, and worth a
+// look anyway.
+const GLOBALS = new Set([
+  // language
+  'globalThis','undefined','NaN','Infinity','Object','Array','String','Number','Boolean','Symbol',
+  'BigInt','Math','JSON','Date','RegExp','Error','TypeError','RangeError','SyntaxError','Promise',
+  'Map','Set','WeakMap','WeakSet','Proxy','Reflect','Intl','parseInt','parseFloat','isNaN',
+  'isFinite','encodeURIComponent','decodeURIComponent','structuredClone','queueMicrotask',
+  'ArrayBuffer','DataView','Uint8Array','Uint16Array','Uint32Array','Int8Array','Int16Array',
+  'Int32Array','Float32Array','Float64Array','Uint8ClampedArray','console','Function','arguments',
+  // browser
+  'window','document','navigator','location','history','localStorage','sessionStorage','fetch',
+  'setTimeout','clearTimeout','setInterval','clearInterval','requestAnimationFrame','alert',
+  'cancelAnimationFrame','requestIdleCallback','performance','Blob','File','FileReader','URL',
+  'URLSearchParams','FormData','Headers','Request','Response','Image','Audio','Worker','Event',
+  'CustomEvent','EventTarget','MutationObserver','ResizeObserver','IntersectionObserver',
+  'getComputedStyle','matchMedia','devicePixelRatio','indexedDB','IDBKeyRange','crypto','screen',
+  'HTMLElement','Element','Node','SVGElement','DOMParser','XMLHttpRequest','AbortController',
+  'TextEncoder','TextDecoder','CSS','KeyboardEvent','MouseEvent','PointerEvent','DragEvent',
+  // web audio + worklets
+  'AudioContext','webkitAudioContext','OfflineAudioContext','AudioWorkletNode','AudioBuffer',
+  'AudioWorkletProcessor','registerProcessor','sampleRate','currentTime','currentFrame',
+  'MediaRecorder','GainNode','AnalyserNode','BiquadFilterNode',
+]);
+
 const DECLARED = new RegExp(
   String.raw`^(?:export\s+)?(?:const|let|var|function|async function|class)\s+([A-Za-z_$][\w$]*)`,
   'gm',
 );
-async function checkNoReachBack(files) {
-  const appSrc = await readFile(path.join(ROOT, 'src/app.js'), 'utf8');
-  const appOnly = new Set([...appSrc.matchAll(DECLARED)].map((m) => m[1]));
-  for (const file of files) {
-    if (file === path.join('src', 'app.js')) continue;
-    const src = await readFile(path.join(ROOT, file), 'utf8');
-    // Locals count as declared too, at any nesting — otherwise a function
-    // with its own `let start` looks like it is reaching into app.js.
-    const own = new Set(
-      [...src.matchAll(/(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]),
-    );
-    for (const [, params] of src.matchAll(/function\s*[A-Za-z_$\w]*\s*\(([^)]*)\)/g))
-      for (const p of params.split(',')) {
-        const n = p.trim().split(/[=:\s]/)[0].replace(/[{}[\].]/g, '');
-        if (n) own.add(n);
-      }
+
+// Names bound anywhere in a file: declarations at any nesting, function and
+// arrow parameters, destructuring patterns, catch bindings.
+function boundNames(code) {
+  const names = new Set();
+  const add = (n) => n && /^[A-Za-z_$][\w$]*$/.test(n) && names.add(n);
+  for (const [, n] of code.matchAll(/(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/g)) add(n);
+  for (const [, n] of code.matchAll(/catch\s*\(\s*([A-Za-z_$][\w$]*)/g)) add(n);
+  // parameter lists: function f(...), (...) =>, and method shorthand
+  for (const [, params] of code.matchAll(/(?:function\s*[A-Za-z_$\w]*\s*|\b[A-Za-z_$][\w$]*\s*)\(([^()]*)\)\s*(?:=>|\{)/g))
+    for (const piece of params.split(',')) {
+      // Strip destructuring punctuation first: `{ state }` must yield `state`,
+      // not the brace.
+      const bare = piece.replace(/[{}[\].]/g, ' ').trim();
+      add(bare.includes(':') ? bare.split(':').pop().trim().split(/\s/)[0] : bare.split(/[=\s]/)[0]);
+    }
+  for (const [, p] of code.matchAll(/([A-Za-z_$][\w$]*)\s*=>/g)) add(p);
+  // destructuring targets: const { a, b: c } = / const [a, b] =
+  for (const [, inner] of code.matchAll(/(?:const|let|var)\s*[{[]([^}\]]*)[}\]]\s*=/g))
+    for (const piece of inner.split(',')) {
+      const t = piece.includes(':') ? piece.split(':')[1] : piece;
+      add(t.trim().replace(/^\.\.\./, '').split(/[=\s]/)[0]);
+    }
+  return names;
+}
+
+async function checkReferences(files) {
+  const sources = new Map();
+  for (const f of files) sources.set(f, await readFile(path.join(ROOT, f), 'utf8'));
+
+  const APP = path.join('src', 'app.js');
+  const exportedBy = new Map(); // name -> module that exports it
+  for (const [file, src] of sources) {
+    if (file === APP) continue;
+    for (const [, n] of src.matchAll(DECLARED)) if (/^export/.test(src.slice(src.indexOf(n) - 40, src.indexOf(n)))) exportedBy.set(n, file);
+    for (const [, n] of src.matchAll(/^export\s+(?:const|let|function|async function|class)\s+([A-Za-z_$][\w$]*)/gm))
+      exportedBy.set(n, file);
+  }
+  const appOnly = new Set([...(sources.get(APP) ?? '').matchAll(DECLARED)].map((m) => m[1]));
+
+  for (const [file, src] of sources) {
+    const code = codeOnly(src);
+    const known = new Set([...GLOBALS, ...boundNames(code)]);
     for (const [, names] of src.matchAll(NAMED))
-      for (const raw of names.split(',')) own.add(raw.trim().split(/\s+as\s+/).pop());
-    for (const [, n] of src.matchAll(DEFAULT_IMPORT)) own.add(n);
-    const body = codeOnly(src).replace(/^import[^;]+;$/gm, '');
-    for (const name of appOnly) {
-      if (own.has(name)) continue;
-      if (new RegExp(String.raw`(?<![.\w$])${name}\s*(?=\(|\.[A-Za-z_$]|[,;)\]}])`).test(body))
+      for (const raw of names.split(',')) known.add(raw.trim().split(/\s+as\s+/).pop());
+    for (const [, n] of src.matchAll(DEFAULT_IMPORT)) known.add(n);
+
+    const body = code.replace(/^import[^;]+;$/gm, '');
+    const used = new Set(
+      [...body.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*(?=\(|\.[A-Za-z_$]|[,;)\]}])/g)].map((m) => m[1]),
+    );
+    for (const name of used) {
+      if (known.has(name)) continue;
+      if (exportedBy.has(name) && exportedBy.get(name) !== file)
+        note(file, `uses ${name} without importing it — exported by ${exportedBy.get(name)}`);
+      else if (file !== APP && appOnly.has(name))
         note(file, `references ${name}, which only app.js declares — left behind by a move?`);
     }
   }
@@ -200,7 +256,7 @@ await checkServer();
 await checkImports(files);
 await checkDuplicates(files);
 await checkWorklets(files);
-await checkNoReachBack(files);
+await checkReferences(files);
 
 if (problems.length) {
   console.error(`✗ ${problems.length} problem${problems.length === 1 ? '' : 's'} in ${files.length} files\n`);

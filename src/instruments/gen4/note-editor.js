@@ -29,6 +29,10 @@ import {
 import {
   gen4Ui,
   gen4ControlBindings,
+  gen4EditorModeButtons,
+  gen4NoteLaneButtons,
+  gen4ParamSections,
+  gen4PresetSelects,
   gen4NoteDrawState,
   gen4FillState,
   gen4StepEls,
