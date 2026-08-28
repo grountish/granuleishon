@@ -18,4 +18,12 @@ export default {
     { name: 'Telephone', values: { mode: 'bandpass', cutoff: 1400, q: 1.4, mix: 0.9 } },
     { name: 'Resonant High-pass', values: { mode: 'highpass', cutoff: 480, q: 7, mix: 0.8 } },
   ],
+
+  apply(nodes, key, val, { ac }) {
+    if (key === 'cutoff') nodes.biquad.frequency.setTargetAtTime(val, ac.currentTime, 0.02);
+    if (key === 'q') nodes.biquad.Q.setTargetAtTime(val, ac.currentTime, 0.02);
+  },
+  applyAll(nodes, { state }) {
+    nodes.biquad.type = state.mode;
+  },
 };

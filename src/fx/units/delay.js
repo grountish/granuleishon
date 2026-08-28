@@ -1,6 +1,10 @@
 // Delay — parameter definitions, defaults and factory presets.
 // fx/registry.js composes these into the tables the app reads.
 
+import { clamp } from '../../core/util.js';
+
+export const MAX_DELAY_SECONDS = 16;
+
 export default {
   id: 'delay',
   label: 'Delay',
@@ -40,4 +44,30 @@ export default {
       values: { time: 0.5, feedback: 0.65, hp: 180, mix: 0.42, sync: true, syncIndex: 4, mode: 'pingpong' },
     },
   ],
+
+  apply(nodes, key, val, { ac }) {
+    if (key === 'time')
+      [nodes.tap, nodes.pingL, nodes.pingR].forEach((tap) =>
+        tap.delayTime.setTargetAtTime(clamp(val, 0, MAX_DELAY_SECONDS), ac.currentTime, 0.02),
+      );
+    if (key === 'feedback')
+      [nodes.fb, nodes.pingLFb, nodes.pingRFb].forEach((gain) =>
+        gain.gain.setTargetAtTime(Math.min(0.98, val), ac.currentTime, 0.02),
+      );
+    if (key === 'hp')
+      [nodes.hpf, nodes.pingLHpf, nodes.pingRHpf].forEach((f) =>
+        f.frequency.setTargetAtTime(clamp(val, 20, 2000), ac.currentTime, 0.02),
+      );
+  },
+  // Stereo and ping-pong share one graph; the mode gates which path is live.
+  applyAll(nodes, { ac, state }) {
+    const ping = state.mode === 'pingpong' ? 1 : 0;
+    const normal = 1 - ping;
+    [nodes.normalSend, nodes.normalFeedbackMode, nodes.normalWetMode].forEach((g) =>
+      g.gain.setValueAtTime(normal, ac.currentTime),
+    );
+    [nodes.pingInputMode, nodes.pingLFeedbackMode, nodes.pingRFeedbackMode, nodes.pingWetMode].forEach(
+      (g) => g.gain.setValueAtTime(ping, ac.currentTime),
+    );
+  },
 };

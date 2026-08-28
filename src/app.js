@@ -23,7 +23,11 @@ import {
   SOLO_MODE_STORAGE_KEY,
   MASTERING_HQ_STORAGE_KEY,
 } from './core/storage.js';
+import { GRAINARP_PATTERNS } from './fx/units/grainarp.js';
+import { MAX_DELAY_SECONDS } from './fx/units/delay.js';
 import {
+  FX_UNITS,
+  FX_UNITS_BY_ID,
   FX_DEFS,
   FX_PRESETS,
   DEFAULT_FX_ORDER,
@@ -126,7 +130,6 @@ let grainArpModulePromise = null;
 let pitchTremoloModulePromise = null;
 let autotuneModulePromise = null;
 const LIVE_SOURCE_SECONDS = 10;
-const MAX_DELAY_SECONDS = 16;
 const INPUT_SOURCE = {
   devices: [],
   selectedId: 'default',
@@ -8950,12 +8953,6 @@ const GRAINARP_GRID_SYNC_CONTROL = {
   step: 1,
   unit: '',
 };
-const GRAINARP_PATTERNS = [
-  ['oct', 'OCT'],
-  ['up', 'UP'],
-  ['down', 'DOWN'],
-  ['rand', 'RND'],
-];
 const STEP_SEQ_STEP_BEAT_OPTIONS = [
   { label: '1/4', beats: 0.25 },
   { label: '1/2', beats: 0.5 },
@@ -16880,136 +16877,6 @@ function buildLFOSection(lfoIdx) {
   return section;
 }
 
-function makeSatCurve(drive) {
-  const n = 256;
-  const curve = new Float32Array(n);
-  // tanh soft-clip: k=1 (linear) → k=50 (near hard clip)
-  const k = 1 + drive * 49;
-  const norm = Math.tanh(k);
-  for (let i = 0; i < n; i++) {
-    curve[i] = Math.tanh(k * ((i * 2) / n - 1)) / norm;
-  }
-  return curve;
-}
-
-function makeReverbIR(busId = activeBus) {
-  const rv = fxStates[busId].reverb;
-  const sr = audioCtx.sampleRate;
-  const len = Math.floor(sr * Math.max(0.05, rv.size));
-  const buf = audioCtx.createBuffer(2, len, sr);
-  const damping = clamp(rv.damping, 0, 1);
-  const decay = Math.max(0.5, rv.decay);
-  const earlyCount = 6 + Math.round(rv.size * 3);
-  const earlySpacing = Math.max(0.003, rv.size * 0.0022);
-  const baseBrightness = 0.11 + (1 - damping) * 0.22;
-  let peak = 0;
-  const seededNoise = (seed) => {
-    const x = Math.sin(seed * 12.9898 + 78.233) * 43758.5453123;
-    return (x - Math.floor(x)) * 2 - 1;
-  };
-
-  for (let c = 0; c < 2; c++) {
-    const d = buf.getChannelData(c);
-    const stereoBias = c === 0 ? -1 : 1;
-
-    for (let tap = 0; tap < earlyCount; tap++) {
-      const jitter = (seededNoise((tap + 1) * (c + 3) * 11.7) + 1) * 0.5;
-      const tapTime =
-        tap * earlySpacing +
-        earlySpacing * 0.5 * Math.sin((tap + 1) * (0.91 + c * 0.13)) +
-        jitter * earlySpacing * 0.45;
-      const index = Math.min(len - 1, Math.max(0, Math.floor(tapTime * sr)));
-      const amp = (0.42 - tap / (earlyCount * 2.2)) * (tap % 2 === 0 ? 1 : 0.82);
-      d[index] += amp * (0.9 + stereoBias * 0.08 * Math.sin((tap + 1) * 1.37));
-    }
-
-    let filtered = 0;
-    let diffuser = 0;
-    for (let i = 0; i < len; i++) {
-      const t = i / Math.max(1, len - 1);
-      const env = Math.pow(1 - t, 0.35 + 3.4 / decay);
-      const noise = seededNoise(i + 1 + c * 8192);
-      const brightness = baseBrightness * (1 - t * 0.55) + 0.012 + c * 0.006;
-      filtered += (noise - filtered) * brightness;
-      diffuser += (filtered - diffuser) * (0.055 + (1 - damping) * 0.02 + c * 0.004);
-      const shimmer = Math.sin(t * Math.PI * (7.5 + c * 0.7)) * 0.035;
-      d[i] += (filtered * 0.78 + diffuser * 0.52 + shimmer) * env;
-      peak = Math.max(peak, Math.abs(d[i]));
-    }
-  }
-
-  if (peak > 0) {
-    const norm = 0.92 / peak;
-    for (let c = 0; c < 2; c++) {
-      const d = buf.getChannelData(c);
-      for (let i = 0; i < len; i++) d[i] *= norm;
-    }
-  }
-  return buf;
-}
-
-function getReverbDampingCutoff(busId = activeBus) {
-  return 900 + Math.pow(1 - clamp(fxStates[busId].reverb.damping, 0, 1), 1.45) * 13500;
-}
-
-function applyDelayMode(busId = activeBus) {
-  const bus = fxBuses[busId];
-  if (!bus?.delay) return;
-  const isPingPong = fxStates[busId].delay.mode === 'pingpong';
-  const normalGain = isPingPong ? 0 : 1;
-  const pingGain = isPingPong ? 1 : 0;
-
-  bus.delay.normalSend.gain.setValueAtTime(normalGain, audioCtx.currentTime);
-  bus.delay.normalFeedbackMode.gain.setValueAtTime(normalGain, audioCtx.currentTime);
-  bus.delay.normalWetMode.gain.setValueAtTime(normalGain, audioCtx.currentTime);
-
-  bus.delay.pingInputMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
-  bus.delay.pingLFeedbackMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
-  bus.delay.pingRFeedbackMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
-  bus.delay.pingWetMode.gain.setValueAtTime(pingGain, audioCtx.currentTime);
-}
-
-function applyFilterMode(busId = activeBus) {
-  const bus = fxBuses[busId];
-  if (!bus?.filter?.biquad) return;
-  bus.filter.biquad.type = fxStates[busId].filter.mode;
-}
-
-function applyGrainArpPattern(busId = activeBus) {
-  const bus = fxBuses[busId];
-  if (!bus?.grainarp?.node) return;
-  const idx = GRAINARP_PATTERNS.findIndex(([id]) => id === fxStates[busId].grainarp.pattern);
-  bus.grainarp.node.parameters
-    .get('pattern')
-    ?.setValueAtTime(Math.max(0, idx), audioCtx.currentTime);
-}
-
-function applyGrainArpHold(busId = activeBus) {
-  const bus = fxBuses[busId];
-  if (!bus?.grainarp?.node) return;
-  bus.grainarp.node.parameters
-    .get('hold')
-    ?.setValueAtTime(fxStates[busId].grainarp.hold ? 1 : 0, audioCtx.currentTime);
-}
-
-function applyPitchTremoloShape(busId = activeBus) {
-  const bus = fxBuses[busId];
-  if (!bus?.pitchtrem?.node) return;
-  const shape = Math.max(
-    0,
-    ['sine', 'tri', 'square', 'saw'].indexOf(fxStates[busId].pitchtrem.shape),
-  );
-  bus.pitchtrem.node.parameters.get('shape')?.setValueAtTime(shape, audioCtx.currentTime);
-}
-
-function applyAutotuneScale(busId = activeBus) {
-  const bus = fxBuses[busId];
-  if (!bus?.autotune?.node) return;
-  bus.autotune.node.parameters
-    .get('mask')
-    ?.setValueAtTime(computeAutotuneMask(fxStates[busId].autotune), audioCtx.currentTime);
-}
-
 // Build the global master tail once: every bus output sums into master.sum,
 // which feeds the single limiter and the master output gain → destination.
 function buildMaster() {
@@ -17498,128 +17365,29 @@ function reconnectFxChain(busId = activeBus) {
   prev.connect(bus.mixerIn);
 }
 
+// Push a unit's non-param state (filter type, delay mode, arp pattern/hold,
+// tremolo shape, autotune mask) to its nodes. The unit owns what that means.
+function applyUnitState(id, busId = activeBus) {
+  const nodes = fxBuses[busId]?.[id];
+  const unit = FX_UNITS_BY_ID.get(id);
+  if (nodes && unit?.applyAll) unit.applyAll(nodes, { ac: audioCtx, state: fxStates[busId][id] });
+}
+
 function applyFx(id, key, val, busId = activeBus) {
-  const fx = fxBuses[busId];
-  if (!fx) return;
-  if (id === 'beatrepeat') {
-    const setParam = (name, value) =>
-      fx.beatrepeat.node.parameters.get(name)?.setValueAtTime(value, audioCtx.currentTime);
-    if (key === 'interval') setParam('interval', clamp(val, 0.02, 30));
-    if (key === 'grid') setParam('grid', clamp(val, 0.005, 1));
-    if (key === 'gate') setParam('gate', clamp(Math.round(val), 1, 64));
-    if (key === 'pitch') setParam('pitch', clamp(val, -24, 24));
-    if (key === 'decay') setParam('decay', clamp(val, 0, 1));
-    if (key === 'chance') setParam('chance', clamp(val, 0, 1));
-    if (key === 'mix') {
-      fx.beatrepeat.wet.gain.value = val;
-      fx.beatrepeat.dry.gain.value = 1 - val;
-    }
-  } else if (id === 'grainarp') {
-    const setParam = (name, value) =>
-      fx.grainarp.node.parameters.get(name)?.setValueAtTime(value, audioCtx.currentTime);
-    if (key === 'grid') setParam('grid', clamp(val, 0.005, 1));
-    if (key === 'chance') setParam('chance', clamp(val, 0, 1));
-    if (key === 'shape') setParam('shape', clamp(val, 0, 1));
-    if (key === 'scatter') setParam('scatter', clamp(val, 0, 1));
-    if (key === 'reverse') setParam('reverse', clamp(val, 0, 1));
-    if (key === 'feedback') setParam('feedback', clamp(val, 0, 0.85));
-    if (key === 'mix') {
-      fx.grainarp.wet.gain.value = val;
-      fx.grainarp.dry.gain.value = 1 - val;
-    }
-  } else if (id === 'pitchtrem') {
-    const setParam = (name, value) =>
-      fx.pitchtrem.node.parameters.get(name)?.setTargetAtTime(value, audioCtx.currentTime, 0.02);
-    if (key === 'pitch') setParam('pitch', clamp(val, -24, 24));
-    if (key === 'pitchDepth') setParam('pitchDepth', clamp(val, 0, 24));
-    if (key === 'fine') setParam('fine', clamp(val, -100, 100));
-    if (key === 'rate') setParam('rate', clamp(val, 0.02, 20));
-    if (key === 'depth') setParam('depth', clamp(val, 0, 1));
-    if (key === 'mix') {
-      fx.pitchtrem.wet.gain.value = val;
-      fx.pitchtrem.dry.gain.value = 1 - val;
-    }
-  } else if (id === 'autotune') {
-    const setParam = (name, value) =>
-      fx.autotune.node.parameters.get(name)?.setTargetAtTime(value, audioCtx.currentTime, 0.02);
-    if (key === 'speed') setParam('speed', clamp(val, 0, 500));
-    if (key === 'amount') setParam('amount', clamp(val, 0, 1));
-    if (key === 'mix') {
-      fx.autotune.wet.gain.value = val;
-      fx.autotune.dry.gain.value = 1 - val;
-    }
-  } else if (id === 'delay') {
-    if (key === 'time')
-      [fx.delay.tap, fx.delay.pingL, fx.delay.pingR].forEach((tap) =>
-        tap.delayTime.setTargetAtTime(clamp(val, 0, MAX_DELAY_SECONDS), audioCtx.currentTime, 0.02),
-      );
-    if (key === 'feedback')
-      [fx.delay.fb, fx.delay.pingLFb, fx.delay.pingRFb].forEach((gain) =>
-        gain.gain.setTargetAtTime(Math.min(0.98, val), audioCtx.currentTime, 0.02),
-      );
-    if (key === 'hp')
-      [fx.delay.hpf, fx.delay.pingLHpf, fx.delay.pingRHpf].forEach((filter) =>
-        filter.frequency.setTargetAtTime(clamp(val, 20, 2000), audioCtx.currentTime, 0.02),
-      );
-    if (key === 'mix') {
-      fx.delay.wet.gain.value = val;
-      fx.delay.dry.gain.value = 1 - val;
-    }
-  } else if (id === 'filter') {
-    if (key === 'cutoff')
-      fx.filter.biquad.frequency.setTargetAtTime(val, audioCtx.currentTime, 0.02);
-    if (key === 'q') fx.filter.biquad.Q.setTargetAtTime(val, audioCtx.currentTime, 0.02);
-    if (key === 'mix') {
-      fx.filter.wet.gain.value = val;
-      fx.filter.dry.gain.value = 1 - val;
-    }
-  } else if (id === 'resonator') {
-    const setParam = (name, value) =>
-      fx.resonator.node.parameters.get(name)?.setTargetAtTime(value, audioCtx.currentTime, 0.02);
-    if (key === 'freq') setParam('freq', clamp(val, 40, 2000));
-    if (key === 'decay') setParam('decay', clamp(val, 0, 0.98));
-    if (key === 'damp') setParam('damp', clamp(val, 200, 12000));
-    if (key === 'int2') setParam('int2', clamp(val, -24, 24));
-    if (key === 'int3') setParam('int3', clamp(val, -24, 24));
-    if (key === 'harm2') setParam('harm2', clamp(val, 0, 1));
-    if (key === 'harm3') setParam('harm3', clamp(val, 0, 1));
-    if (key === 'mix') {
-      fx.resonator.wet.gain.value = val;
-      fx.resonator.dry.gain.value = 1 - val;
-    }
-  } else if (id === 'bitreduce') {
-    if (key === 'bits')
-      fx.bitreduce.node.parameters.get('bits')?.setTargetAtTime(val, audioCtx.currentTime, 0.02);
-    if (key === 'rate')
-      fx.bitreduce.node.parameters.get('rate')?.setTargetAtTime(val, audioCtx.currentTime, 0.02);
-    if (key === 'mix') {
-      fx.bitreduce.wet.gain.value = val;
-      fx.bitreduce.dry.gain.value = 1 - val;
-    }
-  } else if (id === 'sat') {
-    if (key === 'drive') fx.sat.shaper.curve = makeSatCurve(val);
-    if (key === 'mix') {
-      fx.sat.wet.gain.value = val;
-      fx.sat.dry.gain.value = 1 - val;
-    }
-  } else if (id === 'reverb') {
-    if (key === 'size' || key === 'decay' || key === 'damping')
-      fx.reverb.conv.buffer = makeReverbIR(busId);
-    if (key === 'predelay')
-      fx.reverb.pre.delayTime.setTargetAtTime(val, audioCtx.currentTime, 0.02);
-    if (key === 'damping')
-      fx.reverb.damp.frequency.setTargetAtTime(
-        getReverbDampingCutoff(busId),
-        audioCtx.currentTime,
-        0.03,
-      );
-    if (key === 'mix') {
-      fx.reverb.wet.gain.value = val;
-      fx.reverb.dry.gain.value = 1 - val;
-    }
+  const nodes = fxBuses[busId]?.[id];
+  if (!nodes) return;
+  if (key === 'mix') {
+    // Every unit crossfades the same way, so the rack owns mix, not the unit.
+    nodes.wet.gain.value = val;
+    nodes.dry.gain.value = 1 - val;
+    // A mix crossing 0 can change whether a stateless unit belongs in the chain.
+    syncFxIdleSplice(id, busId);
+    return;
   }
-  // A mix crossing 0 can change whether a stateless unit belongs in the chain.
-  if (key === 'mix') syncFxIdleSplice(id, busId);
+  FX_UNITS_BY_ID.get(id)?.apply?.(nodes, key, val, {
+    ac: audioCtx,
+    state: fxStates[busId][id],
+  });
 }
 
 // Apply one master-limiter parameter (the limiter is global, not per-bus).
@@ -17644,12 +17412,7 @@ function applyAllFx(busId = activeBus) {
     if (id === 'limiter') return;
     params.forEach(({ key }) => applyFx(id, key, getBaseFxValue(id, key, busId), busId));
   });
-  applyDelayMode(busId);
-  applyFilterMode(busId);
-  applyGrainArpPattern(busId);
-  applyGrainArpHold(busId);
-  applyPitchTremoloShape(busId);
-  applyAutotuneScale(busId);
+  FX_UNITS.forEach((u) => u.applyAll && applyUnitState(u.id, busId));
 }
 
 function refreshGen3UI() {
@@ -18754,7 +18517,7 @@ function renderActiveBusFx() {
         btn.addEventListener('click', () => {
           markFxPresetCustom(def.id);
           FX.filter.mode = mode;
-          applyFilterMode();
+          applyUnitState('filter');
           refreshFilterUI();
           refreshBackPanelState();
         });
@@ -18778,7 +18541,7 @@ function renderActiveBusFx() {
         btn.addEventListener('click', () => {
           markFxPresetCustom(def.id);
           FX.delay.mode = mode;
-          applyDelayMode();
+          applyUnitState('delay');
           refreshDelayModeUI();
           refreshBackPanelState();
         });
@@ -18799,7 +18562,7 @@ function renderActiveBusFx() {
         btn.addEventListener('click', () => {
           markFxPresetCustom(def.id);
           FX.grainarp.pattern = mode;
-          applyGrainArpPattern();
+          applyUnitState('grainarp');
           refreshGrainArpPatternUI();
           refreshBackPanelState();
         });
@@ -18819,7 +18582,7 @@ function renderActiveBusFx() {
       grainArpHoldButton.title = 'Freeze the capture ring — the arp keeps looping what it holds';
       grainArpHoldButton.addEventListener('click', () => {
         FX.grainarp.hold = !FX.grainarp.hold;
-        applyGrainArpHold();
+        applyUnitState('grainarp');
         refreshGrainArpHoldUI();
         refreshBackPanelState();
       });
@@ -18844,7 +18607,7 @@ function renderActiveBusFx() {
         btn.addEventListener('click', () => {
           markFxPresetCustom(def.id);
           FX.pitchtrem.shape = shape;
-          applyPitchTremoloShape();
+          applyUnitState('pitchtrem');
           refreshPitchTremoloUI();
           refreshBackPanelState();
         });
@@ -18870,7 +18633,7 @@ function renderActiveBusFx() {
       rootSelect.addEventListener('change', () => {
         markFxPresetCustom(def.id);
         FX.autotune.root = clamp(Number(rootSelect.value) || 0, 0, 11);
-        applyAutotuneScale(activeBus);
+        applyUnitState('autotune');
         refreshBackPanelState();
       });
       const scaleSelect = document.createElement('select');
@@ -18886,7 +18649,7 @@ function renderActiveBusFx() {
       scaleSelect.addEventListener('change', () => {
         markFxPresetCustom(def.id);
         FX.autotune.scale = scaleSelect.value;
-        applyAutotuneScale(activeBus);
+        applyUnitState('autotune');
         refreshBackPanelState();
       });
       // Keep the dropdowns out of the section drag/collapse handlers' way.

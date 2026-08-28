@@ -1,6 +1,10 @@
 // Pitch + Auto Pan — parameter definitions, defaults and factory presets.
 // fx/registry.js composes these into the tables the app reads.
 
+import { clamp } from '../../core/util.js';
+
+const SHAPES = ['sine', 'tri', 'square', 'saw'];
+
 export default {
   id: 'pitchtrem',
   label: 'Pitch + Auto Pan',
@@ -98,4 +102,18 @@ export default {
       },
     },
   ],
+
+  apply(nodes, key, val, { ac }) {
+    const set = (name, value) =>
+      nodes.node.parameters.get(name)?.setTargetAtTime(value, ac.currentTime, 0.02);
+    if (key === 'pitch') set('pitch', clamp(val, -24, 24));
+    if (key === 'pitchDepth') set('pitchDepth', clamp(val, 0, 24));
+    if (key === 'fine') set('fine', clamp(val, -100, 100));
+    if (key === 'rate') set('rate', clamp(val, 0.02, 20));
+    if (key === 'depth') set('depth', clamp(val, 0, 1));
+  },
+  applyAll(nodes, { ac, state }) {
+    const shape = Math.max(0, SHAPES.indexOf(state.shape));
+    nodes.node.parameters.get('shape')?.setValueAtTime(shape, ac.currentTime);
+  },
 };

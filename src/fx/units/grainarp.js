@@ -1,6 +1,16 @@
 // Grain Arp — parameter definitions, defaults and factory presets.
 // fx/registry.js composes these into the tables the app reads.
 
+import { clamp } from '../../core/util.js';
+
+// Arp patterns, in the order their mode buttons appear.
+export const GRAINARP_PATTERNS = [
+  ['oct', 'OCT'],
+  ['up', 'UP'],
+  ['down', 'DOWN'],
+  ['rand', 'RND'],
+];
+
 export default {
   id: 'grainarp',
   label: 'Grain Arp',
@@ -106,4 +116,20 @@ export default {
       },
     },
   ],
+
+  apply(nodes, key, val, { ac }) {
+    const set = (name, value) => nodes.node.parameters.get(name)?.setValueAtTime(value, ac.currentTime);
+    if (key === 'grid') set('grid', clamp(val, 0.005, 1));
+    if (key === 'chance') set('chance', clamp(val, 0, 1));
+    if (key === 'shape') set('shape', clamp(val, 0, 1));
+    if (key === 'scatter') set('scatter', clamp(val, 0, 1));
+    if (key === 'reverse') set('reverse', clamp(val, 0, 1));
+    if (key === 'feedback') set('feedback', clamp(val, 0, 0.85));
+  },
+  // Pattern choice and the HOLD latch are state, not knob params.
+  applyAll(nodes, { ac, state }) {
+    const idx = GRAINARP_PATTERNS.findIndex(([id]) => id === state.pattern);
+    nodes.node.parameters.get('pattern')?.setValueAtTime(Math.max(0, idx), ac.currentTime);
+    nodes.node.parameters.get('hold')?.setValueAtTime(state.hold ? 1 : 0, ac.currentTime);
+  },
 };

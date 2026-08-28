@@ -1,6 +1,8 @@
 // Resonator — parameter definitions, defaults and factory presets.
 // fx/registry.js composes these into the tables the app reads.
 
+import { clamp } from '../../core/util.js';
+
 export default {
   id: 'resonator',
   label: 'Resonator',
@@ -121,4 +123,16 @@ export default {
       },
     },
   ],
+
+  apply(nodes, key, val, { ac }) {
+    const set = (name, value) =>
+      nodes.node.parameters.get(name)?.setTargetAtTime(value, ac.currentTime, 0.02);
+    if (key === 'freq') set('freq', clamp(val, 40, 2000));
+    if (key === 'decay') set('decay', clamp(val, 0, 0.98));
+    if (key === 'damp') set('damp', clamp(val, 200, 12000));
+    if (key === 'int2') set('int2', clamp(val, -24, 24));
+    if (key === 'int3') set('int3', clamp(val, -24, 24));
+    if (key === 'harm2') set('harm2', clamp(val, 0, 1));
+    if (key === 'harm3') set('harm3', clamp(val, 0, 1));
+  },
 };

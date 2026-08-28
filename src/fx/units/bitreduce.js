@@ -18,4 +18,9 @@ export default {
     { name: 'Crunchy', values: { bits: 8, rate: 0.35, mix: 0.6 } },
     { name: 'Destroyed', values: { bits: 4, rate: 0.08, mix: 0.85 } },
   ],
+
+  apply(nodes, key, val, { ac }) {
+    if (key === 'bits' || key === 'rate')
+      nodes.node.parameters.get(key)?.setTargetAtTime(val, ac.currentTime, 0.02);
+  },
 };

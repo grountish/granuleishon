@@ -1,6 +1,8 @@
 // Beat Repeat — parameter definitions, defaults and factory presets.
 // fx/registry.js composes these into the tables the app reads.
 
+import { clamp } from '../../core/util.js';
+
 export default {
   id: 'beatrepeat',
   label: 'Beat Repeat',
@@ -95,4 +97,14 @@ export default {
       },
     },
   ],
+
+  apply(nodes, key, val, { ac }) {
+    const set = (name, value) => nodes.node.parameters.get(name)?.setValueAtTime(value, ac.currentTime);
+    if (key === 'interval') set('interval', clamp(val, 0.02, 30));
+    if (key === 'grid') set('grid', clamp(val, 0.005, 1));
+    if (key === 'gate') set('gate', clamp(Math.round(val), 1, 64));
+    if (key === 'pitch') set('pitch', clamp(val, -24, 24));
+    if (key === 'decay') set('decay', clamp(val, 0, 1));
+    if (key === 'chance') set('chance', clamp(val, 0, 1));
+  },
 };
