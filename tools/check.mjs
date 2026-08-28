@@ -149,6 +149,13 @@ function codeOnly(src) {
 // confident about — ones another module exports, or ones only app.js declares.
 // A local coincidentally sharing such a name is a false positive, and worth a
 // look anyway.
+const KEYWORDS = new Set([
+  'if','else','for','while','do','switch','case','default','break','continue','return','function',
+  'const','let','var','class','extends','new','delete','typeof','instanceof','in','of','void',
+  'try','catch','finally','throw','this','super','import','export','from','as','async','await',
+  'yield','static','get','set','true','false','null','undefined','debugger','with',
+]);
+
 const GLOBALS = new Set([
   // language
   'globalThis','undefined','NaN','Infinity','Object','Array','String','Number','Boolean','Symbol',
@@ -224,8 +231,13 @@ async function checkReferences(files) {
     for (const [, n] of src.matchAll(DEFAULT_IMPORT)) known.add(n);
 
     const body = code.replace(/^import[^;]+;$/gm, '');
+    // Every identifier that is not a property access and not an object-literal
+    // key. Deliberately broad — the report is filtered below to names another
+    // module actually exports, so extra candidates cost nothing.
     const used = new Set(
-      [...body.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*(?=\(|\.[A-Za-z_$]|[,;)\]}])/g)].map((m) => m[1]),
+      [...body.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)(?!\s*:)/g)]
+        .map((m) => m[1])
+        .filter((n) => !KEYWORDS.has(n)),
     );
     for (const name of used) {
       if (known.has(name)) continue;

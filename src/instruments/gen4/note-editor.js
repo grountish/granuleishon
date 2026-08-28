@@ -33,6 +33,7 @@ import {
   gen4NoteLaneButtons,
   gen4ParamSections,
   gen4PresetSelects,
+  gen4FxSendBtns,
   gen4NoteDrawState,
   gen4FillState,
   gen4StepEls,
