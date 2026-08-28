@@ -1,4 +1,23 @@
 // grnsh — main thread: mic capture, worklet setup, UI wiring.
+// Being split into feature modules under src/ — see REFACTOR.md.
+
+import { clamp, quantize, formatNumericValue, formatControlValue } from './core/util.js';
+import {
+  NOTE_NAMES,
+  midiToFreqHz,
+  freqHzToMidi,
+  formatMidiNote,
+  GEN4_SCALES,
+  GEN4_SCALE,
+  getGen4ScaleIntervals,
+  isMidiInGen4Scale,
+  snapMidiToGen4Scale,
+  harmonizerSnapMidi,
+  harmonizerSnapHz,
+  harmonizerSnapOffset,
+  AUTOTUNE_SCALE_OPTIONS,
+  computeAutotuneMask,
+} from './core/theory.js';
 
 const THEME_STORAGE_KEY = 'grnsh-theme-v1';
 const AUDIO_LATENCY_STORAGE_KEY = 'grnsh-audio-latency-v1';
@@ -214,23 +233,6 @@ function setStatus(text) {
   }
 }
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function quantize(value, step, decimals) {
-  return parseFloat((Math.round(value / step) * step).toFixed(decimals));
-}
-
-function formatNumericValue(value, decimals) {
-  return parseFloat(value.toFixed(decimals));
-}
-
-function formatControlValue(spec, value) {
-  const decimals = (spec.step.toString().split('.')[1] || '').length;
-  return `${formatNumericValue(value, decimals)}${spec.unit ? ' ' + spec.unit : ''}`;
-}
-
 function getTempoStep(syncIndex) {
   const index = clamp(Math.round(syncIndex), 0, TEMPO_SYNC_STEPS.length - 1);
   return TEMPO_SYNC_STEPS[index];
@@ -253,19 +255,6 @@ function formatTempoSyncValue(syncIndex, suffix) {
 function getDelayTimeSeconds(busId = activeBus) {
   const d = fxStates[busId].delay;
   return clamp(d.sync ? beatsToSeconds(getTempoStep(d.syncIndex).beats) : d.time, 0, MAX_DELAY_SECONDS);
-}
-
-function midiToFreqHz(midi) {
-  return 440 * Math.pow(2, (midi - 69) / 12);
-}
-
-function freqHzToMidi(freq) {
-  return 69 + 12 * Math.log2(Math.max(1, freq) / 440);
-}
-
-function formatResonatorNote(midi) {
-  const m = Math.round(midi);
-  return `${GEN4_ROOT_NAMES[((m % 12) + 12) % 12]}${Math.floor(m / 12) - 1}`;
 }
 
 function getResonatorFreqHz(busId = activeBus) {
@@ -4418,7 +4407,6 @@ function buildUI() {
 
 // ─── Gen 3: Oscillator ─────────────────────────────────────────────────────
 
-const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 // C1–B5 (MIDI 24–83), highest first so piano roll reads top=high
 const OSC_NOTES = [];
 for (let m = 83; m >= 24; m--) {
@@ -4427,7 +4415,7 @@ for (let m = 83; m >= 24; m--) {
   OSC_NOTES.push({
     midi: m,
     label: `${name}${oct}`,
-    freq: 440 * Math.pow(2, (m - 69) / 12),
+    freq: midiToFreqHz(m),
     isBlack: [1, 3, 6, 8, 10].includes(m % 12),
     isC: m % 12 === 0,
   });
@@ -4723,7 +4711,7 @@ function syncGen3SustainChord(targetMidis) {
     if (!targetMidis.has(midi)) removeGen3Note(midi);
   });
   targetMidis.forEach((midi) => {
-    if (!GEN3.activeNotes.has(midi)) addGen3Note(midi, midiNoteToFrequency(midi));
+    if (!GEN3.activeNotes.has(midi)) addGen3Note(midi, midiToFreqHz(midi));
   });
 }
 
@@ -4802,7 +4790,7 @@ function scheduleGen3ArpNote(time, midi, sound, stepDuration) {
   setTimeout(() => {
     if (!audioCtx || !GEN4.playing || session !== GEN3_ARP_RUNTIME.session) return;
     if (GEN3.activeNotes.has(midi)) removeGen3Note(midi);
-    addGen3Note(midi, midiNoteToFrequency(midi), null, sound, gateMs);
+    addGen3Note(midi, midiToFreqHz(midi), null, sound, gateMs);
   }, delayMs);
 }
 
@@ -6110,7 +6098,7 @@ function gen4TriggerOsc(
     if (!audioCtx || oscChannel?.muted) return;
     notes.forEach((midi) => {
       if (GEN3.activeNotes.has(midi)) removeGen3Note(midi);
-      addGen3Note(midi, midiNoteToFrequency(midi), ov, sound);
+      addGen3Note(midi, midiToFreqHz(midi), ov, sound);
     });
   }, delayMs);
 }
@@ -6251,10 +6239,6 @@ function getEffectiveGen4Params(ci, locks = null) {
   return effective;
 }
 
-function midiNoteToFrequency(midi) {
-  return 440 * Math.pow(2, (midi - 69) / 12);
-}
-
 function applyGen4StepNote(ch, p, midi, locks = null) {
   if (!Number.isFinite(midi) || ch.id === 'osc') return;
   if (ch.id === 'smp') {
@@ -6276,7 +6260,7 @@ function applyGen4StepNote(ch, p, midi, locks = null) {
   );
   if (!paramDef) return;
   const modulationOffset = p[key] - ch.params[key];
-  p[key] = clamp(midiNoteToFrequency(midi) + modulationOffset, paramDef.min, paramDef.max);
+  p[key] = clamp(midiToFreqHz(midi) + modulationOffset, paramDef.min, paramDef.max);
 }
 
 function gen4FireChannel(ci, time, velocity, midi = null, loop = null, locks = null) {
@@ -6679,12 +6663,8 @@ function gen4CycleProbability(ci, si) {
   gen4ApplyStepBtn(ci, si);
 }
 
-function formatMidiNote(midi) {
-  return `${NOTE_NAMES[midi % 12]}${Math.floor(midi / 12) - 1}`;
-}
-
 function frequencyToMidi(frequency) {
-  return Math.round(69 + 12 * Math.log2(Math.max(1, frequency) / 440));
+  return Math.round(freqHzToMidi(frequency));
 }
 
 // The midi window a lane can actually play: its tune/tone param range mapped
@@ -6931,42 +6911,9 @@ function clearSelectedGen4Locks() {
   refreshGen4LockEditor();
 }
 
-// ── Scale mode (notes editor) ── highlights in-scale rows as a drawing
-// guide and offers "fit": snap the selected lane's notes into the scale.
-const GEN4_SCALES = [
-  ['off', 'No scale', null],
-  ['major', 'Major', [0, 2, 4, 5, 7, 9, 11]],
-  ['minor', 'Minor', [0, 2, 3, 5, 7, 8, 10]],
-  ['harm-minor', 'Harm minor', [0, 2, 3, 5, 7, 8, 11]],
-  ['dorian', 'Dorian', [0, 2, 3, 5, 7, 9, 10]],
-  ['phrygian', 'Phrygian', [0, 1, 3, 5, 7, 8, 10]],
-  ['lydian', 'Lydian', [0, 2, 4, 6, 7, 9, 11]],
-  ['mixolydian', 'Mixolydian', [0, 2, 4, 5, 7, 9, 10]],
-  ['pent-major', 'Pent major', [0, 2, 4, 7, 9]],
-  ['pent-minor', 'Pent minor', [0, 3, 5, 7, 10]],
-  ['blues', 'Blues', [0, 3, 5, 6, 7, 10]],
-];
-const GEN4_SCALE = { scale: 'off', root: 0 };
-const GEN4_ROOT_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-
-function getGen4ScaleIntervals() {
-  return GEN4_SCALES.find(([id]) => id === GEN4_SCALE.scale)?.[2] || null;
-}
-
-function isMidiInGen4Scale(midi) {
-  const intervals = getGen4ScaleIntervals();
-  if (!intervals) return true;
-  return intervals.includes((((midi - GEN4_SCALE.root) % 12) + 12) % 12);
-}
-
-function snapMidiToGen4Scale(midi) {
-  if (isMidiInGen4Scale(midi)) return midi;
-  for (let d = 1; d <= 6; d++) {
-    if (isMidiInGen4Scale(midi - d)) return midi - d; // ties resolve downward
-    if (isMidiInGen4Scale(midi + d)) return midi + d;
-  }
-  return midi;
-}
+// Scale mode (notes editor) highlights in-scale rows as a drawing guide and
+// offers "fit": snap the selected lane's notes into the scale. The scale
+// itself and its snapping primitives live in core/theory.js.
 
 // ── Harmonizer ── header dropdown: pick a root + scale, then fit every
 // pitched value in the whole project to it in one undoable step. Soft mode
@@ -6989,47 +6936,6 @@ const HARMONIZER_GEN4_HZ_KEYS = {
   ],
   smp: [['tone', 200, 16000]],
 };
-
-function harmonizerSnapMidi(midi, pitchClasses) {
-  if (!Number.isFinite(midi)) return midi;
-  const m = clamp(Math.round(midi), 0, 127);
-  for (let d = 0; d <= 11; d++) {
-    if (m - d >= 0 && pitchClasses.has((m - d) % 12)) return m - d; // ties resolve downward
-    if (d && m + d <= 127 && pitchClasses.has((m + d) % 12)) return m + d;
-  }
-  return m;
-}
-
-function harmonizerSnapHz(hz, pitchClasses, min, max) {
-  if (!Number.isFinite(hz) || hz <= 0) return hz;
-  let best = null;
-  let bestDist = Infinity;
-  for (let m = 0; m <= 135; m++) {
-    if (!pitchClasses.has(m % 12)) continue;
-    const f = midiToFreqHz(m);
-    if (f < min || f > max) continue;
-    const dist = Math.abs(Math.log2(f / hz));
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = f;
-    }
-  }
-  return best ?? hz;
-}
-
-// Semitone offsets (grain pitch, resonator intervals…) have no absolute
-// pitch, so they snap by interval: offset mod 12 must land on a scale degree.
-function harmonizerSnapOffset(st, intervals, min, max) {
-  if (!Number.isFinite(st)) return st;
-  const v = clamp(Math.round(st), min, max);
-  for (let d = 0; d <= 11; d++) {
-    for (const cand of d === 0 ? [v] : [v - d, v + d]) {
-      if (cand < min || cand > max) continue;
-      if (intervals.has(((cand % 12) + 12) % 12)) return cand;
-    }
-  }
-  return v;
-}
 
 function harmonizePreset(preset, root, scaleId, hard) {
   const scaleIntervals = GEN4_SCALES.find(([id]) => id === scaleId)?.[2] || [0];
@@ -7127,7 +7033,7 @@ function applyHarmonizer(hard) {
   closeHarmonizerMenu();
   const scaleLabel = GEN4_SCALES.find(([id]) => id === HARMONIZER.scale)?.[1] || HARMONIZER.scale;
   setStatus(
-    `harmonized to ${GEN4_ROOT_NAMES[HARMONIZER.root]} ${scaleLabel.toLowerCase()} (${hard ? 'hard' : 'soft'})`,
+    `harmonized to ${NOTE_NAMES[HARMONIZER.root]} ${scaleLabel.toLowerCase()} (${hard ? 'hard' : 'soft'})`,
   );
 }
 
@@ -7147,7 +7053,7 @@ function initHarmonizer() {
   const rootSelect = document.getElementById('harmonizerRoot');
   const scaleSelect = document.getElementById('harmonizerScale');
   if (rootSelect) {
-    GEN4_ROOT_NAMES.forEach((name, idx) => {
+    NOTE_NAMES.forEach((name, idx) => {
       const opt = document.createElement('option');
       opt.value = `${idx}`;
       opt.textContent = name;
@@ -7210,7 +7116,7 @@ function buildScaleGroup(fitTitle, onFit) {
   const rootSelect = document.createElement('select');
   rootSelect.className = 'drum-scale-select';
   rootSelect.title = 'Scale root';
-  GEN4_ROOT_NAMES.forEach((name, idx) => {
+  NOTE_NAMES.forEach((name, idx) => {
     const opt = document.createElement('option');
     opt.value = `${idx}`;
     opt.textContent = name;
@@ -7280,7 +7186,7 @@ async function fitGen3ChordToScale() {
   }
   setStatus(
     changed > 0
-      ? `keys: fitted ${changed} note${changed === 1 ? '' : 's'} to ${GEN4_ROOT_NAMES[GEN4_SCALE.root]} ${GEN4_SCALES.find(([id]) => id === GEN4_SCALE.scale)?.[1].toLowerCase()}`
+      ? `keys: fitted ${changed} note${changed === 1 ? '' : 's'} to ${NOTE_NAMES[GEN4_SCALE.root]} ${GEN4_SCALES.find(([id]) => id === GEN4_SCALE.scale)?.[1].toLowerCase()}`
       : 'keys: already in scale',
   );
 }
@@ -7306,7 +7212,7 @@ function fitGen4NotesToScale() {
   const label = GEN4_DEFS[gen4SelectedNoteChannel]?.label || 'lane';
   setStatus(
     changed > 0
-      ? `${label}: fitted ${changed} note${changed === 1 ? '' : 's'} to ${GEN4_ROOT_NAMES[GEN4_SCALE.root]} ${GEN4_SCALES.find(([id]) => id === GEN4_SCALE.scale)?.[1].toLowerCase()}`
+      ? `${label}: fitted ${changed} note${changed === 1 ? '' : 's'} to ${NOTE_NAMES[GEN4_SCALE.root]} ${GEN4_SCALES.find(([id]) => id === GEN4_SCALE.scale)?.[1].toLowerCase()}`
       : `${label}: already in scale`,
   );
 }
@@ -13937,7 +13843,7 @@ function refreshResonatorFreqUI() {
   control.setFormatter(
     isNote
       ? (v) =>
-          `${formatResonatorNote(v)} • ${formatNumericValue(midiToFreqHz(Math.round(v)), 0)}Hz`
+          `${formatMidiNote(v)} • ${formatNumericValue(midiToFreqHz(Math.round(v)), 0)}Hz`
       : null,
   );
   control.setValue(isNote ? FX.resonator.note : FX.resonator.freq);
@@ -13951,7 +13857,7 @@ function refreshResonatorFreqUI() {
 function formatResonatorInterval(v) {
   const st = Math.round(v);
   const sign = st >= 0 ? '+' : '';
-  if (FX.resonator.noteMode) return `${sign}${st} • ${formatResonatorNote(FX.resonator.note + st)}`;
+  if (FX.resonator.noteMode) return `${sign}${st} • ${formatMidiNote(FX.resonator.note + st)}`;
   return `${sign}${st} • ${formatNumericValue(getResonatorFreqHz() * Math.pow(2, st / 12), 0)}Hz`;
 }
 
@@ -15040,7 +14946,7 @@ function refreshBackPanelState() {
       const module = BACK_PANEL.audioModules.get('autotune');
       const scaleLabel =
         AUTOTUNE_SCALE_OPTIONS.find(([id]) => id === FX.autotune.scale)?.[1] || FX.autotune.scale;
-      module.subtitleEl.textContent = `${GEN4_ROOT_NAMES[FX.autotune.root] || 'C'} ${scaleLabel} • ${formatNumericValue(FX.autotune.speed, 0)}ms • ${formatBackValue(getFxParamDef('autotune', 'mix'), FX.autotune.mix)} wet`;
+      module.subtitleEl.textContent = `${NOTE_NAMES[FX.autotune.root] || 'C'} ${scaleLabel} • ${formatNumericValue(FX.autotune.speed, 0)}ms • ${formatBackValue(getFxParamDef('autotune', 'mix'), FX.autotune.mix)} wet`;
       module.el.classList.toggle('active', FX.autotune.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('delay') &&
@@ -15058,7 +14964,7 @@ function refreshBackPanelState() {
   BACK_PANEL.audioModules.get('resonator') &&
     (() => {
       const module = BACK_PANEL.audioModules.get('resonator');
-      module.subtitleEl.textContent = `${FX.resonator.noteMode ? formatResonatorNote(FX.resonator.note) : `${formatNumericValue(FX.resonator.freq, 0)}Hz`} • ${formatBackValue(getFxParamDef('resonator', 'mix'), FX.resonator.mix)} wet`;
+      module.subtitleEl.textContent = `${FX.resonator.noteMode ? formatMidiNote(FX.resonator.note) : `${formatNumericValue(FX.resonator.freq, 0)}Hz`} • ${formatBackValue(getFxParamDef('resonator', 'mix'), FX.resonator.mix)} wet`;
       module.el.classList.toggle('active', FX.resonator.mix > 0.001);
     })();
   BACK_PANEL.audioModules.get('bitreduce') &&
@@ -18589,28 +18495,6 @@ function applyPitchTremoloShape(busId = activeBus) {
   bus.pitchtrem.node.parameters.get('shape')?.setValueAtTime(shape, audioCtx.currentTime);
 }
 
-// The autotune worklet takes its allowed notes as a 12-bit pitch-class mask,
-// so root/scale/tonic/chromatic all collapse into one number.
-const AUTOTUNE_SCALE_OPTIONS = [
-  ['chromatic', 'Chromatic'],
-  ['tonic', 'Tonic'],
-  ...GEN4_SCALES.filter(([, , intervals]) => intervals).map(([id, label]) => [id, label]),
-];
-
-function computeAutotuneMask(at) {
-  const intervals =
-    at.scale === 'tonic'
-      ? [0]
-      : at.scale === 'chromatic'
-        ? [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-        : GEN4_SCALES.find(([id]) => id === at.scale)?.[2] || [0, 2, 4, 5, 7, 9, 11];
-  let mask = 0;
-  intervals.forEach((i) => {
-    mask |= 1 << (((at.root + i) % 12) + 12) % 12;
-  });
-  return mask;
-}
-
 function applyAutotuneScale(busId = activeBus) {
   const bus = fxBuses[busId];
   if (!bus?.autotune?.node) return;
@@ -20470,7 +20354,7 @@ function renderActiveBusFx() {
       const rootSelect = document.createElement('select');
       rootSelect.className = 'drum-scale-select';
       rootSelect.title = 'Correction root';
-      GEN4_ROOT_NAMES.forEach((name, idx) => {
+      NOTE_NAMES.forEach((name, idx) => {
         const opt = document.createElement('option');
         opt.value = `${idx}`;
         opt.textContent = name;
