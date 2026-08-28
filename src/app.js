@@ -10,6 +10,7 @@ import {
 } from './core/util.js';
 import { rbjHighpass, rbjLowShelf, rbjPeaking, biquadMagnitudeDb } from './core/dsp.js';
 import { encodeWav } from './render/wav.js';
+import { emit, on } from './core/events.js';
 import { engine } from './core/engine.js';
 import {
   FX_BUS_IDS,
@@ -803,7 +804,7 @@ async function restartAudioEngineForLatency() {
     if (wasSequencerPlaying && engine.ctx) startGen4Sequencer();
   }
   refreshSongTransportUI();
-  refreshBackPanelState();
+  emit('state');
   setStatus(wasRunning ? getAudioLatencyStatus() : `${getAudioLatencyStatus()} • ready`);
 }
 
@@ -857,7 +858,7 @@ async function refreshInputDevices() {
       ? audioInputs
       : [{ deviceId: 'default', label: 'System Default', kind: 'audioinput' }];
     renderInputDevices();
-    refreshBackPanelState();
+    emit('state');
   } catch (e) {}
 }
 
@@ -1993,7 +1994,7 @@ function setSourceDurationSec(genIdx, durationSec) {
   const vizState = genVizStates[genIdx];
   vizState.targetPosX = posX;
   if (!vizState.seeded) vizState.currentPosX = posX;
-  refreshBackPanelState();
+  emit('state');
 }
 
 function clearFreezeStates({ send = true } = {}) {
@@ -2080,7 +2081,7 @@ function refreshSourceModeUI(genIdx) {
     btn.classList.toggle('loaded', key === 'file' && !!getSourceState(genIdx).bufferData);
   });
   refreshGeneratorCaptureUI(genIdx);
-  refreshBackPanelState();
+  emit('state');
 }
 
 // Boot everything transport playback needs: audio graph, drum nodes AND the
@@ -2102,7 +2103,7 @@ function setGranularRunning() {
   startLFOLoop();
   startGenVizLoop();
   setStatus(getGranularStatusText());
-  refreshBackPanelState();
+  emit('state');
 }
 
 function setGeneratorParam(genIdx, key, value, { send = true, deferMaxClamp = false } = {}) {
@@ -2132,7 +2133,7 @@ function setGeneratorParam(genIdx, key, value, { send = true, deferMaxClamp = fa
   }
   if (send) sendParams(genIdx);
   refreshModulationVisuals();
-  refreshBackPanelState();
+  emit('state');
 }
 
 function getGrainSizeSyncMs(genIdx) {
@@ -2309,12 +2310,12 @@ function applyMappedModulationTargets() {
   }
   // The back board rewrites every module's subtitles/meters — too heavy to run
   // each frame alongside the wire loop, so cap this live refresh at ~30Hz.
-  // Event-driven refreshBackPanelState() calls stay immediate.
+  // Event-driven emit('state') calls stay immediate.
   if (UI_VIEW.mode === 'back') {
     const now = performance.now();
     if (now - backStateLastLiveRefresh >= 33) {
       backStateLastLiveRefresh = now;
-      refreshBackPanelState();
+      emit('state');
     }
   }
   if (UI_VIEW.mode === 'mixer' && gens.has(5)) {
@@ -2543,7 +2544,7 @@ function refreshLFOMappingUI() {
   });
   refreshMixerMappingUI();
   refreshModulationVisuals();
-  refreshBackPanelState();
+  emit('state');
 }
 
 function setLFOLedState(led, sourceIdx) {
@@ -4014,7 +4015,7 @@ function releaseGen3Voice(voice) {
   voice.releaseTimer = setTimeout(() => {
     GEN3.releasingVoices.delete(voice);
     stopGen3Voice(voice);
-    refreshBackPanelState();
+    emit('state');
   }, stopAfterMs);
 }
 
@@ -4035,7 +4036,7 @@ function addGen3Note(midi, freq, ov = null, soundOverride = null, autoReleaseMs 
       if (GEN3.activeNotes.get(midi) === entry) removeGen3Note(midi);
     }, ms);
   }
-  refreshBackPanelState();
+  emit('state');
   return entry;
 }
 
@@ -4050,7 +4051,7 @@ function removeGen3Note(midi) {
     }
     releaseGen3Voice(entry);
   }
-  refreshBackPanelState();
+  emit('state');
 }
 
 function syncGen3SustainChord(targetMidis) {
@@ -4082,7 +4083,7 @@ function stopAllGen3Notes() {
   });
   GEN3.releasingVoices.clear();
   gen3NoteEls.forEach((_, midi) => setGen3NoteActive(midi, false));
-  refreshBackPanelState();
+  emit('state');
 }
 
 function restartAllGen3Notes() {
@@ -4095,7 +4096,7 @@ function restartAllGen3Notes() {
     entry.sound = sound;
     Object.assign(entry, createGen3Voice(entry.freq, entry.ov, sound));
   });
-  refreshBackPanelState();
+  emit('state');
 }
 
 const GEN3_ARP_RUNTIME = {
@@ -4500,7 +4501,7 @@ function buildOscPanel() {
           applyGen3Modulation();
         }
         refreshModulationVisuals();
-        refreshBackPanelState();
+        emit('state');
       },
       isMappable ? { genIdx: 2, key: p.key } : null,
       { genIdx: 2, key: p.key },
@@ -4831,7 +4832,7 @@ function applyGen4Preset(ci, presetIndex) {
     for (let si = 0; si < 32; si++) refreshGen4NoteStep(si);
   }
   refreshGen4PresetSelection(ci);
-  refreshBackPanelState();
+  emit('state');
 }
 
 // Apply a genre kit: every lane's sound params plus a fresh groove written
@@ -4903,7 +4904,7 @@ function applyGen4KitPreset(presetIndex) {
   gen4RefreshStepDisplay();
   if (gen4EditorMode === 'notes') refreshGen4NoteEditor();
   refreshGen4LockEditor();
-  refreshBackPanelState();
+  emit('state');
 }
 
 function buildGen4PresetSelect(ci) {
@@ -8914,14 +8915,14 @@ function setSequencerStep(stepIdx, value) {
   STEP_SEQ.steps[stepIdx] = clamp(Math.round(value * 12) / 12, -1, 1);
   STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
   refreshSequencerUI();
-  refreshBackPanelState();
+  emit('state');
 }
 
 function clearSequencerSteps() {
   STEP_SEQ.steps.fill(0);
   STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
   refreshSequencerUI();
-  refreshBackPanelState();
+  emit('state');
   applyMappedModulationTargets();
 }
 
@@ -8959,7 +8960,7 @@ function setSequencerSharedAcrossLoops(on, { announce = true } = {}) {
   STEP_SEQ.currentStep = Math.min(STEP_SEQ.currentStep, getSeqActiveStepCount() - 1);
   STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
   refreshSequencerUI();
-  refreshBackPanelState();
+  emit('state');
   applyMappedModulationTargets();
   if (announce) {
     setStatus(next ? 'sequence shared across all loops' : 'sequence is now per loop');
@@ -9687,7 +9688,7 @@ function bindEditLoop() {
   }
   refreshGen3KeyStates();
   refreshSequencerUI();
-  refreshBackPanelState();
+  emit('state');
   applyMappedModulationTargets();
 }
 
@@ -11960,7 +11961,7 @@ function stopLFOLoop() {
   STEP_SEQ.elapsed = 0;
   refreshSequencerUI();
   refreshModulationVisuals();
-  refreshBackPanelState();
+  emit('state');
 }
 
 function setSequencerSubdivision(subdivision) {
@@ -11975,7 +11976,7 @@ function setSequencerSubdivision(subdivision) {
   STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
   STEP_SEQ.elapsed = 0;
   refreshSequencerUI();
-  refreshBackPanelState();
+  emit('state');
   applyMappedModulationTargets();
 }
 
@@ -11989,7 +11990,7 @@ function setSequencerStepBeats(stepBeats) {
   }
   STEP_SEQ.elapsed = 0;
   refreshSequencerUI();
-  refreshBackPanelState();
+  emit('state');
   applyMappedModulationTargets();
 }
 
@@ -12022,7 +12023,7 @@ function cycleLFOMap(genIdx, key) {
   else if (genIdx === 5) applyInstrumentMixState();
   else sendParams(genIdx);
   rebuildBackWireSVG();
-  refreshBackPanelState();
+  emit('state');
   refreshMixerMappingUI();
   return nextSourceIdx;
 }
@@ -12037,7 +12038,7 @@ function setLFOMapSource(genIdx, key, sourceIdx) {
   else if (genIdx === 5) applyInstrumentMixState();
   else sendParams(genIdx);
   rebuildBackWireSVG();
-  refreshBackPanelState();
+  emit('state');
   refreshModulationVisuals();
   refreshMixerMappingUI();
   return sourceIdx;
@@ -12424,7 +12425,7 @@ function setTransportBpm(value, { refresh = true, updateField = true } = {}) {
     if (state[gi].grainSizeSync || state[gi].densitySync) sendParams(gi);
   }
   applyMappedModulationTargets();
-  refreshBackPanelState();
+  emit('state');
 }
 
 function initTempoDrag() {
@@ -12575,14 +12576,14 @@ function clearBackPatchSelection() {
   BACK_PANEL.selectedSourceIdx = null;
   BACK_PANEL.pointerX = null;
   BACK_PANEL.pointerY = null;
-  refreshBackPanelState();
+  emit('state');
 }
 
 function setBackPatchSelection(sourceIdx) {
   BACK_PANEL.selectedSourceIdx = BACK_PANEL.selectedSourceIdx === sourceIdx ? null : sourceIdx;
   BACK_PANEL.pointerX = null;
   BACK_PANEL.pointerY = null;
-  refreshBackPanelState();
+  emit('state');
 }
 
 function applyModulationTargetUpdate(genIdx) {
@@ -12829,7 +12830,7 @@ function buildBackPanel() {
       btn.addEventListener('click', () => {
         TRIG_SC.source = def.id;
         refreshTrigScUI();
-        refreshBackPanelState();
+        emit('state');
       });
       trigScSourceBtns.set(def.id, btn);
       srcRow.appendChild(btn);
@@ -12845,7 +12846,7 @@ function buildBackPanel() {
     trigScInvBtn.addEventListener('click', () => {
       TRIG_SC.invert = !TRIG_SC.invert;
       refreshTrigScUI();
-      refreshBackPanelState();
+      emit('state');
     });
     invRow.appendChild(trigScInvBtn);
 
@@ -13125,7 +13126,7 @@ function buildBackPanel() {
   board.append(patchfield);
   root.appendChild(board);
   BACK_PANEL.built = true;
-  refreshBackPanelState();
+  emit('state');
 }
 
 // Build wire SVG elements once; called when routes change or panel opens.
@@ -13275,6 +13276,9 @@ function renderBackPanelConnections() {
 
   queueBackPanelConnections();
 }
+
+// The back panel redraws whenever anything announces a state change.
+on('state', refreshBackPanelState);
 
 function refreshBackPanelState() {
   if (!BACK_PANEL.built) return;
@@ -15806,7 +15810,7 @@ function setPanelView(mode) {
   }
   if (mode === 'back') {
     if (!BACK_PANEL.built) buildBackPanel();
-    refreshBackPanelState();
+    emit('state');
     rebuildBackWireSVG();
     queueBackPanelConnections();
   }
@@ -16017,7 +16021,7 @@ function buildLFOSection(lfoIdx) {
     } else {
       lfo.rate = v;
     }
-    refreshBackPanelState();
+    emit('state');
   });
   lfoControlBindings[lfoIdx].set('rate', rateControl);
   content.appendChild(rateControl);
@@ -16025,7 +16029,7 @@ function buildLFOSection(lfoIdx) {
   const syncModeRow = buildSyncModeRow(lfo.sync, (mode) => {
     lfo.sync = mode === 'sync';
     refreshLFOControlUI(lfoIdx);
-    refreshBackPanelState();
+    emit('state');
   });
   lfoSyncModeControls[lfoIdx] = syncModeRow;
   content.appendChild(syncModeRow);
@@ -16035,7 +16039,7 @@ function buildLFOSection(lfoIdx) {
     lfo.depth,
     (v) => {
       lfo.depth = v;
-      refreshBackPanelState();
+      emit('state');
     },
   );
   lfoControlBindings[lfoIdx].set('depth', depthControl);
@@ -16059,7 +16063,7 @@ function buildLFOSection(lfoIdx) {
       if (shape === 'samplehold') lfo.holdValue = Math.random() * 2 - 1;
       shapeRow.querySelectorAll('.lfo-shape').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
-      refreshBackPanelState();
+      emit('state');
     });
     lfoShapeButtons[lfoIdx].set(shape, btn);
     shapeRow.appendChild(btn);
@@ -16329,7 +16333,7 @@ function refreshLFOUI() {
       btn.classList.toggle('active', lfo.shape === shape),
     );
   });
-  refreshBackPanelState();
+  emit('state');
 }
 
 function refreshFilterUI() {
@@ -16337,7 +16341,7 @@ function refreshFilterUI() {
     fxControlBindings.get(`filter:${key}`)?.setValue(BUS.fx.filter[key]);
   });
   filterModeButtons.forEach((btn, mode) => btn.classList.toggle('active', BUS.fx.filter.mode === mode));
-  refreshBackPanelState();
+  emit('state');
 }
 
 function capturePreset() {
@@ -16753,7 +16757,7 @@ function applyPreset(preset, { resetSources = true } = {}) {
   applyFxModulation();
   applyInstrumentMixState();
   applyMasteringPreset(preset.mastering || null);
-  refreshBackPanelState();
+  emit('state');
 }
 
 function formatProjectDate(ts) {
@@ -17227,7 +17231,7 @@ function applyFxPreset(effectId, presetIndex) {
     applyFxModulation();
     renderActiveBusFx();
   }
-  refreshBackPanelState();
+  emit('state');
 }
 
 function buildFxPresetSelect(effectId) {
@@ -17285,7 +17289,7 @@ function ecoizeFx() {
   }
   FX_BUS_IDS.forEach((busId) => reconnectFxChain(busId));
   renderActiveBusFx();
-  refreshBackPanelState();
+  emit('state');
   historyCaptureNow();
   setStatus(`eco: powered off ${count} idle FX unit${count === 1 ? '' : 's'}`);
 }
@@ -17342,7 +17346,7 @@ function buildLimiterSection(container) {
         markFxPresetCustom(def.id);
         LIMITER[p.key] = v;
         applyLimiter(p.key, v);
-        refreshBackPanelState();
+        emit('state');
       },
       null,
     );
@@ -17411,7 +17415,7 @@ function renderActiveBusFx() {
           BUS.fx.filter.mode = mode;
           applyUnitState('filter');
           refreshFilterUI();
-          refreshBackPanelState();
+          emit('state');
         });
         filterModeButtons.set(mode, btn);
         modeRow.appendChild(btn);
@@ -17435,7 +17439,7 @@ function renderActiveBusFx() {
           BUS.fx.delay.mode = mode;
           applyUnitState('delay');
           refreshDelayModeUI();
-          refreshBackPanelState();
+          emit('state');
         });
         delayModeButtons.set(mode, btn);
         modeRow.appendChild(btn);
@@ -17456,7 +17460,7 @@ function renderActiveBusFx() {
           BUS.fx.grainarp.pattern = mode;
           applyUnitState('grainarp');
           refreshGrainArpPatternUI();
-          refreshBackPanelState();
+          emit('state');
         });
         grainArpPatternButtons.set(mode, btn);
         modeRow.appendChild(btn);
@@ -17476,7 +17480,7 @@ function renderActiveBusFx() {
         BUS.fx.grainarp.hold = !BUS.fx.grainarp.hold;
         applyUnitState('grainarp');
         refreshGrainArpHoldUI();
-        refreshBackPanelState();
+        emit('state');
       });
       holdRow.appendChild(grainArpHoldButton);
       content.appendChild(holdRow);
@@ -17501,7 +17505,7 @@ function renderActiveBusFx() {
           BUS.fx.pitchtrem.shape = shape;
           applyUnitState('pitchtrem');
           refreshPitchTremoloUI();
-          refreshBackPanelState();
+          emit('state');
         });
         pitchTremoloShapeButtons.set(shape, btn);
         shapeRow.appendChild(btn);
@@ -17526,7 +17530,7 @@ function renderActiveBusFx() {
         markFxPresetCustom(def.id);
         BUS.fx.autotune.root = clamp(Number(rootSelect.value) || 0, 0, 11);
         applyUnitState('autotune');
-        refreshBackPanelState();
+        emit('state');
       });
       const scaleSelect = document.createElement('select');
       scaleSelect.className = 'drum-scale-select';
@@ -17542,7 +17546,7 @@ function renderActiveBusFx() {
         markFxPresetCustom(def.id);
         BUS.fx.autotune.scale = scaleSelect.value;
         applyUnitState('autotune');
-        refreshBackPanelState();
+        emit('state');
       });
       // Keep the dropdowns out of the section drag/collapse handlers' way.
       [rootSelect, scaleSelect].forEach((sel) => {
@@ -17569,7 +17573,7 @@ function renderActiveBusFx() {
             if (isMappable) applyFxModulation();
             else applyFx('delay', 'time', getBaseFxValue('delay', 'time'));
             refreshModulationVisuals();
-            refreshBackPanelState();
+            emit('state');
             return;
           }
           if (def.id === 'beatrepeat' && p.key === 'interval') {
@@ -17580,7 +17584,7 @@ function renderActiveBusFx() {
             }
             applyFx('beatrepeat', 'interval', getBaseFxValue('beatrepeat', 'interval'));
             refreshModulationVisuals();
-            refreshBackPanelState();
+            emit('state');
             return;
           }
           if (def.id === 'beatrepeat' && p.key === 'grid') {
@@ -17591,7 +17595,7 @@ function renderActiveBusFx() {
             }
             applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
             refreshModulationVisuals();
-            refreshBackPanelState();
+            emit('state');
             return;
           }
           if (def.id === 'grainarp' && p.key === 'grid') {
@@ -17602,7 +17606,7 @@ function renderActiveBusFx() {
             }
             applyFx('grainarp', 'grid', getBaseFxValue('grainarp', 'grid'));
             refreshModulationVisuals();
-            refreshBackPanelState();
+            emit('state');
             return;
           }
           if (def.id === 'pitchtrem' && p.key === 'rate') {
@@ -17614,7 +17618,7 @@ function renderActiveBusFx() {
             if (isMappable) applyFxModulation();
             else applyFx('pitchtrem', 'rate', getBaseFxValue('pitchtrem', 'rate'));
             refreshModulationVisuals();
-            refreshBackPanelState();
+            emit('state');
             return;
           }
           if (def.id === 'resonator' && p.key === 'freq') {
@@ -17627,14 +17631,14 @@ function renderActiveBusFx() {
             else applyFx('resonator', 'freq', getBaseFxValue('resonator', 'freq'));
             refreshResonatorIntervalUI();
             refreshModulationVisuals();
-            refreshBackPanelState();
+            emit('state');
             return;
           }
           BUS.fx[def.id][p.key] = v;
           if (isMappable) applyFxModulation();
           else applyFx(def.id, p.key, v);
           refreshModulationVisuals();
-          refreshBackPanelState();
+          emit('state');
         },
         isMappable ? { genIdx: 3, key: `${def.id}:${p.key}` } : null,
       );
@@ -17649,7 +17653,7 @@ function renderActiveBusFx() {
           if (isMappable) applyFxModulation();
           else applyFx('delay', 'time', getBaseFxValue('delay', 'time'));
           refreshModulationVisuals();
-          refreshBackPanelState();
+          emit('state');
         });
         content.appendChild(delaySyncModeControl);
       }
@@ -17662,7 +17666,7 @@ function renderActiveBusFx() {
           if (isMappable) applyFxModulation();
           else applyFx('pitchtrem', 'rate', getBaseFxValue('pitchtrem', 'rate'));
           refreshModulationVisuals();
-          refreshBackPanelState();
+          emit('state');
         });
         content.appendChild(pitchTremoloSyncModeControl);
       }
@@ -17674,7 +17678,7 @@ function renderActiveBusFx() {
           refreshBeatRepeatIntervalUI();
           applyFx('beatrepeat', 'interval', getBaseFxValue('beatrepeat', 'interval'));
           refreshModulationVisuals();
-          refreshBackPanelState();
+          emit('state');
         });
         content.appendChild(beatRepeatSyncModeControl);
       }
@@ -17686,7 +17690,7 @@ function renderActiveBusFx() {
           refreshBeatRepeatGridUI();
           applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
           refreshModulationVisuals();
-          refreshBackPanelState();
+          emit('state');
         });
         content.appendChild(beatRepeatGridSyncModeControl);
       }
@@ -17698,7 +17702,7 @@ function renderActiveBusFx() {
           refreshGrainArpGridUI();
           applyFx('grainarp', 'grid', getBaseFxValue('grainarp', 'grid'));
           refreshModulationVisuals();
-          refreshBackPanelState();
+          emit('state');
         });
         content.appendChild(grainArpGridSyncModeControl);
       }
@@ -17713,7 +17717,7 @@ function renderActiveBusFx() {
             if (isMappable) applyFxModulation();
             else applyFx('resonator', 'freq', getBaseFxValue('resonator', 'freq'));
             refreshModulationVisuals();
-            refreshBackPanelState();
+            emit('state');
           },
           [
             ['free', 'Free'],
@@ -17761,7 +17765,7 @@ function setActiveBus(busId) {
   });
   updateFxActiveLabel();
   renderActiveBusFx();
-  refreshBackPanelState();
+  emit('state');
 }
 
 // ─── FX reordering (drag & drop) ─────────────────────────────────────────────
@@ -18123,7 +18127,7 @@ function stop() {
   drawGenVizIdle(0);
   drawGenVizIdle(1);
   drawGenVizEmpty(2);
-  refreshBackPanelState();
+  emit('state');
 }
 
 getInputSelect()?.addEventListener('change', async (e) => {
