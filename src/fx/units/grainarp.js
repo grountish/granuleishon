@@ -132,4 +132,29 @@ export default {
     nodes.node.parameters.get('pattern')?.setValueAtTime(Math.max(0, idx), ac.currentTime);
     nodes.node.parameters.get('hold')?.setValueAtTime(state.hold ? 1 : 0, ac.currentTime);
   },
+  // Scaffold (in/dry/wet/out) is the rack's; this wires the wet path.
+  build(ac, st, { input, wet, base }) {
+    const node = new AudioWorkletNode(ac, 'grain-arp-processor', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+      parameterData: {
+        grid: base('grid'),
+        pattern: Math.max(
+          0,
+          GRAINARP_PATTERNS.findIndex(([id]) => id === st.pattern),
+        ),
+        chance: st.chance,
+        shape: st.shape,
+        scatter: st.scatter,
+        reverse: st.reverse,
+        feedback: st.feedback,
+        hold: st.hold ? 1 : 0,
+      },
+    });
+
+    input.connect(node);
+    node.connect(wet);
+    return { node };
+  },
 };

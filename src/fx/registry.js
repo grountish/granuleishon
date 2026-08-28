@@ -77,3 +77,21 @@ export function makeDefaultFxState() {
   });
   return state;
 }
+
+// Every unit sits in the same wet/dry scaffold: input fans to a dry path and
+// to the unit's own graph, both summing at out. The rack owns that wiring so
+// a unit only describes its wet path.
+//
+// `base(key)` supplies a param's current value with tempo-sync resolved, for
+// the units whose initial worklet params depend on it.
+export function buildUnitNodes(unit, ac, state, base) {
+  const input = ac.createGain();
+  const dry = ac.createGain();
+  const wet = ac.createGain();
+  const out = ac.createGain();
+  input.connect(dry);
+  dry.connect(out);
+  wet.connect(out);
+  const own = unit.build(ac, state, { input, wet, base }) || {};
+  return { ...own, in: input, dry, wet, out };
+}

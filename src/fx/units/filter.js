@@ -26,4 +26,12 @@ export default {
   applyAll(nodes, { state }) {
     nodes.biquad.type = state.mode;
   },
+  // Scaffold (in/dry/wet/out) is the rack's; this wires the wet path.
+  build(ac, st, { input, wet }) {
+    const biquad = ac.createBiquadFilter();
+
+    input.connect(biquad);
+    biquad.connect(wet);
+    return { biquad };
+  },
 };

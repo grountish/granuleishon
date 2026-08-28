@@ -100,4 +100,23 @@ export default {
     if (key === 'damping')
       nodes.damp.frequency.setTargetAtTime(getReverbDampingCutoff(state), ac.currentTime, 0.03);
   },
+  // Scaffold (in/dry/wet/out) is the rack's; this wires the wet path.
+  // The convolver gets its impulse response from apply() on first apply.
+  build(ac, st, { input, wet }) {
+    const pre = ac.createDelay(0.25);
+    const hp = ac.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.setValueAtTime(140, ac.currentTime);
+    hp.Q.setValueAtTime(0.6, ac.currentTime);
+    const damp = ac.createBiquadFilter();
+    damp.type = 'lowpass';
+    const conv = ac.createConvolver();
+
+    input.connect(pre);
+    pre.connect(hp);
+    hp.connect(damp);
+    damp.connect(conv);
+    conv.connect(wet);
+    return { pre, hp, damp, conv };
+  },
 };

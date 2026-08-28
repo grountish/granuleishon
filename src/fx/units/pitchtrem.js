@@ -116,4 +116,24 @@ export default {
     const shape = Math.max(0, SHAPES.indexOf(state.shape));
     nodes.node.parameters.get('shape')?.setValueAtTime(shape, ac.currentTime);
   },
+  // Scaffold (in/dry/wet/out) is the rack's; this wires the wet path.
+  build(ac, st, { input, wet, base }) {
+    const node = new AudioWorkletNode(ac, 'pitch-autopan-processor', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+      parameterData: {
+        pitch: st.pitch,
+        pitchDepth: st.pitchDepth,
+        fine: st.fine,
+        rate: base('rate'),
+        depth: st.depth,
+        shape: Math.max(0, SHAPES.indexOf(st.shape)),
+      },
+    });
+
+    input.connect(node);
+    node.connect(wet);
+    return { node };
+  },
 };

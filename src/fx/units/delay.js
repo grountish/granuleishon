@@ -70,4 +70,66 @@ export default {
       (g) => g.gain.setValueAtTime(ping, ac.currentTime),
     );
   },
+  // Scaffold (in/dry/wet/out) is the rack's; this wires the wet path.
+  // Stereo and ping-pong graphs are both built; applyAll gates which is live.
+  build(ac, st, { input, wet }) {
+    const normalSend = ac.createGain();
+    const normalFeedbackMode = ac.createGain();
+    const normalWetMode = ac.createGain();
+    const tap = ac.createDelay(MAX_DELAY_SECONDS);
+    const fb = ac.createGain();
+    const hpf = ac.createBiquadFilter();
+    hpf.type = 'highpass';
+    hpf.frequency.value = st.hp;
+    hpf.Q.value = 0.5;
+    const pingSplit = ac.createChannelSplitter(2);
+    const pingMonoIn = ac.createGain();
+    pingMonoIn.channelCount = 1;
+    pingMonoIn.channelCountMode = 'explicit';
+    const pingInputMode = ac.createGain();
+    const pingL = ac.createDelay(MAX_DELAY_SECONDS);
+    const pingR = ac.createDelay(MAX_DELAY_SECONDS);
+    const pingLFb = ac.createGain();
+    const pingRFb = ac.createGain();
+    const pingLFeedbackMode = ac.createGain();
+    const pingRFeedbackMode = ac.createGain();
+    const pingLHpf = ac.createBiquadFilter();
+    pingLHpf.type = 'highpass';
+    pingLHpf.frequency.value = st.hp;
+    pingLHpf.Q.value = 0.5;
+    const pingRHpf = ac.createBiquadFilter();
+    pingRHpf.type = 'highpass';
+    pingRHpf.frequency.value = st.hp;
+    pingRHpf.Q.value = 0.5;
+    const pingMerge = ac.createChannelMerger(2);
+    const pingWetMode = ac.createGain();
+
+    input.connect(normalSend);
+    normalSend.connect(tap);
+    tap.connect(normalFeedbackMode);
+    normalFeedbackMode.connect(fb);
+    fb.connect(hpf);
+    hpf.connect(tap); // filtered feedback loop
+    tap.connect(normalWetMode);
+    normalWetMode.connect(wet);
+
+    input.connect(pingSplit);
+    pingSplit.connect(pingMonoIn, 0);
+    pingSplit.connect(pingMonoIn, 1);
+    pingMonoIn.connect(pingInputMode);
+    pingInputMode.connect(pingL);
+    pingL.connect(pingMerge, 0, 0);
+    pingL.connect(pingLFeedbackMode);
+    pingLFeedbackMode.connect(pingLFb);
+    pingLFb.connect(pingLHpf);
+    pingLHpf.connect(pingR);
+    pingR.connect(pingMerge, 0, 1);
+    pingR.connect(pingRFeedbackMode);
+    pingRFeedbackMode.connect(pingRFb);
+    pingRFb.connect(pingRHpf);
+    pingRHpf.connect(pingL);
+    pingMerge.connect(pingWetMode);
+    pingWetMode.connect(wet);
+    return { tap, fb, hpf, normalSend, normalFeedbackMode, normalWetMode, pingInputMode, pingL, pingR, pingLFb, pingRFb, pingLFeedbackMode, pingRFeedbackMode, pingLHpf, pingRHpf, pingWetMode };
+  },
 };

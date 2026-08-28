@@ -107,4 +107,24 @@ export default {
     if (key === 'decay') set('decay', clamp(val, 0, 1));
     if (key === 'chance') set('chance', clamp(val, 0, 1));
   },
+  // Scaffold (in/dry/wet/out) is the rack's; this wires the wet path.
+  build(ac, st, { input, wet, base }) {
+    const node = new AudioWorkletNode(ac, 'beat-repeat-processor', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+      parameterData: {
+        interval: base('interval'),
+        grid: base('grid'),
+        gate: st.gate,
+        pitch: st.pitch,
+        decay: st.decay,
+        chance: st.chance,
+      },
+    });
+
+    input.connect(node);
+    node.connect(wet);
+    return { node };
+  },
 };

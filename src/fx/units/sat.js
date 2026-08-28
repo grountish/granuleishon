@@ -33,4 +33,13 @@ export default {
   apply(nodes, key, val) {
     if (key === 'drive') nodes.shaper.curve = makeSatCurve(val);
   },
+  // Scaffold (in/dry/wet/out) is the rack's; this wires the wet path.
+  build(ac, st, { input, wet }) {
+    const shaper = ac.createWaveShaper();
+    shaper.oversample = '4x';
+
+    input.connect(shaper);
+    shaper.connect(wet);
+    return { shaper };
+  },
 };

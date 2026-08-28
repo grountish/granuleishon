@@ -38,4 +38,21 @@ export default {
   applyAll(nodes, { ac, state }) {
     nodes.node.parameters.get('mask')?.setValueAtTime(computeAutotuneMask(state), ac.currentTime);
   },
+  // Scaffold (in/dry/wet/out) is the rack's; this wires the wet path.
+  build(ac, st, { input, wet }) {
+    const node = new AudioWorkletNode(ac, 'autotune-processor', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+      parameterData: {
+        speed: st.speed,
+        amount: st.amount,
+        mask: computeAutotuneMask(st),
+      },
+    });
+
+    input.connect(node);
+    node.connect(wet);
+    return { node };
+  },
 };

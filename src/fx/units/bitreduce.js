@@ -23,4 +23,20 @@ export default {
     if (key === 'bits' || key === 'rate')
       nodes.node.parameters.get(key)?.setTargetAtTime(val, ac.currentTime, 0.02);
   },
+  // Scaffold (in/dry/wet/out) is the rack's; this wires the wet path.
+  build(ac, st, { input, wet }) {
+    const node = new AudioWorkletNode(ac, 'bit-reducer-processor', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+      parameterData: {
+        bits: st.bits,
+        rate: st.rate,
+      },
+    });
+
+    input.connect(node);
+    node.connect(wet);
+    return { node };
+  },
 };

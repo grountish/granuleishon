@@ -135,4 +135,25 @@ export default {
     if (key === 'harm2') set('harm2', clamp(val, 0, 1));
     if (key === 'harm3') set('harm3', clamp(val, 0, 1));
   },
+  // Scaffold (in/dry/wet/out) is the rack's; this wires the wet path.
+  build(ac, st, { input, wet, base }) {
+    const node = new AudioWorkletNode(ac, 'resonator-processor', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+      parameterData: {
+        freq: base('freq'),
+        decay: st.decay,
+        damp: st.damp,
+        int2: st.int2,
+        int3: st.int3,
+        harm2: st.harm2,
+        harm3: st.harm3,
+      },
+    });
+
+    input.connect(node);
+    node.connect(wet);
+    return { node };
+  },
 };
