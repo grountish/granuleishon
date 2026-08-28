@@ -6815,6 +6815,13 @@ function closeHarmonizerMenu() {
   document.getElementById('harmonizerBtn')?.classList.remove('open');
 }
 
+function refreshHarmonizerUI() {
+  const rootSelect = document.getElementById('harmonizerRoot');
+  const scaleSelect = document.getElementById('harmonizerScale');
+  if (rootSelect) rootSelect.value = `${HARMONIZER.root}`;
+  if (scaleSelect) scaleSelect.value = HARMONIZER.scale;
+}
+
 function initHarmonizer() {
   const rootSelect = document.getElementById('harmonizerRoot');
   const scaleSelect = document.getElementById('harmonizerScale');
@@ -18383,6 +18390,7 @@ function capturePreset() {
       invert: TRIG_SC.invert,
     },
     scale: { root: GEN4_SCALE.root, scale: GEN4_SCALE.scale },
+    harmonizer: { root: HARMONIZER.root, scale: HARMONIZER.scale },
     mastering: JSON.parse(JSON.stringify(MASTERING.params)),
     mappings: [...lfoMappings.values()].map(({ genIdx, key, sourceIdx }) => ({
       genIdx,
@@ -18670,6 +18678,16 @@ function applyPreset(preset, { resetSources = true } = {}) {
     ? preset.scale.scale
     : 'off';
   onGlobalScaleChanged();
+
+  // Harmonizer target key. "No scale" is not a harmonizing target, so an
+  // absent or invalid save falls back to the default rather than to 'off'.
+  HARMONIZER.root = clamp(Math.round(preset.harmonizer?.root) || 0, 0, 11);
+  HARMONIZER.scale = GEN4_SCALES.some(
+    ([id, , intervals]) => id === preset.harmonizer?.scale && intervals,
+  )
+    ? preset.harmonizer.scale
+    : 'major';
+  refreshHarmonizerUI();
 
   lfoMappings.clear();
   preset.mappings?.forEach(({ genIdx, key, lfoIdx, sourceIdx }) => {
@@ -20168,12 +20186,14 @@ initTempoDrag();
 initViewToggle();
 refreshRecordButton();
 setTransportBpm(TRANSPORT.bpm);
+// Populate the harmonizer's selects before any state is restored — a restore
+// refreshes them, and setting .value on an option-less select does nothing.
+initHarmonizer();
 // Snapshot the pristine default state now, before any project is loaded.
 defaultProjectSnapshot = capturePreset();
 // Bring back whatever the user was working on last session.
 restoreAutosave();
 initHistory();
-initHarmonizer();
 // Autosave serializes the whole workspace — run it in idle time so the write
 // never lands in the middle of a frame the sequencer needs.
 setInterval(() => {
