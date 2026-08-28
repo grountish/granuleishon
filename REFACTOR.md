@@ -5,20 +5,44 @@
 - [x] **Phase 1 — ES modules.** `main.js` → `src/app.js` loaded with
       `type="module"`; processors → `worklets/`; `serve.py` watches
       subdirectories. (`b57979b`)
-- [~] **Phase 2 — leaf modules.** Done so far: `core/util.js`,
-      `core/theory.js`, `core/tempo.js`, `core/storage.js`, `render/wav.js`,
-      `fx/defs.js`, `fx/presets.js`, `instruments/gen4/defs.js`,
-      `master/specs.js`. (`d5de822`, `c2a8221`, `7e88088`, `0d58d36`)
-      **Still to do:** `ui/knob.js`, `ui/control-row.js`, `ui/confirm.js`,
-      `ui/tooltip.js`, `persistence/project-file.js`, `link/link.js`,
-      `master/presets.js` (needs `MASTERING_DEFAULT_PARAMS` moved first — it
-      is spread into the factory presets at module-evaluation time).
-- [ ] Phases 3–7.
+- [~] **Phase 2 — leaf modules.** Done: `core/util.js`, `core/theory.js`,
+      `core/tempo.js`, `core/storage.js`, `render/wav.js`,
+      `instruments/gen4/defs.js`, `master/specs.js`, `visual/vizgl.js`.
+      (`d5de822`, `c2a8221`, `7e88088`, `0d58d36`, `8762694`)
+      **Blocked on phase 3:** everything left couples to the engine
+      (`audioCtx`, `master`, `started`) or to a shared state object
+      (`MASTERING`, `VIZ`, `UI_VIEW`, `state`) — see the coupling table below.
+- [ ] **Phase 3 — own the globals.** Now the gate for the rest of phase 2.
+- [~] **Phase 4 — FX unit registry.** Data half done (`4933a73`): each effect
+      declares itself in `src/fx/units/*.js`; `fx/registry.js` derives
+      `FX_DEFS`, `FX_PRESETS`, `DEFAULT_FX_ORDER`, `FX_IDLE_BYPASS` and
+      `makeDefaultFxState`. **Next:** move `build` / `apply` / `applyAll` /
+      `extraUI` / `subtitle` into the unit files, retiring the per-effect
+      branches in `buildBusFx`, `applyFx` and `renderActiveBusFx`. This half
+      does **not** need phase 3 — the unit contract takes the audio context
+      as an argument.
+- [ ] Phases 5–7.
 
-`src/app.js` is down from 21,273 to 20,276 lines with 9 modules carved out.
-The knob widget and control row are deliberately **not** moved yet: they
-reach back into modulation visuals and the knob context menu, so they want
-the event bus from phase 6 first.
+`src/app.js` is down from 21,273 to 19,667 lines with 20 modules carved out.
+
+Measured coupling of the sections still in `app.js` (external references /
+lines / symbols the rest of the file still needs back):
+
+| section | ext refs | lines |
+| --- | --- | --- |
+| Graphical EQ | 6 | 305 |
+| Song block context menu | 9 | 141 |
+| Song entry ops | 10 | 269 |
+| LFO | 11 | 256 |
+| Mastering view | 13 | 748 |
+| Transport-locked events / viz render | 14 | 578 |
+| FX chain | 20 | 849 |
+| Metering | 24 | 690 |
+| LAN Link | 28 | 371 |
+| Mastering persistence | 176 | 2,763 |
+
+The knob widget and control row stay put for now: they reach into modulation
+visuals and the knob context menu, so they want the phase-6 event bus first.
 
 Duplicates collapsed while moving (phase 2 so far): `midiNoteToFrequency` ≡
 `midiToFreqHz`, `GEN4_ROOT_NAMES` ≡ `NOTE_NAMES`, a third inline copy of the
