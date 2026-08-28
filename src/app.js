@@ -11,6 +11,14 @@ import {
 import { rbjHighpass, rbjLowShelf, rbjPeaking, biquadMagnitudeDb } from './core/dsp.js';
 import { encodeWav } from './render/wav.js';
 import { emit, on } from './core/events.js';
+import { UI_VIEW } from './ui/view.js';
+import { LFOS, lfoMappings, STEP_SEQ, BACK_PANEL } from './modulation/state.js';
+import { VIZ } from './visual/state.js';
+import { REC, BOUNCE } from './render/state.js';
+import { KICK_SC, TRIG_SC } from './instruments/gen4/sidechain.js';
+import { INPUT_SOURCE, INPUT_GATE } from './core/input.js';
+import { LINK } from './link/state.js';
+import { MIXER } from './mixer/state.js';
 import { engine } from './core/engine.js';
 import {
   FX_BUS_IDS,
@@ -30,6 +38,7 @@ import {
   SONG_REPEAT_CYCLE,
   SONG_CONDITIONS,
   SONG_JUMP_COUNTS,
+  SONG_MORPH,
 } from './sequencing/state.js';
 import {
   VIZGL,
@@ -174,30 +183,7 @@ let grainArpModulePromise = null;
 let pitchTremoloModulePromise = null;
 let autotuneModulePromise = null;
 const LIVE_SOURCE_SECONDS = 10;
-const INPUT_SOURCE = {
-  devices: [],
-  selectedId: 'default',
-};
-const REC = {
-  isRecording: false,
-  left: [],
-  right: [],
-  sampleCount: 0,
-  processor: null,
-  sink: null,
-  downloadName: null, // one-shot override used by the song bounce
-};
 
-// Noise gate on the mic feeding the granulators: signal below threshold is
-// muted before it reaches the worklet, so it isn't heard or visualized.
-const INPUT_GATE = {
-  enabled: false,
-  threshold: 0.01, // linear amplitude; -40 dB default
-  node: null, // ScriptProcessor inserted between mic source and worklet
-  env: 0, // smoothed gain envelope 0..1
-  attackMs: 3, // ramp up when signal crosses threshold
-  releaseMs: 120, // ramp down when it drops below
-};
 
 // dB <-> linear amplitude helper for the gate.
 function dbToLinear(db) {
@@ -209,23 +195,6 @@ let currentProjectName = null;
 let projectMenuOpen = false;
 let defaultProjectSnapshot = null; // pristine state captured at startup, for "new project"
 const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-const UI_VIEW = { mode: 'front' };
-const BACK_PANEL = {
-  sourceJacks: new Map(),
-  sourceMeters: new Map(),
-  sourceMeta: new Map(),
-  audioModules: new Map(),
-  targetJacks: new Map(),
-  targetRows: new Map(),
-  targetValues: new Map(),
-  routeLayer: null,
-  patchfieldEl: null,
-  built: false,
-  selectedSourceIdx: null,
-  pointerX: null,
-  pointerY: null,
-  connFrame: null,
-};
 
 function getRecordBtn() {
   return document.getElementById('recordBtn');
@@ -1091,21 +1060,6 @@ const BOUNCE_CAPTURE_BUFFER_SIZE = 16384;
 // Jumps can loop the song; a 100%-chance ∞ jump would render forever. The
 // bounce stops (and saves) at this limit.
 const BOUNCE_CAP_FACTOR = 4;
-const BOUNCE = {
-  active: false,
-  muted: false,
-  pollTimer: null,
-  progressTimer: null,
-  tailTimer: null,
-  phase: 'idle',
-  songSeconds: 0,
-  capSeconds: 0,
-  renderedSeconds: 0,
-  tailStartedAt: 0,
-  prevMode: 'loop',
-  prevSongLoop: true,
-  prevScheduleAheadTime: 0.15,
-};
 
 function getBounceSongSeconds() {
   const secPerStep = 60 / TRANSPORT.bpm / 4;
@@ -2328,13 +2282,6 @@ function applyMappedModulationTargets() {
   modVisualsActive = hasMappings;
 }
 
-// ── Song morph ── while an entry with `morph ×N` runs its final N cycles,
-// the worklet hears a blend between this block's gens and the next block's,
-// ramped by playback position. Numeric params interpolate; anything else
-// snaps at the midpoint; freeze stays engine state. updateSongMorph drives t
-// per display frame; the blend lives inside sendParams so a knob tweak
-// mid-morph re-sends blended values, never raw ones.
-const SONG_MORPH = { t: 0, gens: null, loop: null };
 
 function lerpGens(a, b, t) {
   const out = { ...(t < 0.5 ? a : b) };
@@ -3131,36 +3078,6 @@ const VIZ_STATES = [
   { label: 'storm',   dur: [14, 24], trailAlpha: 0.092, warpMult: 2.20, orbitStr: 1.02, turbStr: 1.40, hueVel: 0.220, hueTarget: 320, maxP: 1800, sat: 90, lum: 58 },
 ];
 
-const VIZ = {
-  canvas: null,
-  ctx: null,
-  animId: null,
-  freqBuf: null,
-  timeBuf: null,
-  particles: [],
-  warp: [],
-  beatEnergyAvg: 0,
-  beatCooldown: 0,
-  beatFlash: 0,
-  flowTime: 0,
-  masterHue: 200,
-  idleT: 0,
-  // State machine
-  stateIdx: 0,
-  stateTimer: 0,
-  stateDur: 30,
-  // Current interpolated params (lerp toward active state's targets)
-  p: {
-    trailAlpha: 0.040,
-    warpMult:   1.00,
-    orbitStr:   0.55,
-    turbStr:    0.70,
-    hueVel:     0.07,
-    maxP:       1600,
-    sat:        85,
-    lum:        55,
-  },
-};
 
 function ensureVizAnalyser() {
   if (vizAnalyser || !engine.ctx || !engine.master?.output) return;
@@ -4935,23 +4852,7 @@ function buildGen4PresetSelect(ci) {
   return select;
 }
 
-const KICK_SC = {
-  envelope: 0,
-  release: 0.2,
-  amount: 1.0,
-};
 
-// Second trigger envelope (mod source 4): like Kick SC, but the drum lane that
-// fires it is selectable, and `invert` flips the polarity — a normal mapping
-// ducks the target on each hit, an inverted one pushes it up (gate-style
-// sidechain: the target only opens while the chosen lane is hitting).
-const TRIG_SC = {
-  envelope: 0,
-  release: 0.2,
-  amount: 1.0,
-  source: 'fm',
-  invert: false,
-};
 const trigScSourceBtns = new Map();
 let trigScInvBtn = null;
 
@@ -8018,13 +7919,6 @@ const INSTRUMENT_MIX = Object.fromEntries(
   FX_BUS_IDS.map((busId) => [busId, makeDefaultInstrumentMixState()]),
 );
 const instrumentMixButtons = new Map();
-const MIXER = {
-  built: false,
-  strips: new Map(),
-  master: null,
-  meterBuffers: new WeakMap(),
-  raf: null,
-};
 let mixerModVisualsLastRefresh = 0;
 
 function refreshInstrumentMixUI() {
@@ -8718,30 +8612,6 @@ function stopMixerMeters() {
 
 // ─── LFO ───────────────────────────────────────────────────────────────────
 
-const LFOS = [
-  {
-    label: 'LFO 1',
-    rate: 1.0,
-    sync: false,
-    syncIndex: 5,
-    shape: 'sine',
-    depth: 0.3,
-    phase: 0,
-    currentValue: 0,
-    holdValue: 0,
-  },
-  {
-    label: 'LFO 2',
-    rate: 0.35,
-    sync: false,
-    syncIndex: 6,
-    shape: 'tri',
-    depth: 0.25,
-    phase: 0,
-    currentValue: 0,
-    holdValue: 0,
-  },
-];
 const LFO_RATE_CURVE_EXP = 2.4;
 const LFO_RATE_CONTROL = {
   key: 'rate',
@@ -8838,22 +8708,11 @@ const STEP_SEQ_STEP_BEAT_OPTIONS = [
   { label: '4', beats: 4 },
   { label: '8', beats: 8 },
 ];
-const STEP_SEQ = {
-  label: 'Seq 1',
-  steps: Array.from({ length: 16 }, () => 0),
-  subdivision: 16,
-  stepBeats: 0.25,
-  sharedAcrossLoops: false,
-  currentStep: 0,
-  currentValue: 0,
-  elapsed: 0,
-};
 let seqBars = [];
 let seqSubdivisionSelect = null;
 let seqStepBeatSelect = null;
 let seqShareButton = null;
 // lfoMappings: 'genIdx:paramKey' → { genIdx, key, sourceIdx }
-const lfoMappings = new Map();
 let lfoLastTs = 0,
   lfoAnimFrame = null;
 
@@ -10112,27 +9971,6 @@ function setSoloAdditive(on) {
   localStorage.setItem(SOLO_MODE_STORAGE_KEY, on ? 'on' : 'off');
 }
 
-// ── LAN Link ── Ableton-Link-style tempo/phase sync with one other machine on
-// the same network. A WebRTC data channel carries clock pings and the shared
-// grid (PeerJS's public broker does signaling only — audio never leaves the
-// machine). The host's performance clock is the shared timeline; the joiner
-// measures its offset NTP-style (min-RTT filtered) and both machines schedule
-// every step at an absolute grid time, so correction is continuous and
-// drift can never accumulate.
-const LINK = {
-  peer: null,
-  conn: null,
-  role: null, // 'host' | 'join'
-  active: false, // data channel open
-  room: '',
-  offset: 0, // join only: host clock − local clock, seconds
-  rtt: 0,
-  samples: [], // recent {offset, rtt} pairs; best (lowest rtt) wins
-  pingTimer: null,
-  grid: { bpm: 120, origin: 0, playing: false }, // origin = shared time of absolute step 0
-  stepAbs: 0, // next absolute grid step this machine will schedule
-  applyingRemote: false, // guards echo loops on remote-driven transport/bpm
-};
 
 const LINK_QUANTUM = 16; // machines join the grid on 16-step (one bar) boundaries
 const LINK_PEER_PREFIX = 'grnsh-link-';

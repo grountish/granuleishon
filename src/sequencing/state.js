@@ -39,3 +39,11 @@ export const SONG_CONDITIONS = [
   { id: '4:4', label: '4:4', a: 4, b: 4 },
 ];
 export const SONG_JUMP_COUNTS = [0, 1, 2, 4, 8]; // 0 = unlimited
+
+// ── Song morph ── while an entry with `morph ×N` runs its final N cycles,
+// the worklet hears a blend between this block's gens and the next block's,
+// ramped by playback position. Numeric params interpolate; anything else
+// snaps at the midpoint; freeze stays engine state. updateSongMorph drives t
+// per display frame; the blend lives inside sendParams so a knob tweak
+// mid-morph re-sends blended values, never raw ones.
+export const SONG_MORPH = { t: 0, gens: null, loop: null };
