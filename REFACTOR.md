@@ -13,17 +13,21 @@
       (`audioCtx`, `master`, `started`) or to a shared state object
       (`MASTERING`, `VIZ`, `UI_VIEW`, `state`) — see the coupling table below.
 - [ ] **Phase 3 — own the globals.** Now the gate for the rest of phase 2.
-- [~] **Phase 4 — FX unit registry.** Data half done (`4933a73`): each effect
-      declares itself in `src/fx/units/*.js`; `fx/registry.js` derives
-      `FX_DEFS`, `FX_PRESETS`, `DEFAULT_FX_ORDER`, `FX_IDLE_BYPASS` and
-      `makeDefaultFxState`. **Next:** move `build` / `apply` / `applyAll` /
-      `extraUI` / `subtitle` into the unit files, retiring the per-effect
-      branches in `buildBusFx`, `applyFx` and `renderActiveBusFx`. This half
-      does **not** need phase 3 — the unit contract takes the audio context
-      as an argument.
+- [x] **Phase 4 — FX unit registry.** (`4933a73`, `4d1a0a3`, `14ec0fb`) Each
+      effect declares itself in `src/fx/units/*.js` — data, `build`, `apply`,
+      `applyAll` — and `fx/registry.js` derives `FX_DEFS`, `FX_PRESETS`,
+      `DEFAULT_FX_ORDER`, `FX_IDLE_BYPASS`, `makeDefaultFxState` and the
+      wet/dry scaffold. `buildBusFx` went 389 → 87 lines and names no
+      effect; `applyFx` lost its ten-branch if-chain (mix is handled once,
+      since every unit crossfades identically); the six `apply*Mode` helpers
+      collapsed into one `applyUnitState`. The unit contract takes the audio
+      context as an argument, which is why this phase did not need phase 3.
+      **Still in app.js:** `extraUI` (the per-effect mode rows and selects in
+      `renderActiveBusFx`) and `subtitle` (the back-panel lines) — both are
+      DOM-facing and want the phase-6 event bus first.
 - [ ] Phases 5–7.
 
-`src/app.js` is down from 21,273 to 19,667 lines with 20 modules carved out.
+`src/app.js` is down from 21,273 to 19,129 lines with 20 modules carved out.
 
 Measured coupling of the sections still in `app.js` (external references /
 lines / symbols the rest of the file still needs back):
