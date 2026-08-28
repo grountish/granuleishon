@@ -162,3 +162,25 @@ export const GEN4_PRESETS = {
     },
   ],
 };
+
+// Note range the drum lanes address, the probability cycle, and the
+// Elektron-style per-step trig conditions.
+export const GEN4_NOTE_MIN = 24;
+
+export const GEN4_NOTE_MAX = 127;
+
+export const GEN4_PROB_CYCLE = [1.0, 0.75, 0.5, 0.25];
+
+// ── Trig conditions ── Elektron-style per-step gates evaluated at schedule
+// time: A:B fires on the Ath of every B pattern cycles, FILL only while the
+// fill is engaged, PRE/!PRE follow the lane's previous trig decision.
+export const GEN4_TRIG_CONDITIONS = [
+  { id: 'always', label: '' },
+  { id: '1:2', label: '1:2', a: 1, b: 2 },
+  { id: '2:2', label: '2:2', a: 2, b: 2 },
+  { id: '1:4', label: '1:4', a: 1, b: 4 },
+  { id: '4:4', label: '4:4', a: 4, b: 4 },
+  { id: 'fill', label: 'FIL', fill: true },
+  { id: 'pre', label: 'PRE', pre: true },
+  { id: 'npre', label: '!PR', pre: false },
+];

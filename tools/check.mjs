@@ -117,7 +117,71 @@ async function checkWorklets(files) {
   }
 }
 
-// ── 5. serve.py parses ──────────────────────────────────────────────────────
+// Blank out comments and string bodies so a scan sees only code. Replacing
+// with spaces rather than deleting keeps offsets, and so keeps line numbers.
+function codeOnly(src) {
+  let out = '';
+  for (let i = 0; i < src.length; ) {
+    const c = src[i];
+    if (c === '/' && src[i + 1] === '/') {
+      while (i < src.length && src[i] !== '\n') { out += ' '; i++; }
+    } else if (c === '/' && src[i + 1] === '*') {
+      const end = src.indexOf('*/', i + 2);
+      const stop = end < 0 ? src.length : end + 2;
+      for (; i < stop; i++) out += src[i] === '\n' ? '\n' : ' ';
+    } else if (c === "'" || c === '"' || c === '`') {
+      out += c; i++;
+      while (i < src.length && src[i] !== c) {
+        if (src[i] === '\\') { out += '  '; i += 2; continue; }
+        out += src[i] === '\n' ? '\n' : ' ';
+        i++;
+      }
+      out += src[i] ?? ''; i++;
+    } else { out += c; i++; }
+  }
+  return out;
+}
+
+// ── 5. No module reaches back into a name that only app.js declares ────────
+// The gap a parser leaves: a function moved into a module still referencing
+// something left behind compiles fine, then throws ReferenceError when run.
+// Rather than attempt real scope analysis, this asks one precise question —
+// does a module name something that only app.js declares and it did not
+// import? A module's own local with a colliding name would be a false
+// positive, and is worth a look anyway.
+const DECLARED = new RegExp(
+  String.raw`^(?:export\s+)?(?:const|let|var|function|async function|class)\s+([A-Za-z_$][\w$]*)`,
+  'gm',
+);
+async function checkNoReachBack(files) {
+  const appSrc = await readFile(path.join(ROOT, 'src/app.js'), 'utf8');
+  const appOnly = new Set([...appSrc.matchAll(DECLARED)].map((m) => m[1]));
+  for (const file of files) {
+    if (file === path.join('src', 'app.js')) continue;
+    const src = await readFile(path.join(ROOT, file), 'utf8');
+    // Locals count as declared too, at any nesting — otherwise a function
+    // with its own `let start` looks like it is reaching into app.js.
+    const own = new Set(
+      [...src.matchAll(/(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]),
+    );
+    for (const [, params] of src.matchAll(/function\s*[A-Za-z_$\w]*\s*\(([^)]*)\)/g))
+      for (const p of params.split(',')) {
+        const n = p.trim().split(/[=:\s]/)[0].replace(/[{}[\].]/g, '');
+        if (n) own.add(n);
+      }
+    for (const [, names] of src.matchAll(NAMED))
+      for (const raw of names.split(',')) own.add(raw.trim().split(/\s+as\s+/).pop());
+    for (const [, n] of src.matchAll(DEFAULT_IMPORT)) own.add(n);
+    const body = codeOnly(src).replace(/^import[^;]+;$/gm, '');
+    for (const name of appOnly) {
+      if (own.has(name)) continue;
+      if (new RegExp(String.raw`(?<![.\w$])${name}\s*(?=\(|\.[A-Za-z_$]|[,;)\]}])`).test(body))
+        note(file, `references ${name}, which only app.js declares — left behind by a move?`);
+    }
+  }
+}
+
+// ── 6. serve.py parses ──────────────────────────────────────────────────────
 // It re-execs itself when edited, so a syntax error there kills the dev server
 // mid-session rather than at a moment you are looking at it.
 async function checkServer() {
@@ -136,10 +200,14 @@ await checkServer();
 await checkImports(files);
 await checkDuplicates(files);
 await checkWorklets(files);
+await checkNoReachBack(files);
 
 if (problems.length) {
   console.error(`✗ ${problems.length} problem${problems.length === 1 ? '' : 's'} in ${files.length} files\n`);
   for (const { file, message } of problems) console.error(`  ${file}\n    ${message}`);
   process.exit(1);
 }
-console.log(`✓ ${files.length} files + serve.py: parse, imports resolve, no duplicate declarations`);
+console.log(
+  `✓ ${files.length} files + serve.py: parse, imports resolve, nothing declared twice,` +
+    ` no module reaching back into app.js`,
+);

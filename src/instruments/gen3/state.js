@@ -22,3 +22,18 @@ export const GEN3 = {
   releasingVoices: new Set(),
   nodes: null,
 };
+
+// activeNotes: Map<midi, { freq, source, envelope }>
+// Gen3 knob defs — shared by the gen3 panel and the drum sequencer's OSC
+// param locks (per-step overrides stored in the osc channel's locks array).
+export const GEN3_PARAM_DEFS = [
+  { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, unit: '' },
+  { key: 'pitch', label: 'Pitch', min: -24, max: 24, step: 1, unit: 'st' },
+  { key: 'detune', label: 'Detune', min: -100, max: 100, step: 1, unit: 'ct' },
+  { key: 'attack', label: 'Attack', min: 0, max: 10, step: 0.01, unit: 's' },
+  { key: 'decay', label: 'Decay', min: 0, max: 2, step: 0.01, unit: 's' },
+  { key: 'sustain', label: 'Sustain', min: 0, max: 1, step: 0.01, unit: '' },
+  { key: 'release', label: 'Release', min: 0, max: 10, step: 0.01, unit: 's' },
+];
+
+export const gen3ControlBindings = new Map();
