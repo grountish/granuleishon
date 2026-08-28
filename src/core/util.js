@@ -17,3 +17,8 @@ export function formatControlValue(spec, value) {
   const decimals = (spec.step.toString().split('.')[1] || '').length;
   return `${formatNumericValue(value, decimals)}${spec.unit ? ' ' + spec.unit : ''}`;
 }
+
+// Meter and EQ axis labels: Hz below 1k, kHz above.
+export function formatMeterHz(f) {
+  return f < 1000 ? `${Math.round(f)} Hz` : `${(f / 1000).toFixed(f >= 10000 ? 1 : 2)} kHz`;
+}

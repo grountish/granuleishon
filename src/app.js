@@ -1,7 +1,14 @@
 // grnsh — main thread: mic capture, worklet setup, UI wiring.
 // Being split into feature modules under src/ — see REFACTOR.md.
 
-import { clamp, quantize, formatNumericValue, formatControlValue } from './core/util.js';
+import {
+  clamp,
+  quantize,
+  formatNumericValue,
+  formatControlValue,
+  formatMeterHz,
+} from './core/util.js';
+import { rbjHighpass, rbjLowShelf, rbjPeaking, biquadMagnitudeDb } from './core/dsp.js';
 import { encodeWav } from './render/wav.js';
 import {
   VIZGL,
@@ -14468,9 +14475,6 @@ function updatePeakBallistics(meter, key, holdKey, framePeak, dt, now) {
   }
 }
 
-function formatMeterHz(f) {
-  return f < 1000 ? `${Math.round(f)} Hz` : `${(f / 1000).toFixed(f >= 10000 ? 1 : 2)} kHz`;
-}
 
 // Cursor frequency readout over the spectrum area — spectrum shares the EQ's log axis.
 function drawMeterHoverFreq(g, w, specH, col) {
@@ -14895,18 +14899,6 @@ function rbjHighShelf(sr, f0, gainDb, q) {
   return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
 }
 
-function rbjHighpass(sr, f0, q) {
-  const w0 = (2 * Math.PI * f0) / sr;
-  const alpha = Math.sin(w0) / (2 * q);
-  const cosw = Math.cos(w0);
-  const b0 = (1 + cosw) / 2;
-  const b1 = -(1 + cosw);
-  const b2 = (1 + cosw) / 2;
-  const a0 = 1 + alpha;
-  const a1 = -2 * cosw;
-  const a2 = 1 - alpha;
-  return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
-}
 
 function applyBiquad(input, [b0, b1, b2, a1, a2]) {
   const out = new Float32Array(input.length);
@@ -15026,37 +15018,10 @@ const EQ_FMIN = 20;
 const EQ_FMAX = 20000;
 const EQ_DISPLAY_SR = 48000;
 
-function rbjLowShelf(sr, f0, gainDb, q) {
-  const A = Math.pow(10, gainDb / 40);
-  const w0 = (2 * Math.PI * f0) / sr;
-  const alpha = Math.sin(w0) / (2 * q);
-  const cosw = Math.cos(w0);
-  const sqA = Math.sqrt(A);
-  const b0 = A * (A + 1 - (A - 1) * cosw + 2 * sqA * alpha);
-  const b1 = 2 * A * (A - 1 - (A + 1) * cosw);
-  const b2 = A * (A + 1 - (A - 1) * cosw - 2 * sqA * alpha);
-  const a0 = A + 1 + (A - 1) * cosw + 2 * sqA * alpha;
-  const a1 = -2 * (A - 1 + (A + 1) * cosw);
-  const a2 = A + 1 + (A - 1) * cosw - 2 * sqA * alpha;
-  return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
-}
 
-function rbjPeaking(sr, f0, gainDb, q) {
-  const A = Math.pow(10, gainDb / 40);
-  const w0 = (2 * Math.PI * f0) / sr;
-  const alpha = Math.sin(w0) / (2 * q);
-  const cosw = Math.cos(w0);
-  const b0 = 1 + alpha * A;
-  const b1 = -2 * cosw;
-  const b2 = 1 - alpha * A;
-  const a0 = 1 + alpha / A;
-  const a1 = -2 * cosw;
-  const a2 = 1 - alpha / A;
-  return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
-}
 
 // The low band doubles as a low-cut: same freq/Q handles, gain and dynamics
-// dormant while cut. (rbjHighpass lives with the LUFS meter's biquads.)
+// dormant while cut. (The biquad coefficient math lives in core/dsp.js.)
 function masteringLowIsCut() {
   return MASTERING.params.lowType === 'cut';
 }
@@ -15067,20 +15032,6 @@ function masteringBandDisplayCoefs(band, bi, gainDb) {
     : rbjPeaking(EQ_DISPLAY_SR, MASTERING.params[band.freqKey], gainDb, MASTERING.params[band.qKey]);
 }
 
-function biquadMagnitudeDb([b0, b1, b2, a1, a2], freq, sr) {
-  const w = (2 * Math.PI * freq) / sr;
-  const cw = Math.cos(w);
-  const c2w = Math.cos(2 * w);
-  const sw = Math.sin(w);
-  const s2w = Math.sin(2 * w);
-  const numRe = b0 + b1 * cw + b2 * c2w;
-  const numIm = -(b1 * sw + b2 * s2w);
-  const denRe = 1 + a1 * cw + a2 * c2w;
-  const denIm = -(a1 * sw + a2 * s2w);
-  const num = numRe * numRe + numIm * numIm;
-  const den = denRe * denRe + denIm * denIm;
-  return 10 * Math.log10((num || 1e-20) / (den || 1e-20));
-}
 
 // Per-band display coefficients — optional gain overrides let the live
 // (dynamics-driven) curve reuse the same math as the static one.
