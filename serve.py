@@ -23,13 +23,16 @@ RELOAD_SNIPPET = b"""<script>
 
 
 def watch_token():
+    # Walks subdirectories too — sources live in src/ and worklets/.
     newest = 0
-    for name in os.listdir('.'):
-        if name.endswith(WATCH_EXTS):
-            try:
-                newest = max(newest, os.stat(name).st_mtime_ns)
-            except OSError:
-                pass
+    for root, dirs, files in os.walk('.'):
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
+        for name in files:
+            if name.endswith(WATCH_EXTS):
+                try:
+                    newest = max(newest, os.stat(os.path.join(root, name)).st_mtime_ns)
+                except OSError:
+                    pass
     return str(newest).encode()
 
 

@@ -943,7 +943,9 @@ async function ensureAudioEngine() {
 // gesture), so a hard reload never busts their HTTP cache entry. A unique
 // query string per session guarantees the current file is what runs.
 function workletUrl(file) {
-  return `${file}?v=${Date.now()}`;
+  // Resolved against the document, not this module — worklets live at the
+  // site root's worklets/ folder regardless of where the importer sits.
+  return `worklets/${file}?v=${Date.now()}`;
 }
 
 async function ensureFxModules() {

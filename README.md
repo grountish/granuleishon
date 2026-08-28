@@ -17,7 +17,7 @@ python3 serve.py
 ```
 
 (`serve.py` is a plain `http.server` with caching disabled — a stock
-`python3 -m http.server` lets the browser cache `main.js` and the worklet
+`python3 -m http.server` lets the browser cache `src/app.js` and the worklet
 modules, so edits can silently not load.)
 
 Click **Start mic**, grant permission, and **wear headphones** to avoid
@@ -25,11 +25,13 @@ feedback. Make a sound and play with the controls.
 
 ## How it works
 
-- `granular-processor.js` — an `AudioWorkletProcessor` running on the audio
-  render thread. Holds the circular buffer, writes incoming mic samples into it,
-  and schedules/mixes grains. **Freeze** just stops writing to the buffer.
-- `main.js` — captures the mic, loads the worklet, and wires the sliders. UI
-  changes are sent to the processor via `port.postMessage`.
+- `worklets/granular-processor.js` — an `AudioWorkletProcessor` running on the
+  audio render thread. Holds the circular buffer, writes incoming mic samples
+  into it, and schedules/mixes grains. **Freeze** just stops writing to the
+  buffer. Every other `worklets/*-processor.js` is a rack effect or mastering
+  stage on the same pattern.
+- `src/app.js` — captures the mic, loads the worklets, and wires the UI. Loaded
+  as an ES module; being split into feature modules, see `REFACTOR.md`.
 - `index.html` / `style.css` — controls.
 
 ## Parameters
