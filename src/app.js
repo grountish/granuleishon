@@ -3,6 +3,18 @@
 
 import { clamp, quantize, formatNumericValue, formatControlValue } from './core/util.js';
 import {
+  BPM_BOUNDS,
+  TRANSPORT,
+  TEMPO_SYNC_STEPS,
+  GRAIN_SYNC_STEPS,
+  GRAIN_SYNC_CONTROL,
+  getTempoStep,
+  getGrainSyncStep,
+  beatsToSeconds,
+  formatTempoSeconds,
+  formatTempoSyncValue,
+} from './core/tempo.js';
+import {
   NOTE_NAMES,
   midiToFreqHz,
   freqHzToMidi,
@@ -91,28 +103,6 @@ const INPUT_SOURCE = {
   devices: [],
   selectedId: 'default',
 };
-const BPM_BOUNDS = { min: 40, max: 240, step: 1 };
-const TRANSPORT = { bpm: 120 };
-const TEMPO_SYNC_STEPS = [
-  { label: '1/16', beats: 0.25 },
-  { label: '1/8T', beats: 1 / 3 },
-  { label: '1/8', beats: 0.5 },
-  { label: '1/4T', beats: 2 / 3 },
-  { label: '1/4', beats: 1 },
-  { label: '1/2', beats: 2 },
-  { label: '1B', beats: 4 },
-  { label: '2B', beats: 8 },
-];
-const GRAIN_SYNC_STEPS = [
-  { label: '1/64', beats: 0.0625 },
-  { label: '1/32', beats: 0.125 },
-  { label: '1/16', beats: 0.25 },
-  { label: '1/8T', beats: 1 / 3 },
-  { label: '1/8', beats: 0.5 },
-  { label: '1/4T', beats: 2 / 3 },
-  { label: '1/4', beats: 1 },
-];
-const GRAIN_SYNC_CONTROL = { min: 0, max: GRAIN_SYNC_STEPS.length - 1, step: 1, unit: '' };
 const REC = {
   isRecording: false,
   left: [],
@@ -231,25 +221,6 @@ function setStatus(text) {
       }, 5000);
     });
   }
-}
-
-function getTempoStep(syncIndex) {
-  const index = clamp(Math.round(syncIndex), 0, TEMPO_SYNC_STEPS.length - 1);
-  return TEMPO_SYNC_STEPS[index];
-}
-
-function beatsToSeconds(beats) {
-  return (60 / TRANSPORT.bpm) * beats;
-}
-
-function formatTempoSeconds(seconds) {
-  const decimals = seconds >= 10 ? 1 : 2;
-  return `${formatNumericValue(seconds, decimals)}s`;
-}
-
-function formatTempoSyncValue(syncIndex, suffix) {
-  const step = getTempoStep(syncIndex);
-  return `${step.label} ${suffix(step)}`;
 }
 
 function getDelayTimeSeconds(busId = activeBus) {
@@ -2226,9 +2197,6 @@ function setGeneratorParam(genIdx, key, value, { send = true, deferMaxClamp = fa
   refreshBackPanelState();
 }
 
-function getGrainSyncStep(syncIndex) {
-  return GRAIN_SYNC_STEPS[clamp(Math.round(syncIndex), 0, GRAIN_SYNC_STEPS.length - 1)];
-}
 function getGrainSizeSyncMs(genIdx) {
   return beatsToSeconds(getGrainSyncStep(state[genIdx].grainSizeSyncIndex).beats) * 1000;
 }
