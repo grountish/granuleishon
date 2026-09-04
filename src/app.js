@@ -244,6 +244,7 @@ let resonatorModulePromise = null;
 let grainArpModulePromise = null;
 let pitchTremoloModulePromise = null;
 let autotuneModulePromise = null;
+let vocoderModulePromise = null;
 const LIVE_SOURCE_SECONDS = 10;
 
 // dB <-> linear amplitude helper for the gate.
@@ -836,6 +837,7 @@ async function restartAudioEngineForLatency() {
   grainArpModulePromise = null;
   pitchTremoloModulePromise = null;
   autotuneModulePromise = null;
+  vocoderModulePromise = null;
   engine.started = false;
 
   try {
@@ -968,6 +970,9 @@ async function ensureFxModules() {
   if (!autotuneModulePromise) {
     autotuneModulePromise = engine.ctx.audioWorklet.addModule(workletUrl('autotune-processor.js'));
   }
+  if (!vocoderModulePromise) {
+    vocoderModulePromise = engine.ctx.audioWorklet.addModule(workletUrl('vocoder-processor.js'));
+  }
   await Promise.all([
     bitReducerModulePromise,
     beatRepeatModulePromise,
@@ -975,6 +980,7 @@ async function ensureFxModules() {
     grainArpModulePromise,
     pitchTremoloModulePromise,
     autotuneModulePromise,
+    vocoderModulePromise,
   ]);
 }
 
@@ -1956,7 +1962,7 @@ const FX_LFO_PARAMS = [
   { id: 'delay', key: 'time', min: 0, max: MAX_DELAY_SECONDS },
   { id: 'delay', key: 'feedback', min: 0, max: 0.95 },
   { id: 'delay', key: 'mix', min: 0, max: 1 },
-  { id: 'filter', key: 'cutoff', min: 80, max: 14000 },
+  { id: 'filter', key: 'cutoff', min: 0, max: 14000 },
   { id: 'filter', key: 'q', min: 0.1, max: 20 },
   { id: 'filter', key: 'mix', min: 0, max: 1 },
   { id: 'resonator', key: 'freq', min: 40, max: 2000 },
@@ -16335,8 +16341,16 @@ function buildBusFx(busId) {
   const st = fxStates[busId];
 
   // Stable entry/exit nodes: the generator connects to `input` once, movable
-  // effects end at `mixerIn`, then channel EQ → pan → gain feeds the master.
+  // effects run from `chain` to `mixerIn`, then channel EQ → pan → gain feeds
+  // the master. `tap` is a pre-FX copy of the input that other buses may
+  // listen to (the vocoder borrows its carrier there): it sits upstream of
+  // everything, so two buses listening to each other can never form a
+  // cycle, and the chain re-splice never touches it.
   const chainIn = ac.createGain();
+  const chainStart = ac.createGain();
+  const tap = ac.createGain();
+  chainIn.connect(chainStart);
+  chainIn.connect(tap);
   const mixerIn = ac.createGain();
   const mixLow = ac.createBiquadFilter();
   mixLow.type = 'lowshelf';
@@ -16395,6 +16409,8 @@ function buildBusFx(busId) {
 
   fxBuses[busId] = {
     input: chainIn,
+    chain: chainStart,
+    tap,
     mixerIn,
     output: busOut,
     mixer: {
@@ -16422,6 +16438,12 @@ function buildBusFx(busId) {
 function buildFxNodes() {
   buildMaster();
   FX_BUS_IDS.forEach((busId) => buildBusFx(busId));
+  // A unit that listens to another bus (the vocoder's carrier tap) could not
+  // wire itself while that bus was still unbuilt — push unit state once more
+  // now that every bus exists.
+  FX_BUS_IDS.forEach((busId) =>
+    FX_UNITS.forEach((u) => u.applyAll && applyUnitState(u.id, busId)),
+  );
   applyInstrumentMixState();
   applyFxModulation();
 }
@@ -16460,10 +16482,10 @@ function reconcileFxIdleSplices() {
 function reconnectFxChain(busId = BUS.active) {
   const bus = fxBuses[busId];
   if (!bus) return;
-  bus.input.disconnect();
+  bus.chain.disconnect();
   fxOrders[busId].forEach((id) => bus[id]?.out.disconnect());
   fxPlugged[busId].clear();
-  let prev = bus.input;
+  let prev = bus.chain;
   fxOrders[busId].forEach((id) => {
     const eff = bus[id];
     // Powered-off units are left out, and so are stateless units whose mix is
@@ -16477,11 +16499,14 @@ function reconnectFxChain(busId = BUS.active) {
 }
 
 // Push a unit's non-param state (filter type, delay mode, arp pattern/hold,
-// tremolo shape, autotune mask) to its nodes. The unit owns what that means.
+// tremolo shape, autotune mask, vocoder carrier) to its nodes. The unit owns
+// what that means; `buses` lets one listen to another bus's tap.
 function applyUnitState(id, busId = BUS.active) {
   const nodes = fxBuses[busId]?.[id];
   const unit = FX_UNITS_BY_ID.get(id);
-  if (nodes && unit?.applyAll) unit.applyAll(nodes, { ac: engine.ctx, state: fxStates[busId][id] });
+  if (nodes && unit?.applyAll) {
+    unit.applyAll(nodes, { ac: engine.ctx, state: fxStates[busId][id], buses: fxBuses, busId });
+  }
 }
 
 function applyFx(id, key, val, busId = BUS.active) {
@@ -17706,7 +17731,8 @@ function renderActiveBusFx() {
 
 
 
-    buildFxModeRows(def, content);
+    // Mode rows and latches live on the unit, not on its FX_DEFS row.
+    buildFxModeRows(FX_UNITS_BY_ID.get(def.id), content);
 
     if (def.id === 'autotune') {
       const scaleRow = document.createElement('div');
@@ -18303,6 +18329,7 @@ function stop() {
   grainArpModulePromise = null;
   pitchTremoloModulePromise = null;
   autotuneModulePromise = null;
+  vocoderModulePromise = null;
   engine.started = false;
 
   // Reset freeze state for both generators.

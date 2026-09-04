@@ -19,7 +19,7 @@ export default {
     },
   ],
   params: [
-    { key: 'cutoff', label: 'Cutoff', min: 80, max: 14000, step: 10, unit: 'Hz' },
+    { key: 'cutoff', label: 'Cutoff', min: 0, max: 14000, step: 10, unit: 'Hz' },
     { key: 'q', label: 'Resonance', min: 0.1, max: 20, step: 0.1, unit: '' },
     { key: 'mix', label: 'Mix', min: 0, max: 1, step: 0.01, unit: '' },
   ],
