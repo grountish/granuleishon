@@ -1,3 +1,4 @@
+// Synthetic test signals and an octave-bin spectrum for vocoder-sweep.mjs.
 const SR = 48000;
 export const LEN = SR * 3;
 export function fft(re, im) {
