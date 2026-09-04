@@ -1,0 +1,127 @@
+/* ── Gen 5: Sampler ─────────────────────────────────────────── */
+
+.gen-5 {
+  /* Same gold as the drum machine's SMP lane — both are "the sample". */
+  --gen-accent: #d8c94a;
+  --gen-accent-dim: #a89a36;
+  height: 240px;
+}
+
+.smp-wave {
+  flex: 1;
+  min-height: 56px;
+  cursor: context-menu;
+}
+
+.gen-5.smp-zoomed .smp-wave {
+  cursor: grab;
+}
+
+.gen-5 .smp-wave.panning {
+  cursor: grabbing;
+}
+
+.gen-5.smp-empty .smp-wave {
+  cursor: default;
+}
+
+.smp-wave-menu {
+  width: 150px;
+}
+
+.gen-5.smp-empty .smp-wave {
+  background: #121212;
+}
+
+.smp-mode-group {
+  margin-right: 4px;
+}
+
+.smp-load-btn,
+.smp-trig-btn {
+  padding: 3px 7px;
+}
+
+.smp-trig-btn:not(:disabled) {
+  border-color: var(--gen-accent-dim);
+  color: var(--gen-accent);
+}
+
+.smp-trig-btn:not(:disabled):active {
+  background: var(--gen-accent);
+  color: #121212;
+}
+
+.smp-flag-control {
+  max-width: 72px;
+}
+
+/* Warp bar: mode + sample tempo, between the waveform and the knobs. */
+.smp-warp-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 26px;
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--border);
+  background: #1a1d1d;
+  flex-shrink: 0;
+  font-size: 8px;
+}
+
+.smp-warp-control {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.smp-warp-label {
+  color: var(--muted);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.smp-warp-modes {
+  padding-right: 0;
+  border-right: none;
+}
+
+.smp-bpm-input {
+  width: 52px;
+  padding: 2px 4px;
+  border: 1px solid #333;
+  border-radius: 2px;
+  background: #1e1e1e;
+  color: var(--text);
+  font-size: 8px;
+  font-family: inherit;
+  text-align: right;
+  -moz-appearance: textfield;
+}
+
+.smp-bpm-input::-webkit-outer-spin-button,
+.smp-bpm-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.smp-bpm-input:focus {
+  outline: none;
+  border-color: var(--gen-accent-dim);
+}
+
+.smp-bpm-input:disabled {
+  opacity: 0.4;
+}
+
+.smp-bpm-btn {
+  text-transform: none;
+}
+
+.smp-warp-ratio {
+  margin-left: auto;
+  color: var(--gen-accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

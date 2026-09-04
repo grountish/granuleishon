@@ -39,7 +39,7 @@
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: repeat(5, minmax(210px, 1fr));
+  grid-template-columns: repeat(6, minmax(210px, 1fr));
   gap: 8px;
   overflow: auto;
   padding-bottom: 4px;
@@ -408,7 +408,7 @@
   }
 
   .mixer-channels {
-    grid-template-columns: repeat(5, minmax(210px, 72vw));
+    grid-template-columns: repeat(6, minmax(210px, 72vw));
   }
 }
 

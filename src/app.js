@@ -85,6 +85,21 @@ import {
 } from './instruments/gen4/defs.js';
 import { GEN4 } from './instruments/gen4/state.js';
 import {
+  SMP,
+  SMP_PARAM_DEFS,
+  SMP_FLAG_DEFS,
+  SMP_MODES,
+  SMP_GEN_IDX,
+  SMP_WARP_MODES,
+  makeSamplerLoopParams,
+  samplerRegion,
+  getSamplerBpm,
+  getSamplerGrid,
+  snapToGrid,
+  detectSampleTempo,
+} from './instruments/sampler/state.js';
+import { estimateTempo } from './instruments/sampler/tempo.js';
+import {
   clearGen4LockSelection,
   clearGen4Step,
   clearSelectedGen4Locks,
@@ -581,6 +596,17 @@ async function persistAudioForScope(scope) {
       await audioClipDelete(key);
     }
   }
+  const smpKey = `${scope}:smp`;
+  if (SMP.sample) {
+    await audioClipPut(smpKey, {
+      mode: 'sampler',
+      channels: SMP.sample.channels,
+      sampleRate: SMP.sample.sampleRate,
+      fileName: SMP.sample.fileName,
+    });
+  } else {
+    await audioClipDelete(smpKey);
+  }
   const ms = MASTERING.source;
   const masterKey = `${scope}:master`;
   if (ms?.left?.length) {
@@ -600,6 +626,7 @@ async function deleteAudioForScope(scope) {
   for (let genIdx = 0; genIdx < 2; genIdx++) {
     await audioClipDelete(`${scope}:gen${genIdx}`);
   }
+  await audioClipDelete(`${scope}:smp`);
   await audioClipDelete(`${scope}:master`);
 }
 
@@ -650,6 +677,9 @@ async function restoreAudioForScope(scope) {
       setSourceDurationSec(genIdx, getSourceState(genIdx).durationSec);
     }
   }
+  const smpClip = await audioClipGet(`${scope}:smp`);
+  if (smpClip?.channels?.length) applyRestoredSamplerClip(smpClip);
+  else clearSamplerSample();
   const masterClip = await audioClipGet(`${scope}:master`);
   if (masterClip?.left?.length && masterClip.right?.length) {
     setMasteringSource(
@@ -894,6 +924,7 @@ async function ensureAudioEngine() {
     buildFxNodes();
     buildGen3Nodes();
     buildGen4Nodes();
+    buildSamplerNodes();
     engine.master.output.connect(engine.ctx.destination);
     ensureVizAnalyser();
   }
@@ -2580,7 +2611,11 @@ function makeControlRow(p, initialValue, onInput, lfoTarget = null, contextTarge
     renderValue(v);
     onInput(v);
   });
-  if (contextTarget && contextTarget.genIdx >= 0 && contextTarget.genIdx <= 2) {
+  const canCopyToLoops =
+    contextTarget &&
+    ((contextTarget.genIdx >= 0 && contextTarget.genIdx <= 2) ||
+      contextTarget.genIdx === SMP_GEN_IDX);
+  if (canCopyToLoops) {
     knob.addEventListener('contextmenu', (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -3699,6 +3734,1245 @@ function renderViz() {
   ctx.fillRect(0, 0, W, H);
 }
 
+// ─── Gen 5: Sampler ──────────────────────────────────────────────────────────
+// One sample, fired by the transport: at the start of every pattern cycle in
+// Loop mode, once per song pass in Song mode. The decoded audio lives off the
+// AudioContext (SMP.sample) and is rebuilt into AudioBuffers per context, so
+// a stop/start of the engine never loses it. Each trigger is a fresh
+// AudioBufferSourceNode — a knob change lands on the next hit, and the one
+// sounding now fades over its own release as the next starts.
+
+const samplerUi = {
+  panel: null,
+  rows: new Map(), // param key → control row
+  flags: new Map(), // flag key → toggle button
+  modeBtns: new Map(),
+  canvas: null,
+  ctx: null,
+  layer: null, // offscreen static waveform; the visible canvas = layer + playhead
+  layerCtx: null,
+  playheadFrame: null,
+  view: { t0: 0, t1: 0 }, // zoomed window in seconds; t1 <= t0 means "all"
+  gridBtn: null,
+  fitBtn: null,
+  fileInput: null,
+  trigBtn: null,
+  warpBtns: new Map(),
+  bpmInput: null,
+  autoBtn: null,
+  ratioEl: null,
+};
+
+function buildSamplerNodes() {
+  if (!engine.ctx || SMP.nodes || !fxBuses.smp) return;
+  const out = engine.ctx.createGain();
+  out.gain.value = 1;
+  out.connect(fxBuses.smp.input);
+  SMP.nodes = { out };
+}
+
+function clearSamplerSample() {
+  SMP.sample = null;
+  SMP.detectedBpm = null;
+  SMP.detectedGrid = null;
+  SMP.analysing = false;
+  samplerAnalysisSeq += 1; // an analysis of the old sample must not land
+  SMP.cache = { sample: null, ctx: null, buf: null, rev: null };
+  stopSampler();
+  refreshSamplerUI();
+}
+
+function setSamplerSample(sample, { announce = false } = {}) {
+  SMP.sample = sample;
+  SMP.detectedBpm = null;
+  SMP.detectedGrid = null;
+  samplerUi.view = { t0: 0, t1: 0 };
+  SMP.cache = { sample: null, ctx: null, buf: null, rev: null };
+  refreshSamplerUI();
+  queueAutosaveAudio();
+  analyseSamplerTempo({ announce });
+}
+
+// ── Tempo analysis ── beat detection on the loaded sample (tempo.js),
+// in a module worker when the browser has one, inline otherwise.
+
+let samplerTempoWorker = null; // Worker | false once creation failed
+let samplerTempoJob = 0;
+let samplerAnalysisSeq = 0;
+
+function getSamplerTempoWorker() {
+  if (samplerTempoWorker !== null) return samplerTempoWorker;
+  try {
+    samplerTempoWorker = new Worker(`src/instruments/sampler/tempo-worker.js?v=${Date.now()}`, {
+      type: 'module',
+    });
+  } catch (e) {
+    samplerTempoWorker = false;
+  }
+  return samplerTempoWorker;
+}
+
+// Mono mixdown decimated to ~12 kHz: all the analysis needs, and a quarter
+// of the bytes to hand the worker.
+function samplerAnalysisSignal(sample) {
+  const d = Math.max(1, Math.floor(sample.sampleRate / 12000));
+  const chs = sample.channels;
+  const n = Math.floor(chs[0].length / d);
+  const mono = new Float32Array(n);
+  const scale = 1 / (d * chs.length);
+  for (let i = 0; i < n; i++) {
+    const off = i * d;
+    let s = 0;
+    for (let c = 0; c < chs.length; c++) {
+      const data = chs[c];
+      for (let k = 0; k < d; k++) s += data[off + k];
+    }
+    mono[i] = s * scale;
+  }
+  return { mono, sampleRate: sample.sampleRate / d };
+}
+
+// Resolves to estimateTempo's result, or undefined when the worker path is
+// unavailable/broken so the caller can run it inline.
+function runSamplerTempoWorker(sample, refBpm, fixedBpm = null) {
+  const worker = getSamplerTempoWorker();
+  if (!worker) return Promise.resolve(undefined);
+  const { mono, sampleRate } = samplerAnalysisSignal(sample);
+  return new Promise((resolve) => {
+    const id = ++samplerTempoJob;
+    const done = (value) => {
+      worker.removeEventListener('message', onMessage);
+      worker.removeEventListener('error', onError);
+      resolve(value);
+    };
+    const onMessage = (event) => {
+      if (event.data?.id !== id) return;
+      done(event.data.error ? undefined : event.data.result);
+    };
+    const onError = () => {
+      samplerTempoWorker = false;
+      done(undefined);
+    };
+    worker.addEventListener('message', onMessage);
+    worker.addEventListener('error', onError);
+    worker.postMessage({ id, mono, sampleRate, refBpm, fixedBpm }, [mono.buffer]);
+  });
+}
+
+async function analyseSamplerTempo({ announce = false } = {}) {
+  const sample = SMP.sample;
+  if (!sample) return;
+  const job = ++samplerAnalysisSeq;
+  SMP.analysing = true;
+  refreshSamplerWarpUI();
+  if (announce) setStatus('sampler: analysing tempo…');
+  // A typed tempo is kept; the analysis then only finds the beat phase for it.
+  const fixedBpm = SMP.warp.bpm > 0 ? SMP.warp.bpm : null;
+  let result;
+  try {
+    result = await runSamplerTempoWorker(sample, TRANSPORT.bpm, fixedBpm);
+    if (result === undefined) {
+      const { mono, sampleRate } = samplerAnalysisSignal(sample);
+      result = estimateTempo(mono, sampleRate, { refBpm: TRANSPORT.bpm, fixedBpm });
+    }
+  } catch (e) {
+    console.error(e);
+    result = null;
+  }
+  if (job !== samplerAnalysisSeq || SMP.sample !== sample) return; // stale
+  SMP.analysing = false;
+  if (result?.bpm) {
+    if (!fixedBpm) SMP.detectedBpm = result.bpm;
+    SMP.detectedGrid = {
+      bpm: result.bpm,
+      beatOffset: result.beatOffset,
+      barOffset: result.barOffset,
+    };
+    if (announce) {
+      const weak = !fixedBpm && result.confidence < 0.12 ? ' — weak beat, check it' : '';
+      const bar = `first bar at ${result.barOffset.toFixed(3)} s`;
+      setStatus(
+        fixedBpm
+          ? `sampler: ${result.bpm} bpm, ${bar}`
+          : `sampler: ${result.bpm} bpm detected, ${bar}${weak}`,
+      );
+    }
+  } else {
+    // Too short or no beat to find — fall back to the length guess.
+    const guess = detectSampleTempo(sample.duration, TRANSPORT.bpm);
+    SMP.detectedBpm = guess?.bpm ?? null;
+    if (announce) {
+      setStatus(
+        guess
+          ? `sampler: no clear beat — ${guess.bpm} bpm from length (${guess.bars} bars)`
+          : 'sampler: could not detect a tempo',
+      );
+    }
+  }
+  refreshSamplerTempo();
+  drawSamplerWave();
+}
+
+// Clip shape shared by IndexedDB and the project file: up to two channels
+// of raw Float32 samples plus their rate and the file's name.
+function applyRestoredSamplerClip(clip) {
+  const channels = (clip?.channels || []).filter((c) => c?.length).slice(0, 2);
+  if (!channels.length) return;
+  const sampleRate = clamp(Math.round(clip.sampleRate || 48000), 8000, 192000);
+  setSamplerSample({
+    channels,
+    sampleRate,
+    duration: channels[0].length / sampleRate,
+    fileName: clip.fileName || 'restored.wav',
+  });
+}
+
+async function loadSamplerFile(file) {
+  try {
+    setStatus(`loading ${file.name}…`);
+    await ensureAudioEngine();
+    const bytes = await file.arrayBuffer();
+    const decoded = await engine.ctx.decodeAudioData(bytes);
+    const channels = [];
+    for (let ch = 0; ch < Math.min(2, decoded.numberOfChannels); ch++) {
+      channels.push(new Float32Array(decoded.getChannelData(ch)));
+    }
+    setSamplerSample(
+      {
+        channels,
+        sampleRate: decoded.sampleRate,
+        duration: decoded.duration,
+        fileName: file.name,
+      },
+      { announce: true },
+    );
+  } catch (err) {
+    setStatus('error: ' + err.message);
+    console.error(err);
+  }
+}
+
+// AudioBuffers for the live context: forward, plus a reversed copy built on
+// first use. Rebuilt whenever the sample or the context changes.
+function getSamplerBuffer(reverse) {
+  const sample = SMP.sample;
+  const ac = engine.ctx;
+  if (!sample || !ac) return null;
+  if (SMP.cache.sample !== sample || SMP.cache.ctx !== ac) {
+    const buf = ac.createBuffer(
+      sample.channels.length,
+      sample.channels[0].length,
+      sample.sampleRate,
+    );
+    sample.channels.forEach((data, ch) => buf.getChannelData(ch).set(data));
+    SMP.cache = { sample, ctx: ac, buf, rev: null };
+  }
+  if (!reverse) return SMP.cache.buf;
+  if (!SMP.cache.rev) {
+    const fwd = SMP.cache.buf;
+    const rev = ac.createBuffer(fwd.numberOfChannels, fwd.length, fwd.sampleRate);
+    for (let ch = 0; ch < fwd.numberOfChannels; ch++) {
+      const src = fwd.getChannelData(ch);
+      const dst = rev.getChannelData(ch);
+      for (let i = 0, n = src.length; i < n; i++) dst[i] = src[n - 1 - i];
+    }
+    SMP.cache.rev = rev;
+  }
+  return SMP.cache.rev;
+}
+
+// Fade the sounding instance out over `release` seconds from `time`. The
+// choke gain is untouched until now, so setValueAtTime(1) is exact even when
+// `time` is ahead of the clock.
+function samplerChoke(time, release) {
+  const voice = SMP.voice;
+  if (!voice) return;
+  SMP.voice = null;
+  const ac = engine.ctx;
+  if (!ac || voice.ctx !== ac) return;
+  const fade = Math.max(0.005, release);
+  const at = Math.max(time, ac.currentTime);
+  voice.choke.gain.setValueAtTime(1, at);
+  voice.choke.gain.linearRampToValueAtTime(0, at + fade);
+  try {
+    voice.src.stop(at + fade + 0.01);
+  } catch (e) {}
+}
+
+function stopSampler() {
+  if (!SMP.voice || !engine.ctx) {
+    SMP.voice = null;
+    return;
+  }
+  samplerChoke(engine.ctx.currentTime, 0.02);
+}
+
+// Transport tempo over sample tempo — 1 when no tempo is known.
+function samplerWarpRatio() {
+  const bpm = getSamplerBpm();
+  return bpm > 0 ? TRANSPORT.bpm / bpm : 1;
+}
+
+// Warp needs a sample tempo; without one every mode plays as recorded.
+function samplerEffectiveWarp() {
+  return getSamplerBpm() > 0 ? SMP.warp.mode : 'off';
+}
+
+// Beat grid for a loop's region: null when not warping; the detected grid
+// while GRID snapping is on; otherwise a grid hung off the loop's own Start,
+// so a cue placed by eye is the downbeat and the bar lines follow it.
+function samplerGrid(params) {
+  if (SMP.warp.mode === 'off') return null;
+  const detected = getSamplerGrid();
+  if (!detected) return null;
+  if (SMP.warp.snap) return detected;
+  return { origin: params?.start || 0, beat: detected.beat };
+}
+
+function samplerSnapGrid(params) {
+  return SMP.warp.snap ? samplerGrid(params) : null;
+}
+
+function samplerRate(params, warp) {
+  const rate = Math.pow(2, params.pitch / 12);
+  return warp === 'repitch' ? rate * samplerWarpRatio() : rate;
+}
+
+// Fire the sampler at audio time `time` with one loop's params. Every voice
+// runs src → env (attack/release) → level (gain knob, live) → choke. Off and
+// Re-pitch play one source; Beats plays one source per 16th, handed off by
+// the scheduler (samplerFireSlice) so each slice lands on the transport grid.
+function samplerTrigger(time, params, { warpOverride = null } = {}) {
+  const ac = engine.ctx;
+  const buf = getSamplerBuffer(!!params.reverse);
+  if (!ac || !buf || !SMP.nodes) return;
+  samplerChoke(time, SMP.voice?.release ?? params.release);
+  const warp = warpOverride ?? samplerEffectiveWarp();
+  const region = samplerRegion(params, buf.duration, samplerSnapGrid(params));
+  const regionDur = region.end - region.start;
+  // The reversed buffer runs end→start, so the region mirrors inside it.
+  const offset = params.reverse ? buf.duration - region.end : region.start;
+  const env = ac.createGain();
+  const level = ac.createGain();
+  const choke = ac.createGain();
+  level.gain.value = Math.max(0, params.gain);
+  const attack = Math.max(0.002, params.attack);
+  env.gain.setValueAtTime(0, time);
+  env.gain.linearRampToValueAtTime(1, time + attack);
+  env.connect(level);
+  level.connect(choke);
+  choke.connect(SMP.nodes.out);
+  // `params` is the loop's own smp object, so a knob on that loop can find
+  // the voice it started.
+  const voice = {
+    src: null,
+    env,
+    level,
+    choke,
+    ctx: ac,
+    release: params.release,
+    params,
+    warp,
+    beats: null,
+    // Playhead: buffer position posAt at audio time posTime, advancing at
+    // rate; rebased whenever the rate changes or a slice starts.
+    posAt: offset,
+    posTime: time,
+    rate: 1,
+    gridRate: 1, // rate last put on the step grid (scheduleSamplerStep)
+    pending: [], // [{ time, rate }] grid rate changes not yet reached
+    loopStart: null,
+    loopEnd: offset + regionDur,
+    reverse: !!params.reverse,
+    bufDuration: buf.duration,
+  };
+  SMP.voice = voice;
+  startSamplerPlayhead();
+
+  if (warp === 'beats') {
+    const sliceDur = 60 / getSamplerBpm() / 4; // one 16th of the sample, sample seconds
+    voice.beats = {
+      offset,
+      regionDur,
+      sliceDur,
+      count: Math.max(1, Math.round(regionDur / sliceDur)),
+      next: 0,
+      lastStepTime: -1,
+    };
+    samplerFireSlice(voice, time);
+    return;
+  }
+
+  const rate = samplerRate(params, warp);
+  voice.rate = rate;
+  voice.gridRate = rate;
+  const src = ac.createBufferSource();
+  src.buffer = buf;
+  src.playbackRate.setValueAtTime(rate, time);
+  src.connect(env);
+  if (params.loop) {
+    src.loop = true;
+    src.loopStart = offset;
+    src.loopEnd = offset + regionDur;
+    voice.loopStart = offset;
+    src.start(time, offset);
+  } else {
+    // One-shot: release is a fade into the region's end, in heard time
+    // (the region plays shorter or longer with pitch).
+    const heardDur = regionDur / rate;
+    const relDur = Math.min(Math.max(0.005, params.release), Math.max(0.005, heardDur - attack));
+    const end = time + heardDur;
+    env.gain.setValueAtTime(1, Math.max(time + attack, end - relDur));
+    env.gain.linearRampToValueAtTime(0, end);
+    src.start(time, offset, regionDur);
+  }
+  src.onended = () => {
+    if (SMP.voice === voice) SMP.voice = null;
+    try {
+      src.disconnect();
+      env.disconnect();
+      level.disconnect();
+      choke.disconnect();
+    } catch (e) {}
+  };
+  voice.src = src;
+}
+
+// Beats mode: start slice `next` of the voice at `time` and fade the previous
+// slice out under it. A slice plays on until the next hand-off, so a slower
+// transport never leaves gaps (the read just overlaps a little); a faster one
+// cuts each slice short. The last slice of a one-shot run stops at the region
+// end, and the step after it releases the voice.
+function samplerFireSlice(voice, time) {
+  const ac = engine.ctx;
+  const b = voice.beats;
+  const params = voice.params;
+  const buf = getSamplerBuffer(!!params.reverse);
+  if (!b || !buf || voice.ctx !== ac) return;
+  if (b.next >= b.count) {
+    if (!params.loop) {
+      samplerChoke(time, params.release);
+      return;
+    }
+    b.next = 0;
+  }
+  const prev = voice.src;
+  if (prev) {
+    prev.sliceGain.gain.setValueAtTime(1, time);
+    prev.sliceGain.gain.linearRampToValueAtTime(0, time + 0.004);
+    try {
+      prev.stop(time + 0.01);
+    } catch (e) {}
+  }
+  const regionEnd = b.offset + b.regionDur;
+  const sliceOffset = Math.min(regionEnd - 0.001, b.offset + b.next * b.sliceDur);
+  const src = ac.createBufferSource();
+  src.buffer = buf;
+  src.playbackRate.setValueAtTime(samplerRate(params, 'beats'), time);
+  const sliceGain = ac.createGain();
+  sliceGain.gain.setValueAtTime(0, time);
+  sliceGain.gain.linearRampToValueAtTime(1, time + 0.002);
+  src.connect(sliceGain);
+  sliceGain.connect(voice.env);
+  src.sliceGain = sliceGain;
+  if (b.next === b.count - 1 && !params.loop) {
+    src.start(time, sliceOffset, Math.max(0.005, regionEnd - sliceOffset));
+  } else {
+    src.start(time, sliceOffset);
+  }
+  voice.src = src;
+  voice.posAt = sliceOffset;
+  voice.posTime = time;
+  voice.rate = samplerRate(params, 'beats');
+  b.next += 1;
+  b.lastStepTime = time;
+}
+
+// Called by the gen 4 scheduler on every 16th with that step's audio time,
+// after the cycle-start hook. A Beats voice gets its next slice (unless it
+// was just (re)triggered at this very step). A single-source voice gets its
+// playback rate for the interval this step opens — decided now, from the
+// same TRANSPORT.bpm the drums use to space this step, and applied at the
+// step's audio time. Applying it at "now" instead would move the sample up
+// to a lookahead (~300 ms) before the drums move, and the offset would stay.
+// The pitch knob rides the same path while the transport runs, so it lands
+// on the next 16th rather than between two.
+function scheduleSamplerStep(time) {
+  const voice = SMP.voice;
+  if (!voice || voice.ctx !== engine.ctx) return;
+  if (voice.beats) {
+    if (voice.beats.lastStepTime !== time) samplerFireSlice(voice, time);
+    return;
+  }
+  if (!voice.src) return;
+  const rate = samplerRate(voice.params, voice.warp);
+  if (Math.abs(rate - voice.gridRate) < 1e-6) return;
+  voice.src.playbackRate.setValueAtTime(rate, time);
+  voice.gridRate = rate;
+  voice.pending.push({ time, rate });
+}
+
+// Pitch and gain reach the voice that is sounding; start/end/envelope/flags
+// land on the next trigger. Only the loop that started the voice steers it —
+// in Song mode a later block's knobs leave the first block's hit alone.
+function applySamplerLiveParams(params) {
+  const voice = SMP.voice;
+  const ac = engine.ctx;
+  if (!voice || !ac || voice.ctx !== ac || voice.params !== params) return;
+  const now = ac.currentTime;
+  // Rate changes go through the step grid while the transport runs (see
+  // scheduleSamplerStep); only an audition voice takes them right away.
+  if (voice.src && !voice.beats && !GEN4.playing) {
+    const rate = samplerRate(params, voice.warp);
+    voice.src.playbackRate.setTargetAtTime(rate, now, 0.01);
+    // Rebase the playhead so the new rate counts from here, not from start.
+    voice.posAt = samplerBufferPos(voice, now);
+    voice.posTime = now;
+    voice.rate = rate;
+    voice.gridRate = rate;
+    voice.pending.length = 0;
+  }
+  voice.level.gain.setTargetAtTime(Math.max(0, params.gain), now, 0.01);
+}
+
+// ── Playhead ── where in the buffer the voice reads at audio time `at`,
+// in the buffer's own (possibly reversed) coordinates.
+function samplerBufferPos(voice, at) {
+  // Fold in grid rate changes the clock has passed.
+  while (voice.pending.length && voice.pending[0].time <= at) {
+    const ev = voice.pending.shift();
+    voice.posAt += Math.max(0, ev.time - voice.posTime) * voice.rate;
+    voice.posTime = ev.time;
+    voice.rate = ev.rate;
+  }
+  let pos = voice.posAt + Math.max(0, at - voice.posTime) * voice.rate;
+  if (voice.loopStart !== null && voice.loopEnd > voice.loopStart) {
+    const len = voice.loopEnd - voice.loopStart;
+    pos = voice.loopStart + ((pos - voice.loopStart) % len);
+  } else {
+    pos = Math.min(pos, voice.loopEnd);
+  }
+  return clamp(pos, 0, voice.bufDuration);
+}
+
+// Playhead in forward-sample seconds for the waveform, or null when silent.
+function samplerPlayheadSec() {
+  const voice = SMP.voice;
+  const ac = engine.ctx;
+  if (!voice || !ac || voice.ctx !== ac) return null;
+  const pos = samplerBufferPos(voice, ac.currentTime);
+  return voice.reverse ? voice.bufDuration - pos : pos;
+}
+
+function startSamplerPlayhead() {
+  if (samplerUi.playheadFrame) return;
+  const tick = () => {
+    compositeSamplerWave();
+    if (SMP.voice) samplerUi.playheadFrame = requestAnimationFrame(tick);
+    else samplerUi.playheadFrame = null;
+  };
+  samplerUi.playheadFrame = requestAnimationFrame(tick);
+}
+
+// Visible window of the sample in seconds — the whole file until zoomed.
+function samplerView() {
+  const dur = SMP.sample?.duration || 0;
+  const v = samplerUi.view;
+  if (!dur || !(v.t1 > v.t0) || v.t1 - v.t0 >= dur - 1e-6) return { t0: 0, t1: dur };
+  return { t0: clamp(v.t0, 0, dur), t1: clamp(v.t1, 0, dur) };
+}
+
+function samplerZoomed() {
+  const { t0, t1 } = samplerView();
+  const dur = SMP.sample?.duration || 0;
+  return dur > 0 && t1 - t0 < dur - 1e-6;
+}
+
+function setSamplerView(t0, t1) {
+  const dur = SMP.sample?.duration || 0;
+  if (!dur) return;
+  const span = clamp(t1 - t0, Math.min(0.02, dur), dur);
+  const from = clamp(t0, 0, dur - span);
+  samplerUi.view = { t0: from, t1: from + span };
+  refreshSamplerUI();
+}
+
+// Visible canvas = cached waveform layer + the playhead line.
+function compositeSamplerWave() {
+  const canvas = samplerUi.canvas;
+  const ctx = samplerUi.ctx;
+  const layer = samplerUi.layer;
+  if (!canvas || !ctx || !layer) return;
+  const W = canvas.clientWidth;
+  const H = canvas.clientHeight;
+  if (!W || !H) return;
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(layer, 0, 0, W, H);
+  const sample = SMP.sample;
+  const pos = sample ? samplerPlayheadSec() : null;
+  if (pos === null) return;
+  const { t0, t1 } = samplerView();
+  const x = ((pos - t0) / (t1 - t0)) * W;
+  if (x < -4 || x > W + 4) return;
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.22)';
+  ctx.fillRect(x - 2, 0, 5, H);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(x - 0.5, 0, 1.5, H);
+  ctx.beginPath();
+  ctx.moveTo(x - 4, 0);
+  ctx.lineTo(x + 4, 0);
+  ctx.lineTo(x, 5);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// A transport tempo change re-speeds a Re-pitch voice and updates the readout.
+function refreshSamplerTempo() {
+  if (SMP.voice?.params) applySamplerLiveParams(SMP.voice.params);
+  refreshSamplerWarpUI();
+}
+
+function setSamplerWarpMode(mode) {
+  if (!SMP_WARP_MODES.some(([id]) => id === mode) || SMP.warp.mode === mode) return;
+  SMP.warp.mode = mode;
+  refreshSamplerWarpUI();
+  drawSamplerWave();
+  scheduleHistoryCapture();
+}
+
+// bpm <= 0 (or not a number) returns to the auto guess, re-run against the
+// current transport tempo so "auto" is also the "guess again" button.
+function setSamplerBpm(bpm) {
+  if (Number.isFinite(bpm) && bpm > 0) {
+    SMP.warp.bpm = clamp(bpm, 20, 400);
+    analyseSamplerTempo({ announce: true });
+  } else {
+    SMP.warp.bpm = 0;
+    analyseSamplerTempo({ announce: true });
+  }
+  // The field may still hold focus (typing, then clicking auto) — drop it so
+  // the refresh below is allowed to overwrite what is shown.
+  samplerUi.bpmInput?.blur();
+  refreshSamplerTempo();
+  drawSamplerWave();
+  scheduleHistoryCapture();
+}
+
+function refreshSamplerWarpUI() {
+  if (!samplerUi.panel) return;
+  const bpm = getSamplerBpm();
+  const params = getEditLoop()?.smp;
+  if (params) {
+    // Region readouts show the snapped value, which depends on the grid.
+    samplerUi.rows.get('start')?.setValue(params.start);
+    samplerUi.rows.get('end')?.setValue(params.end);
+  }
+  samplerUi.warpBtns.forEach((btn, mode) => btn.classList.toggle('active', SMP.warp.mode === mode));
+  if (samplerUi.gridBtn) {
+    samplerUi.gridBtn.classList.toggle('active', SMP.warp.snap);
+    samplerUi.gridBtn.disabled = SMP.warp.mode === 'off' || !bpm;
+  }
+  if (samplerUi.fitBtn) samplerUi.fitBtn.hidden = !samplerZoomed();
+  const input = samplerUi.bpmInput;
+  if (input && document.activeElement !== input) {
+    input.value = bpm ? String(Math.round(bpm * 100) / 100) : '';
+    input.placeholder = SMP.analysing ? '…' : '—';
+    input.disabled = !SMP.sample;
+  }
+  if (samplerUi.autoBtn) {
+    samplerUi.autoBtn.classList.toggle('active', SMP.warp.bpm === 0);
+    samplerUi.autoBtn.disabled = !SMP.sample;
+  }
+  if (samplerUi.ratioEl) {
+    if (!bpm || SMP.warp.mode === 'off') {
+      samplerUi.ratioEl.textContent = bpm ? `${TRANSPORT.bpm} / ${Math.round(bpm * 100) / 100}` : '—';
+    } else {
+      const ratio = samplerWarpRatio();
+      const st = 12 * Math.log2(ratio);
+      samplerUi.ratioEl.textContent =
+        SMP.warp.mode === 'repitch'
+          ? `×${ratio.toFixed(3)}  ${st >= 0 ? '+' : ''}${st.toFixed(2)} st`
+          : `×${ratio.toFixed(3)}`;
+    }
+  }
+}
+
+function buildSamplerWarpBar() {
+  const bar = document.createElement('div');
+  bar.className = 'smp-warp-bar';
+
+  const warpGroup = document.createElement('div');
+  warpGroup.className = 'smp-warp-control';
+  const warpLabel = document.createElement('span');
+  warpLabel.className = 'smp-warp-label';
+  warpLabel.textContent = 'warp';
+  const modes = document.createElement('div');
+  modes.className = 'drum-editor-mode-group smp-warp-modes';
+  SMP_WARP_MODES.forEach(([mode, label, hint]) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'drum-editor-mode-btn';
+    btn.textContent = label;
+    btn.title = hint;
+    btn.addEventListener('click', () => setSamplerWarpMode(mode));
+    samplerUi.warpBtns.set(mode, btn);
+    modes.appendChild(btn);
+  });
+  warpGroup.append(warpLabel, modes);
+
+  const bpmGroup = document.createElement('div');
+  bpmGroup.className = 'smp-warp-control';
+  const bpmLabel = document.createElement('span');
+  bpmLabel.className = 'smp-warp-label';
+  bpmLabel.textContent = 'sample bpm';
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.className = 'smp-bpm-input';
+  input.min = '20';
+  input.max = '400';
+  input.step = '0.01';
+  input.placeholder = '—';
+  input.title = "The sample's own tempo — type it, or auto guesses from the length";
+  input.addEventListener('change', () => setSamplerBpm(Number.parseFloat(input.value)));
+  input.addEventListener('keydown', (event) => {
+    event.stopPropagation();
+    if (event.key === 'Enter') input.blur();
+  });
+  input.addEventListener('click', (event) => event.stopPropagation());
+  samplerUi.bpmInput = input;
+  const mkBtn = (text, title, onClick) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'drum-editor-mode-btn smp-bpm-btn';
+    btn.textContent = text;
+    btn.title = title;
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      onClick();
+    });
+    return btn;
+  };
+  const autoBtn = mkBtn('auto', 'Detect the tempo from the audio (octave picked nearest the transport)', () =>
+    setSamplerBpm(0),
+  );
+  samplerUi.autoBtn = autoBtn;
+  const halfBtn = mkBtn('÷2', 'Half tempo (the guess picked twice too many bars)', () =>
+    setSamplerBpm((getSamplerBpm() || TRANSPORT.bpm) / 2),
+  );
+  const dblBtn = mkBtn('×2', 'Double tempo (the guess picked half the bars)', () =>
+    setSamplerBpm((getSamplerBpm() || TRANSPORT.bpm) * 2),
+  );
+  bpmGroup.append(bpmLabel, input, autoBtn, halfBtn, dblBtn);
+
+  const gridBtn = mkBtn(
+    'grid',
+    'Snap Start/End to the detected beat grid. Off: Start is the downbeat and the bar lines follow it',
+    () => setSamplerSnap(!SMP.warp.snap),
+  );
+  samplerUi.gridBtn = gridBtn;
+  warpGroup.appendChild(gridBtn);
+
+  const fitBtn = mkBtn('fit', 'Show the whole sample (wheel over the waveform zooms, shift-wheel pans)', () =>
+    setSamplerView(0, SMP.sample?.duration || 0),
+  );
+  fitBtn.hidden = true;
+  samplerUi.fitBtn = fitBtn;
+
+  const ratio = document.createElement('span');
+  ratio.className = 'smp-warp-ratio';
+  ratio.title = 'Transport tempo over sample tempo';
+  samplerUi.ratioEl = ratio;
+
+  bar.append(warpGroup, bpmGroup, fitBtn, ratio);
+  return bar;
+}
+
+function setSamplerSnap(on) {
+  SMP.warp.snap = !!on;
+  refreshSamplerUI();
+  scheduleHistoryCapture();
+}
+
+// Called by the gen 4 scheduler at step 0 of every pattern cycle, with that
+// step's audio time and the loop the cycle plays. Loop mode retriggers every
+// cycle; Song mode fires on the first cycle after play and again whenever the
+// arrangement wraps (songLandOn flags that).
+function scheduleSamplerCycleStart(loop, time) {
+  const params = loop?.smp;
+  const wrapped = SMP.songWrapped;
+  SMP.songWrapped = false;
+  if (!params || !SMP.sample) return;
+  const firstCycle = GEN4.cycleCount === 0;
+  const fire = SMP.mode === 'loop' || firstCycle || (PLAY.mode === 'song' && wrapped);
+  if (!fire) return;
+  if (!params.on) {
+    // A loop with its sampler off silences it at its cycle start.
+    if (SMP.mode === 'loop') samplerChoke(time, SMP.voice?.release ?? 0.05);
+    return;
+  }
+  samplerTrigger(time, params);
+}
+
+function setSamplerMode(mode) {
+  if (!SMP_MODES.some(([id]) => id === mode) || SMP.mode === mode) return;
+  SMP.mode = mode;
+  refreshSamplerUI();
+  scheduleHistoryCapture();
+}
+
+async function auditionSampler() {
+  const loop = getEditLoop();
+  if (!loop?.smp || !SMP.sample) {
+    setStatus('sampler: load a .wav first');
+    return;
+  }
+  await ensureAudioEngine();
+  // No step grid without the transport: Beats has nothing to advance it, so
+  // audition as a single re-pitched source instead.
+  const warp = samplerEffectiveWarp();
+  samplerTrigger(engine.ctx.currentTime + 0.02, loop.smp, {
+    warpOverride: warp === 'beats' && !GEN4.playing ? 'repitch' : null,
+  });
+}
+
+function refreshSamplerUI() {
+  if (!samplerUi.panel) return;
+  const loop = getEditLoop();
+  const params = loop?.smp || makeSamplerLoopParams();
+  const duration = SMP.sample?.duration || 0;
+  const zoomed = samplerZoomed();
+  const view = samplerView();
+  samplerUi.rows.forEach((row, key) => {
+    if (key === 'start' || key === 'end') {
+      // Region knobs span the loaded sample — or, zoomed in, just the visible
+      // window at millisecond steps, so the knob is a fine control there.
+      // Before a sample lands, keep a usable range.
+      const max = duration > 0 ? Math.max(0.01, parseFloat(duration.toFixed(2))) : 10;
+      row.setConfig(
+        zoomed
+          ? { min: parseFloat(view.t0.toFixed(3)), max: parseFloat(view.t1.toFixed(3)), step: 0.001 }
+          : { min: 0, max, step: 0.01 },
+      );
+    }
+    row.setValue(params[key]);
+  });
+  samplerUi.panel.classList.toggle('smp-zoomed', zoomed);
+  samplerUi.flags.forEach((btn, key) => btn.classList.toggle('active', !!params[key]));
+  samplerUi.modeBtns.forEach((btn, mode) => btn.classList.toggle('active', SMP.mode === mode));
+  samplerUi.panel.classList.toggle('smp-empty', !SMP.sample);
+  if (samplerUi.trigBtn) samplerUi.trigBtn.disabled = !SMP.sample;
+  refreshSamplerWarpUI();
+  drawSamplerWave();
+}
+
+// Per-pixel peaks of the first channel over the window [t0, t1], cached per
+// sample + width + window.
+const samplerPeakCache = { sample: null, width: 0, t0: 0, t1: 0, peaks: null };
+
+function getSamplerPeaks(sample, width, t0, t1) {
+  const c = samplerPeakCache;
+  if (c.sample === sample && c.width === width && c.t0 === t0 && c.t1 === t1) return c.peaks;
+  const data = sample.channels[0];
+  const sr = sample.sampleRate;
+  const i0 = Math.max(0, Math.floor(t0 * sr));
+  const i1 = Math.min(data.length, Math.ceil(t1 * sr));
+  const per = (i1 - i0) / width;
+  const peaks = new Float32Array(width);
+  for (let x = 0; x < width; x++) {
+    const a = Math.min(i1 - 1, i0 + Math.floor(x * per));
+    const b = Math.min(i1, Math.max(a + 1, i0 + Math.floor((x + 1) * per)));
+    // Stride wide windows so a long file stays cheap to draw.
+    const stride = Math.max(1, Math.floor((b - a) / 256));
+    let m = 0;
+    for (let i = a; i < b; i += stride) {
+      const v = Math.abs(data[i]);
+      if (v > m) m = v;
+    }
+    peaks[x] = m;
+  }
+  Object.assign(c, { sample, width, t0, t1, peaks });
+  return peaks;
+}
+
+// Redraws the static layer (peaks, region, grid, name) and composites.
+function drawSamplerWave() {
+  const canvas = samplerUi.canvas;
+  const ctx = samplerUi.layerCtx;
+  if (!canvas || !ctx) return;
+  const W = canvas.clientWidth;
+  const H = canvas.clientHeight;
+  if (!W || !H) return;
+  ctx.clearRect(0, 0, W, H);
+  const accent = getComputedStyle(canvas).getPropertyValue('--gen-accent').trim() || '#d8c94a';
+  const sample = SMP.sample;
+  if (!sample) {
+    ctx.fillStyle = 'rgba(200, 200, 200, 0.35)';
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('drop a .wav here or Load…', W / 2, H / 2 + 3);
+    compositeSamplerWave();
+    return;
+  }
+  const { t0, t1 } = samplerView();
+  const span = t1 - t0;
+  const xOf = (t) => ((t - t0) / span) * W;
+  const params = getEditLoop()?.smp || makeSamplerLoopParams();
+  const grid = samplerGrid(params);
+  const region = samplerRegion(params, sample.duration, samplerSnapGrid(params));
+  const x0 = xOf(region.start);
+  const x1 = xOf(region.end);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
+  const rx0 = Math.max(0, x0);
+  const rx1 = Math.min(W, x1);
+  if (rx1 > rx0) ctx.fillRect(rx0, 0, Math.max(1, rx1 - rx0), H);
+  // The sample's own grid: bars full height, beats as bottom ticks, 16ths
+  // fainter still — only at zoom levels where they stay apart.
+  if (grid) {
+    const drawLines = (step, fromT, style, y, h) => {
+      ctx.fillStyle = style;
+      const kFrom = Math.ceil((Math.max(0, t0) - fromT) / step);
+      const kTo = Math.floor((t1 - fromT) / step);
+      for (let k = kFrom; k <= kTo; k++) {
+        const t = fromT + k * step;
+        if (t < 0 || t > sample.duration) continue;
+        ctx.fillRect(Math.floor(xOf(t)), y, 1, h);
+      }
+    };
+    const pxPerBeat = (grid.beat / span) * W;
+    drawLines(grid.beat * 4, grid.origin, 'rgba(255, 255, 255, 0.18)', 0, H);
+    if (pxPerBeat >= 3) drawLines(grid.beat, grid.origin, 'rgba(255, 255, 255, 0.22)', H - 5, 5);
+    if (pxPerBeat >= 40) drawLines(grid.beat / 4, grid.origin, 'rgba(255, 255, 255, 0.14)', H - 3, 3);
+  }
+  const peaks = getSamplerPeaks(sample, W, t0, t1);
+  const mid = H / 2;
+  ctx.fillStyle = accent;
+  for (let x = 0; x < W; x++) {
+    const h = Math.max(1, peaks[x] * (H - 4));
+    ctx.globalAlpha = x >= x0 && x <= x1 ? 0.95 : 0.3;
+    ctx.fillRect(x, mid - h / 2, 1, h);
+  }
+  ctx.globalAlpha = 1;
+  if (x0 >= 0 && x0 <= W) ctx.fillRect(Math.floor(x0), 0, 1, H);
+  if (x1 >= 0 && x1 <= W) ctx.fillRect(Math.max(0, Math.floor(x1) - 1), 0, 1, H);
+  // Zoomed: a strip at the bottom shows where the window sits in the file.
+  if (samplerZoomed()) {
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.12)';
+    ctx.fillRect(0, H - 2, W, 2);
+    ctx.fillStyle = accent;
+    ctx.fillRect((t0 / sample.duration) * W, H - 2, Math.max(2, (span / sample.duration) * W), 2);
+  }
+  ctx.fillStyle = 'rgba(232, 239, 239, 0.7)';
+  ctx.font = '8px sans-serif';
+  ctx.textAlign = 'left';
+  const dir = params.reverse ? '  ◀' : '';
+  const zoom = samplerZoomed()
+    ? `  ×${(sample.duration / span).toFixed(1)}  ${t0.toFixed(2)}–${t1.toFixed(2)} s`
+    : '';
+  ctx.fillText(`${sample.fileName}  ${sample.duration.toFixed(2)} s${zoom}${dir}`, 4, 10);
+  compositeSamplerWave();
+}
+
+function setSamplerRegionEdge(key, t) {
+  const loop = getEditLoop();
+  if (!loop?.smp) return;
+  loop.smp[key] = t;
+  refreshSamplerUI();
+  scheduleHistoryCapture();
+}
+
+// Cue menu at a point on the waveform. Shares the knob context menu's slot
+// so the document's outside-click handler closes it the same way.
+function openSamplerWaveMenu(t, x, y) {
+  closeKnobContextMenu();
+  closeModSourceMenu();
+  const loop = getEditLoop();
+  if (!loop?.smp || !SMP.sample) return;
+  const grid = samplerSnapGrid(loop.smp);
+  const shown = grid ? snapToGrid(t, grid) : t;
+  const menu = document.createElement('div');
+  menu.className = 'mod-source-menu knob-context-menu smp-wave-menu';
+  knobContextMenuEl = menu;
+  const title = document.createElement('div');
+  title.className = 'mod-source-menu-title';
+  title.textContent = `${shown.toFixed(3)} s${grid ? ' · grid' : ''}`;
+  const item = (label, onClick) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'mod-source-option knob-context-option';
+    btn.textContent = label;
+    btn.addEventListener('click', () => {
+      onClick();
+      closeKnobContextMenu();
+    });
+    return btn;
+  };
+  menu.append(
+    title,
+    item('Start here', () => setSamplerRegionEdge('start', t)),
+    item('End here', () => setSamplerRegionEdge('end', t)),
+  );
+  if (loop.smp.end > 0) {
+    menu.appendChild(item('End → sample end', () => setSamplerRegionEdge('end', 0)));
+  }
+  if (samplerZoomed()) {
+    menu.appendChild(item('Fit', () => setSamplerView(0, SMP.sample.duration)));
+  }
+  mountMenuAtPointer(menu, x, y);
+}
+
+function buildSamplerPanel() {
+  const panel = document.createElement('div');
+  panel.className = 'generator gen-5 source-drop-target';
+  samplerUi.panel = panel;
+
+  const header = document.createElement('div');
+  header.className = 'col-header';
+  const title = document.createElement('span');
+  title.className = 'col-title';
+  title.innerHTML = '<span class="col-dot"></span>Gen 5 · Sampler';
+  const actions = document.createElement('div');
+  actions.className = 'gen-header-actions';
+
+  const modeGroup = document.createElement('div');
+  modeGroup.className = 'drum-editor-mode-group smp-mode-group';
+  SMP_MODES.forEach(([mode, label, hint]) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'drum-editor-mode-btn';
+    btn.textContent = label;
+    btn.title = hint;
+    btn.addEventListener('click', () => setSamplerMode(mode));
+    samplerUi.modeBtns.set(mode, btn);
+    modeGroup.appendChild(btn);
+  });
+
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = '.wav,audio/wav,audio/x-wav';
+  fileInput.hidden = true;
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files?.[0];
+    fileInput.value = '';
+    if (!file) return;
+    if (!isSupportedGranularFile(file)) {
+      setStatus('pick a .wav file');
+      return;
+    }
+    await loadSamplerFile(file);
+  });
+  samplerUi.fileInput = fileInput;
+
+  const loadBtn = document.createElement('button');
+  loadBtn.type = 'button';
+  loadBtn.className = 'source-mode-btn smp-load-btn';
+  loadBtn.textContent = 'Load…';
+  loadBtn.title = 'Load a .wav into the sampler (or drop one on this panel)';
+  loadBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    fileInput.click();
+  });
+
+  const trigBtn = document.createElement('button');
+  trigBtn.type = 'button';
+  trigBtn.className = 'source-mode-btn smp-trig-btn';
+  trigBtn.textContent = 'Trig';
+  trigBtn.title = "Audition this loop's slice now";
+  trigBtn.disabled = true;
+  trigBtn.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    await auditionSampler();
+  });
+  samplerUi.trigBtn = trigBtn;
+
+  actions.append(modeGroup, loadBtn, trigBtn, fileInput);
+  header.append(title, actions);
+  panel.appendChild(header);
+
+  const canvas = document.createElement('canvas');
+  canvas.className = 'gen-viz smp-wave';
+  samplerUi.canvas = canvas;
+  samplerUi.ctx = canvas.getContext('2d');
+  samplerUi.layer = document.createElement('canvas');
+  samplerUi.layerCtx = samplerUi.layer.getContext('2d');
+  new ResizeObserver(() => {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth * dpr;
+    const h = canvas.clientHeight * dpr;
+    canvas.width = w;
+    canvas.height = h;
+    samplerUi.layer.width = w;
+    samplerUi.layer.height = h;
+    samplerUi.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    samplerUi.layerCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawSamplerWave();
+  }).observe(canvas);
+  panel.appendChild(canvas);
+
+  // Right-click the waveform for the cue menu (Start/End here); a left drag
+  // pans a zoomed view. Nothing moves on a plain click — a cue is deliberate.
+  let waveGesture = null;
+  const waveTime = (clientX) => {
+    const rect = canvas.getBoundingClientRect();
+    const norm = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+    const { t0, t1 } = samplerView();
+    // Millisecond placement once zoomed in; the knob's 10 ms otherwise.
+    return parseFloat((t0 + norm * (t1 - t0)).toFixed(samplerZoomed() ? 3 : 2));
+  };
+  canvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!SMP.sample) return;
+    openSamplerWaveMenu(waveTime(e.clientX), e.clientX, e.clientY);
+  });
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!SMP.sample || e.button !== 0 || !samplerZoomed()) return;
+    e.preventDefault();
+    const { t0, t1 } = samplerView();
+    waveGesture = { id: e.pointerId, x: e.clientX, t0, t1 };
+    canvas.setPointerCapture(e.pointerId);
+    canvas.classList.add('panning');
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!waveGesture || e.pointerId !== waveGesture.id) return;
+    const rect = canvas.getBoundingClientRect();
+    const span = waveGesture.t1 - waveGesture.t0;
+    const d = ((waveGesture.x - e.clientX) / Math.max(1, rect.width)) * span;
+    setSamplerView(waveGesture.t0 + d, waveGesture.t1 + d);
+  });
+  const endWaveGesture = (e) => {
+    if (!waveGesture || e.pointerId !== waveGesture.id) return;
+    waveGesture = null;
+    canvas.classList.remove('panning');
+    try {
+      canvas.releasePointerCapture(e.pointerId);
+    } catch (err) {}
+  };
+  canvas.addEventListener('pointerup', endWaveGesture);
+  canvas.addEventListener('pointercancel', endWaveGesture);
+  // Wheel zooms around the pointer; shift-wheel or a horizontal wheel pans.
+  canvas.addEventListener(
+    'wheel',
+    (e) => {
+      if (!SMP.sample) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const { t0, t1 } = samplerView();
+      const span = t1 - t0;
+      const rect = canvas.getBoundingClientRect();
+      const W = Math.max(1, rect.width);
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? W : 1;
+      const dx = e.deltaX * unit;
+      const dy = e.deltaY * unit;
+      if (e.shiftKey || Math.abs(dx) > Math.abs(dy)) {
+        const d = (e.shiftKey ? dy : dx) * (span / W);
+        setSamplerView(t0 + d, t1 + d);
+      } else {
+        const norm = clamp((e.clientX - rect.left) / W, 0, 1);
+        const anchor = t0 + norm * span;
+        const next = span * Math.exp(dy * 0.0025);
+        setSamplerView(anchor - norm * next, anchor + (1 - norm) * next);
+      }
+    },
+    { passive: false },
+  );
+  const dropOverlay = document.createElement('div');
+  dropOverlay.className = 'source-drop-overlay';
+  dropOverlay.textContent = 'drop .wav';
+  panel.appendChild(dropOverlay);
+
+  // Drag & drop — same shape as the granular panels.
+  let dragDepth = 0;
+  const hasFileDrag = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+  ['dragenter', 'dragover'].forEach((eventName) => {
+    panel.addEventListener(eventName, (e) => {
+      if (!hasFileDrag(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      if (eventName === 'dragenter') dragDepth += 1;
+      panel.classList.add('drag-over');
+    });
+  });
+  panel.addEventListener('dragleave', (e) => {
+    if (!hasFileDrag(e)) return;
+    e.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) panel.classList.remove('drag-over');
+  });
+  panel.addEventListener('drop', async (e) => {
+    if (!hasFileDrag(e)) return;
+    e.preventDefault();
+    dragDepth = 0;
+    panel.classList.remove('drag-over');
+    const file = [...(e.dataTransfer?.files || [])].find((f) => isSupportedGranularFile(f));
+    if (!file) {
+      setStatus('drop a .wav file');
+      return;
+    }
+    await loadSamplerFile(file);
+  });
+
+  panel.appendChild(buildSamplerWarpBar());
+
+  const rows = document.createElement('div');
+  rows.className = 'gen-controls';
+  SMP_PARAM_DEFS.forEach((p) => {
+    const control = makeControlRow(
+      p,
+      p.value,
+      (v) => {
+        const loop = getEditLoop();
+        if (!loop?.smp) return;
+        loop.smp[p.key] = v;
+        if (p.key === 'pitch' || p.key === 'gain') applySamplerLiveParams(loop.smp);
+        drawSamplerWave();
+      },
+      null,
+      { genIdx: SMP_GEN_IDX, key: p.key },
+    );
+    if (p.key === 'start' || p.key === 'end') {
+      control.setFormatter((v) => {
+        if (p.key === 'end' && v <= 0) return 'end';
+        const grid = samplerSnapGrid(getEditLoop()?.smp);
+        return formatControlValue(p, grid ? snapToGrid(v, grid) : v);
+      });
+    }
+    samplerUi.rows.set(p.key, control);
+    rows.appendChild(control);
+  });
+  SMP_FLAG_DEFS.forEach((f) => {
+    const row = document.createElement('div');
+    row.className = 'control gen-discrete-control smp-flag-control';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'gen-discrete-btn';
+    btn.textContent = f.short;
+    btn.title = f.label;
+    btn.addEventListener('click', () => {
+      const loop = getEditLoop();
+      if (!loop?.smp) return;
+      loop.smp[f.key] = !loop.smp[f.key];
+      refreshSamplerUI();
+    });
+    btn.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openKnobContextMenu(
+        { genIdx: SMP_GEN_IDX, key: f.key, label: f.label },
+        event.clientX,
+        event.clientY,
+      );
+    });
+    const label = document.createElement('label');
+    label.textContent = f.label;
+    row.append(btn, label);
+    samplerUi.flags.set(f.key, btn);
+    rows.appendChild(row);
+  });
+  panel.appendChild(rows);
+  refreshSamplerUI();
+  return panel;
+}
+
 // ─── Build UI ────────────────────────────────────────────────────────────────
 
 function buildUI() {
@@ -3710,6 +4984,7 @@ function buildUI() {
     [buildGeneratorPanel(1), 'gen1'],
     [buildOscPanel(), 'gen3'],
     [buildDrumPanel(), 'gen4'],
+    [buildSamplerPanel(), 'smp'],
   ];
   panels.forEach(([panel, busId]) => {
     panel.dataset.bus = busId;
@@ -5381,6 +6656,8 @@ function gen4ScheduleTick() {
       step = 0;
     }
     GEN4.schedulerStep = step;
+    if (step === 0) scheduleSamplerCycleStart(loop, GEN4.nextStepTime);
+    scheduleSamplerStep(GEN4.nextStepTime);
     // Swing delays every other 16th, topping out at a perfect-triplet feel
     // (offbeat at 2/3 of the pair). The step grid itself stays straight so
     // pattern boundaries and stutter spacing are unaffected; the schedule
@@ -5604,6 +6881,7 @@ function stopGen4Sequencer() {
   GEN4.displayStep = -1;
   SONG.audibleEntryIdx = -1;
   clearGen4Fill();
+  stopSampler();
   // Back to the edit loop's sound now that nothing is audible.
   sendParams(0);
   sendParams(1);
@@ -8337,6 +9615,7 @@ function createLoopData(name) {
       subdivision: 16,
       stepBeats: 0.25,
     },
+    smp: makeSamplerLoopParams(),
   };
   ensureGen4Variations(loop);
   return loop;
@@ -8587,6 +9866,7 @@ function serializeLoop(loop) {
       subdivision: loop.seq.subdivision,
       stepBeats: loop.seq.stepBeats,
     },
+    smp: { ...loop.smp },
   };
 }
 
@@ -8671,6 +9951,18 @@ function deserializeLoop(data) {
   } else if (typeof seq?.subdivision === 'number') {
     // Legacy patterns predate the beat/step control.
     loop.seq.stepBeats = clampSequencerStepBeats(getLegacySequencerStepBeats(seq.subdivision));
+  }
+  // Loops saved before the sampler keep the defaults from createLoopData.
+  if (data?.smp && typeof data.smp === 'object') {
+    SMP_PARAM_DEFS.forEach(({ key, min, max }) => {
+      if (typeof data.smp[key] !== 'number') return;
+      // Region knobs are bounded by the sample, not the def — clamp low only.
+      const hi = key === 'start' || key === 'end' ? Infinity : max;
+      loop.smp[key] = clamp(data.smp[key], min, hi);
+    });
+    SMP_FLAG_DEFS.forEach(({ key }) => {
+      if (typeof data.smp[key] === 'boolean') loop.smp[key] = data.smp[key];
+    });
   }
   return loop;
 }
@@ -8761,6 +10053,7 @@ function bindEditLoop() {
   }
   refreshGen3KeyStates();
   refreshSequencerUI();
+  refreshSamplerUI();
   emit('state');
   applyMappedModulationTargets();
 }
@@ -8892,6 +10185,7 @@ function songLandOn(nextIdx) {
     if (nextIdx >= SONG.entries.length) {
       if (!SONG.loop) return false;
       nextIdx = 0;
+      SMP.songWrapped = true;
     }
     const cand = SONG.entries[nextIdx];
     if (!cand) return false;
@@ -11096,6 +12390,23 @@ function closeKnobContextMenu() {
 }
 
 function copyGeneratorParamToOtherLoops(genIdx, key) {
+  if (genIdx === SMP_GEN_IDX) {
+    const editLoop = getEditLoop();
+    let copied = 0;
+    LOOPS.list.forEach((loop) => {
+      if (loop === editLoop || !loop.smp || !editLoop?.smp || !Object.hasOwn(editLoop.smp, key)) {
+        return;
+      }
+      loop.smp[key] = editLoop.smp[key];
+      copied += 1;
+    });
+    setStatus(
+      copied > 0
+        ? `copied to ${copied} other loop${copied === 1 ? '' : 's'}`
+        : 'no other loops',
+    );
+    return;
+  }
   if (genIdx === 2) {
     const editLoop = getEditLoop();
     let copied = 0;
@@ -11389,6 +12700,7 @@ function setTransportBpm(value, { refresh = true, updateField = true } = {}) {
     if (state[gi].grainSizeSync || state[gi].densitySync) sendParams(gi);
   }
   applyMappedModulationTargets();
+  refreshSamplerTempo();
   emit('state');
 }
 
@@ -15124,7 +16436,7 @@ function buildFxNodes() {
 
 // What reconnectFxChain actually spliced in, per bus — lets a mix change
 // detect whether the chain needs a re-splice without rebuilding every time.
-const fxPlugged = { gen0: new Set(), gen1: new Set(), gen3: new Set(), gen4: new Set() };
+const fxPlugged = Object.fromEntries(FX_BUS_IDS.map((busId) => [busId, new Set()]));
 
 function fxUnitIdle(busId, id) {
   if (!FX_IDLE_BYPASS.has(id)) return false;
@@ -15315,6 +16627,7 @@ function capturePreset() {
         params: { ...ch.params },
       })),
     },
+    sampler: { mode: SMP.mode, warp: SMP.warp.mode, bpm: SMP.warp.bpm, snap: SMP.warp.snap },
     kickSc: { release: KICK_SC.release, amount: KICK_SC.amount },
     trigSc: {
       release: TRIG_SC.release,
@@ -15355,6 +16668,7 @@ function applyPreset(preset, { resetSources = true } = {}) {
   });
   if (resetSources) {
     resetGranularSources();
+    clearSamplerSample();
     // Honor the saved source modes so a project that never used the mic
     // doesn't reopen in mic mode (file data is layered back on by the
     // scope's clip restore). Legacy presets lack the field → mic default.
@@ -15368,6 +16682,17 @@ function applyPreset(preset, { resetSources = true } = {}) {
       if (!anyMicSourceSelected()) disconnectGranularInput({ stopTracks: true });
     }
   }
+
+  // Sampler retrigger mode is global; the per-loop params ride in the loops.
+  SMP.mode = SMP_MODES.some(([id]) => id === preset.sampler?.mode) ? preset.sampler.mode : 'loop';
+  SMP.warp.mode = SMP_WARP_MODES.some(([id]) => id === preset.sampler?.warp)
+    ? preset.sampler.warp
+    : 'off';
+  SMP.warp.bpm =
+    typeof preset.sampler?.bpm === 'number' && preset.sampler.bpm > 0
+      ? clamp(preset.sampler.bpm, 20, 400)
+      : 0;
+  SMP.warp.snap = preset.sampler?.snap !== false;
 
   if (preset.gen3) {
     // The chord (lockedMidis) is loop data now — legacy presets carry it here
@@ -15764,6 +17089,14 @@ function captureExportAudioBinary() {
       };
     }
   }
+  if (SMP.sample) {
+    audio.smp = {
+      mode: 'sampler',
+      channels: SMP.sample.channels.map(addSamples),
+      sampleRate: SMP.sample.sampleRate,
+      fileName: SMP.sample.fileName,
+    };
+  }
   const ms = MASTERING.source;
   if (ms?.left?.length) {
     audio.master = {
@@ -15923,6 +17256,16 @@ async function importProjectFile(file) {
         ? await readFloats(clip.samples)
         : base64ToFloats(clip.samples);
       await applyRestoredClip(genIdx, { ...clip, samples });
+    } catch (e) {}
+  }
+  const smpClip = payload.audio?.smp;
+  if (Array.isArray(smpClip?.channels) && smpClip.channels.length) {
+    try {
+      const channels = [];
+      for (const desc of smpClip.channels) {
+        channels.push(readFloats ? await readFloats(desc) : base64ToFloats(desc));
+      }
+      applyRestoredSamplerClip({ ...smpClip, channels });
     } catch (e) {}
   }
   const masterClip = payload.audio?.master;
@@ -16947,6 +18290,8 @@ function stop() {
   GEN3.nodes = null;
   stopGen4Sequencer();
   GEN4.nodes = null;
+  SMP.nodes = null;
+  SMP.voice = null;
   disconnectGranularInput({ stopTracks: true });
   if (engine.ctx) engine.ctx.close();
   engine.ctx = engine.node = engine.master = null;

@@ -78,10 +78,50 @@ stored in IndexedDB per project (and for the autosave session), and reload back
 into the granulators — a frozen take stays frozen across reloads. The live
 unfrozen mic buffer is transient by nature and is not saved.
 
+## Sampler (Gen 5)
+
+Gen 5 plays one loaded `.wav` (drop it on the panel or **Load…**) from the
+transport rather than a step grid. Its playback params — start, end, gain,
+pitch, attack, release, plus the **ON**, **LOOP** (repeat the slice until the
+next trigger) and **REV** switches — live in the loop, like the Gen 3 sound,
+so each loop can play a different slice; right-click a knob to copy its value
+to the other loops. The retrigger mode is global:
+
+- **Loop** fires the slice at the start of every pattern cycle (every block
+  repeat in Song mode). A loop with the sampler **ON** off silences it there.
+- **Song** fires once per song pass: on play, and again when the arrangement
+  cycles back to its first block.
+
+**Warp** fits the sample to the transport tempo. It needs the sample's own
+BPM: **auto** detects it from the audio (onset envelope → autocorrelation,
+octave picked nearest the transport tempo — **÷2 / ×2** when it lands an
+octave off) or type it in. The same analysis finds the sample's first beat
+and first downbeat; bar lines and beat ticks on the waveform are drawn from
+there. With **grid** on, Start and End snap to that beat grid (the readouts
+show the snapped value); with it off, Start *is* the downbeat and the bar
+lines hang off it, for placing a cue by eye. Right-click the waveform for
+the cue menu — *Start here*, *End here*, *End → sample end*. Wheel over the
+waveform zooms around the pointer (down to 20 ms across), shift-wheel or a
+left drag pans, **fit** shows the whole file; while zoomed, the Start and End
+knobs sweep only the visible window in millisecond steps. Modes:
+
+- **Pitch** (re-pitch) scales playback speed by transport ÷ sample BPM, so
+  pitch follows tempo like a turntable. Exact lock: a tempo change (and, while
+  playing, the Pitch knob) lands on the next 16th, at the same instant the
+  drum grid changes spacing, so the two never drift apart.
+- **Beats** slices the sample on 16ths and fires each slice on the transport's
+  16th grid at its original pitch. A faster transport cuts slices short; a
+  slower one lets each slice run on until the next.
+
+A new trigger fades the previous one out over its release. **Trig** auditions
+the edited loop's slice. The sample is saved with the project's audio (and
+the autosave) and travels inside exported `.grnsh` files; it has its own FX
+bus and mixer strip.
+
 ## Mixer
 
 The Mixer view provides a post-FX channel strip for each granular source, the
-synth, and the drums. Each strip has stereo metering, gain, pan, mute/solo, and
+synth, the drums, and the sampler. Each strip has stereo metering, gain, pan, mute/solo, and
 a bypassable five-band EQ at 100 Hz, 300 Hz, 1 kHz, 3.5 kHz, and 10 kHz. A
 master strip shows the combined output and limiter reduction. Each channel pan
 can be mapped to LFO 1/2, Seq 1, Kick SC, or Trig SC from its map dot or the
@@ -90,7 +130,7 @@ projects, project files, and undo/redo history.
 
 ## Ideas to extend later
 
-- File / drag-and-drop sample source sharing the same engine
+- Sampler: waveform playhead, drag the region on the waveform, velocity from LFO
 - Grain envelope shape selection (Hann / Tukey / triangular)
 - Per-loop scene recall of sound parameters (kit / FX snapshots)
 - Song-position export markers in recordings
