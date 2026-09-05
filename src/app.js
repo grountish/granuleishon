@@ -442,7 +442,11 @@ function restoreAutosave() {
 // data), captured a beat after each user gesture. Source audio clips are not
 // part of the snapshot, so undo never blanks a loaded file or frozen take.
 
-const HISTORY_LIMIT = 100;
+// Whole-workspace snapshots are intentionally shallow in count and bounded
+// in bytes. Patterns make them much larger than ordinary command histories;
+// audio is excluded, but 100 large projects could still waste tens of MB.
+const HISTORY_LIMIT = 30;
+const HISTORY_BYTE_LIMIT = 8 * 1024 * 1024;
 const HISTORY_DEBOUNCE_MS = 400;
 const HISTORY = { stack: [], index: -1, timer: null, applying: false };
 
@@ -454,7 +458,13 @@ function historyCaptureNow() {
   if (snap === HISTORY.stack[HISTORY.index]) return;
   HISTORY.stack.length = HISTORY.index + 1; // a new edit clears the redo tail
   HISTORY.stack.push(snap);
-  if (HISTORY.stack.length > HISTORY_LIMIT) HISTORY.stack.shift();
+  let approximateBytes = HISTORY.stack.reduce((sum, entry) => sum + entry.length * 2, 0);
+  while (
+    HISTORY.stack.length > 1 &&
+    (HISTORY.stack.length > HISTORY_LIMIT || approximateBytes > HISTORY_BYTE_LIMIT)
+  ) {
+    approximateBytes -= HISTORY.stack.shift().length * 2;
+  }
   HISTORY.index = HISTORY.stack.length - 1;
   refreshHistoryButtons();
 }
