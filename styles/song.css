@@ -283,13 +283,6 @@
   color: var(--accent-fx);
 }
 
-.song-card-repeats {
-  margin-left: auto;
-  padding: 2px 6px;
-  font-size: 8px;
-  color: var(--muted);
-}
-
 .song-card-move,
 .song-card-cue,
 .song-card-remove {

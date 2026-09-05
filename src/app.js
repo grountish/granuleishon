@@ -11161,7 +11161,70 @@ function appendSongEntryControls(container, entry, refresh) {
   refreshJumpDisabled();
 }
 
-// ── Song block context menu (cycles / remove) ──
+// Cycles — how many passes the block plays before the song moves on. Presets
+// plus a free number; refresh(false) while typing so a card hosting this row
+// is not rebuilt under the caret, refresh(true) once the value is committed.
+function appendSongCyclesControls(container, entry, refresh) {
+  const title = document.createElement('div');
+  title.className = 'song-block-menu-title';
+  title.textContent = 'cycles';
+  container.appendChild(title);
+
+  const customInput = document.createElement('input');
+  customInput.type = 'number';
+  customInput.min = '1';
+  customInput.max = '64';
+  customInput.step = '1';
+  customInput.value = String(entry.repeats);
+
+  const presets = document.createElement('div');
+  presets.className = 'song-block-menu-presets';
+  const presetBtns = SONG_REPEAT_CYCLE.map((n) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'song-block-menu-preset' + (entry.repeats === n ? ' active' : '');
+    b.textContent = `×${n}`;
+    b.title = `Play this block ${n} time${n > 1 ? 's' : ''}`;
+    b.addEventListener('click', () => {
+      entry.repeats = n;
+      customInput.value = String(n);
+      syncActive();
+      refresh(true);
+    });
+    presets.appendChild(b);
+    return b;
+  });
+  const syncActive = () =>
+    presetBtns.forEach((b, i) =>
+      b.classList.toggle('active', SONG_REPEAT_CYCLE[i] === entry.repeats),
+    );
+  container.appendChild(presets);
+
+  const customRow = document.createElement('div');
+  customRow.className = 'song-block-menu-custom';
+  const customLabel = document.createElement('span');
+  customLabel.textContent = 'custom';
+  customInput.addEventListener('input', () => {
+    const n = Number.parseInt(customInput.value, 10);
+    if (!Number.isFinite(n)) return;
+    entry.repeats = clamp(n, 1, 64);
+    syncActive();
+    refresh(false);
+  });
+  customInput.addEventListener('change', () => {
+    customInput.value = String(entry.repeats);
+    refresh(true);
+  });
+  customInput.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter' || e.key === 'Escape') customInput.blur();
+  });
+  customRow.append(customLabel, customInput);
+  container.appendChild(customRow);
+}
+
+// ── Song block context menu — the strip's editor. The song view has no
+// menu: its center card carries every control. ──
 
 let songBlockMenuEl = null;
 
@@ -11212,50 +11275,10 @@ function openSongBlockMenu(entryId, x, y) {
 
   const title = document.createElement('div');
   title.className = 'song-block-menu-title';
-  title.textContent = `${loop?.name ?? '?'} · cycles`;
+  title.textContent = loop?.name ?? '?';
   menu.appendChild(title);
 
-  const presets = document.createElement('div');
-  presets.className = 'song-block-menu-presets';
-  SONG_REPEAT_CYCLE.forEach((n) => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'song-block-menu-preset' + (entry.repeats === n ? ' active' : '');
-    btn.dataset.n = String(n);
-    btn.textContent = `×${n}`;
-    btn.addEventListener('click', () => {
-      setSongEntryRepeats(entry.id, n);
-      closeSongBlockMenu();
-    });
-    presets.appendChild(btn);
-  });
-  menu.appendChild(presets);
-
-  const customRow = document.createElement('div');
-  customRow.className = 'song-block-menu-custom';
-  const customLabel = document.createElement('span');
-  customLabel.textContent = 'custom';
-  const customInput = document.createElement('input');
-  customInput.type = 'number';
-  customInput.min = '1';
-  customInput.max = '64';
-  customInput.step = '1';
-  customInput.value = String(entry.repeats);
-  customInput.addEventListener('input', () => {
-    const n = Number.parseInt(customInput.value, 10);
-    if (!Number.isFinite(n)) return;
-    setSongEntryRepeats(entry.id, n);
-    presets
-      .querySelectorAll('.song-block-menu-preset')
-      .forEach((b) => b.classList.toggle('active', Number(b.dataset.n) === entry.repeats));
-  });
-  customInput.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter' || e.key === 'Escape') closeSongBlockMenu();
-  });
-  customRow.append(customLabel, customInput);
-  menu.appendChild(customRow);
-
+  appendSongCyclesControls(menu, entry, () => renderSongLane());
   appendSongEntryControls(menu, entry, () => renderSongLane());
 
   const removeBtn = document.createElement('button');
@@ -11783,10 +11806,6 @@ function renderSongOrbit(container) {
       }
       setPanelView('front');
     });
-    g.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      openSongBlockMenu(entry.id, e.clientX, e.clientY);
-    });
     svg.appendChild(g);
     byId.set(entry.id, { g, angle });
   });
@@ -11901,23 +11920,6 @@ function buildSongCard(entry, idx) {
   const name = document.createElement('span');
   name.className = 'song-card-name';
   name.textContent = loop?.name ?? '?';
-  const repeats = document.createElement('button');
-  repeats.type = 'button';
-  repeats.className = 'song-card-repeats';
-  repeats.textContent = `×${entry.repeats}`;
-  repeats.title = 'Repeats — click to cycle, ⌥ scroll ±1';
-  repeats.addEventListener('click', () => {
-    const p = SONG_REPEAT_CYCLE.indexOf(entry.repeats);
-    setSongEntryRepeats(
-      entry.id,
-      p >= 0 ? SONG_REPEAT_CYCLE[(p + 1) % SONG_REPEAT_CYCLE.length] : SONG_REPEAT_CYCLE[0],
-    );
-  });
-  repeats.addEventListener('wheel', (e) => {
-    if (!e.altKey) return;
-    e.preventDefault();
-    setSongEntryRepeats(entry.id, entry.repeats - Math.sign(e.deltaY));
-  });
   const moveL = document.createElement('button');
   moveL.type = 'button';
   moveL.className = 'song-card-move';
@@ -11944,16 +11946,18 @@ function buildSongCard(entry, idx) {
   rmBtn.textContent = '✕';
   rmBtn.title = 'Remove from song';
   rmBtn.addEventListener('click', () => removeSongEntry(entry.id));
-  head.append(pos, name, moveL, moveR, repeats, cueBtn, rmBtn);
+  head.append(pos, name, moveL, moveR, cueBtn, rmBtn);
   card.appendChild(head);
 
   const body = document.createElement('div');
   body.className = 'song-card-body';
-  appendSongEntryControls(body, entry, (structural) => {
+  const refresh = (structural) => {
     songExpandedSyncMuted = !structural;
     renderSongLane();
     songExpandedSyncMuted = false;
-  });
+  };
+  appendSongCyclesControls(body, entry, refresh);
+  appendSongEntryControls(body, entry, refresh);
   card.appendChild(body);
 
   songCardEls.set(entry.id, card);
