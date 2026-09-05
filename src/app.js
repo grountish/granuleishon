@@ -5290,7 +5290,27 @@ function applyGen3VoicePitch(voice, effective = getEffectiveGen3Params()) {
   }
 }
 
-function applyGen3Envelope(envelope, ov = null, sound = getGen3SoundState()) {
+const GEN3_EQUAL_POWER_CURVE_POINTS = 65;
+const GEN3_EQUAL_POWER_FADE_IN = Float32Array.from(
+  { length: GEN3_EQUAL_POWER_CURVE_POINTS },
+  (_, i) => Math.sin((i / (GEN3_EQUAL_POWER_CURVE_POINTS - 1)) * Math.PI * 0.5),
+);
+const GEN3_EQUAL_POWER_FADE_OUT = Float32Array.from(
+  { length: GEN3_EQUAL_POWER_CURVE_POINTS },
+  (_, i) => Math.cos((i / (GEN3_EQUAL_POWER_CURVE_POINTS - 1)) * Math.PI * 0.5),
+);
+
+function scaleGen3FadeCurve(curve, scale) {
+  if (scale === 1) return curve;
+  return Float32Array.from(curve, (value) => value * scale);
+}
+
+function applyGen3Envelope(
+  envelope,
+  ov = null,
+  sound = getGen3SoundState(),
+  { equalPowerAttack = false } = {},
+) {
   const now = engine.ctx.currentTime;
   const effective = getEffectiveGen3Params(sound);
   const attack = ov?.attack ?? sound.attack;
@@ -5305,26 +5325,52 @@ function applyGen3Envelope(envelope, ov = null, sound = getGen3SoundState()) {
   envelope.gain.cancelScheduledValues(now);
   envelope.gain.setValueAtTime(0, now);
 
-  if (attack > 0) envelope.gain.linearRampToValueAtTime(scale, attackEnd);
+  if (attack > 0 && equalPowerAttack) {
+    envelope.gain.setValueCurveAtTime(
+      scaleGen3FadeCurve(GEN3_EQUAL_POWER_FADE_IN, scale),
+      now,
+      attack,
+    );
+  } else if (attack > 0) envelope.gain.linearRampToValueAtTime(scale, attackEnd);
   else envelope.gain.setValueAtTime(scale, now);
 
   if (decay > 0) envelope.gain.linearRampToValueAtTime(sustain * scale, decayEnd);
   else envelope.gain.setValueAtTime(sustain * scale, attackEnd);
+
+  return { startedAt: now, attack, decay, sustain, scale, equalPowerAttack };
 }
 
-function createGen3Voice(freq, ov = null, sound = getGen3SoundState()) {
-  if (!GEN3.nodes) return { source: null, envelope: null, releaseTimer: null };
+function createGen3Voice(freq, ov = null, sound = getGen3SoundState(), envelopeOptions = {}) {
+  if (!GEN3.nodes) {
+    return { source: null, envelope: null, envelopeState: null, releaseTimer: null };
+  }
   const source = createGen3SourceNode(freq, ov, sound);
   const envelope = engine.ctx.createGain();
   envelope.gain.setValueAtTime(0, engine.ctx.currentTime);
   source.connect(envelope);
   envelope.connect(GEN3.nodes.gain);
-  applyGen3Envelope(envelope, ov, sound);
+  const envelopeState = applyGen3Envelope(envelope, ov, sound, envelopeOptions);
   source.start();
-  return { source, envelope, releaseTimer: null };
+  return { source, envelope, envelopeState, releaseTimer: null };
 }
 
-function releaseGen3Voice(voice) {
+function getGen3EnvelopeLevel(voice, time) {
+  const state = voice?.envelopeState;
+  if (!state) return Math.max(0, voice?.envelope?.gain?.value || 0);
+  const elapsed = Math.max(0, time - state.startedAt);
+  if (state.attack > 0 && elapsed < state.attack) {
+    const progress = elapsed / state.attack;
+    const shaped = state.equalPowerAttack ? Math.sin(progress * Math.PI * 0.5) : progress;
+    return state.scale * shaped;
+  }
+  if (state.decay > 0 && elapsed < state.attack + state.decay) {
+    const progress = (elapsed - state.attack) / state.decay;
+    return state.scale + (state.sustain * state.scale - state.scale) * progress;
+  }
+  return state.sustain * state.scale;
+}
+
+function releaseGen3Voice(voice, { equalPowerRelease = false } = {}) {
   if (!voice?.source || !voice.envelope || !engine.ctx) {
     stopGen3Voice(voice);
     return;
@@ -5333,16 +5379,23 @@ function releaseGen3Voice(voice) {
   const now = engine.ctx.currentTime;
   const release = voice.ov?.release ?? voice.sound?.release ?? GEN3.release;
   const stopAfterMs = Math.max(0, release * 1000) + 60;
+  const heldLevel = getGen3EnvelopeLevel(voice, now);
 
   clearGen3ReleaseTimer(voice);
   if (voice.envelope.gain.cancelAndHoldAtTime) {
     voice.envelope.gain.cancelAndHoldAtTime(now);
   } else {
     voice.envelope.gain.cancelScheduledValues(now);
-    voice.envelope.gain.setValueAtTime(Math.max(voice.envelope.gain.value, 0.0001), now);
   }
+  voice.envelope.gain.setValueAtTime(heldLevel, now);
 
-  if (release > 0) voice.envelope.gain.linearRampToValueAtTime(0, now + release);
+  if (release > 0 && equalPowerRelease) {
+    voice.envelope.gain.setValueCurveAtTime(
+      scaleGen3FadeCurve(GEN3_EQUAL_POWER_FADE_OUT, heldLevel),
+      now,
+      release,
+    );
+  } else if (release > 0) voice.envelope.gain.linearRampToValueAtTime(0, now + release);
   else voice.envelope.gain.setValueAtTime(0, now);
 
   GEN3.releasingVoices.add(voice);
@@ -5353,9 +5406,22 @@ function releaseGen3Voice(voice) {
   }, stopAfterMs);
 }
 
-function addGen3Note(midi, freq, ov = null, soundOverride = null, autoReleaseMs = null) {
+function addGen3Note(
+  midi,
+  freq,
+  ov = null,
+  soundOverride = null,
+  autoReleaseMs = null,
+  envelopeOptions = {},
+) {
   const sound = { ...(soundOverride || getGen3SoundState()) };
-  const entry = { freq, ov, sound, autoReleaseTimer: null, ...createGen3Voice(freq, ov, sound) };
+  const entry = {
+    freq,
+    ov,
+    sound,
+    autoReleaseTimer: null,
+    ...createGen3Voice(freq, ov, sound, envelopeOptions),
+  };
   GEN3.activeNotes.set(midi, entry);
   setGen3NoteActive(midi, true);
   if (Number.isFinite(autoReleaseMs)) {
@@ -5374,7 +5440,7 @@ function addGen3Note(midi, freq, ov = null, soundOverride = null, autoReleaseMs 
   return entry;
 }
 
-function removeGen3Note(midi) {
+function removeGen3Note(midi, releaseOptions = {}) {
   const entry = GEN3.activeNotes.get(midi);
   GEN3.activeNotes.delete(midi);
   setGen3NoteActive(midi, false);
@@ -5383,18 +5449,24 @@ function removeGen3Note(midi) {
       clearTimeout(entry.autoReleaseTimer);
       entry.autoReleaseTimer = null;
     }
-    releaseGen3Voice(entry);
+    releaseGen3Voice(entry, releaseOptions);
   }
   emit('state');
 }
 
-function syncGen3SustainChord(targetMidis) {
+function syncGen3SustainChord(targetMidis, { retrigger = false, equalPower = false } = {}) {
   if (!getGen3SoundState().sustainMode || !GEN3.nodes) return;
   [...GEN3.activeNotes.keys()].forEach((midi) => {
-    if (!targetMidis.has(midi)) removeGen3Note(midi);
+    if (retrigger || !targetMidis.has(midi)) {
+      removeGen3Note(midi, { equalPowerRelease: equalPower });
+    }
   });
   targetMidis.forEach((midi) => {
-    if (!GEN3.activeNotes.has(midi)) addGen3Note(midi, midiToFreqHz(midi));
+    if (!GEN3.activeNotes.has(midi)) {
+      addGen3Note(midi, midiToFreqHz(midi), null, null, null, {
+        equalPowerAttack: equalPower,
+      });
+    }
   });
 }
 
@@ -10465,13 +10537,18 @@ function updateSongPlayhead(audible) {
     }
     const audibleLoop = getAudibleLoop();
     if (audibleLoop) {
-      applyGen3Modulation();
       if (audibleLoop.gen3.sustainMode) {
-        syncGen3SustainChord(audibleLoop.gen3.lockedMidis);
-        if (GEN3.activeNotes.size > 0) restartAllGen3Notes();
+        // A new song block owns a new sustained chord: let every outgoing
+        // voice finish its release while the incoming chord begins its attack.
+        // Equal-power curves avoid the midpoint dip of two linear envelopes.
+        syncGen3SustainChord(audibleLoop.gen3.lockedMidis, {
+          retrigger: true,
+          equalPower: true,
+        });
       } else if (GEN3.activeNotes.size > 0) {
         stopAllGen3Notes();
       }
+      applyGen3Modulation();
     }
     // The block change may have moved the sound onto or off the edited loop.
     refreshGen3KeyStates();
