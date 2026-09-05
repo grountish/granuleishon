@@ -11839,7 +11839,136 @@ function renderSongOrbit(container) {
   const center = document.createElement('div');
   center.className = 'song-orbit-center';
   stage.appendChild(center);
+  renderSongNotes(stage);
+  // Double-click on empty space drops a note there; blocks, the + node, the
+  // card and existing notes own their own double-clicks.
+  stage.addEventListener('dblclick', (e) => {
+    if (e.target.closest('.song-orbit-node, .song-orbit-add, .song-orbit-center, .song-notes')) {
+      return;
+    }
+    const rect = stage.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    addSongNote((e.clientX - rect.left) / rect.width, (e.clientY - rect.top) / rect.height);
+  });
   container.appendChild(stage);
+}
+
+// ── Song notes ── sticky annotations anywhere on the orbit stage. Pure
+// paper: no playback meaning, saved with the project, undoable like the rest.
+
+function renderSongNotes(stage) {
+  const layer = document.createElement('div');
+  layer.className = 'song-notes';
+  SONG.notes.forEach((note) => layer.appendChild(buildSongNote(note, stage)));
+  stage.appendChild(layer);
+  return layer;
+}
+
+function refreshSongNotes({ focusLast = false } = {}) {
+  const stage = songExpandedEl?.querySelector('.song-orbit-stage');
+  if (!stage) return;
+  stage.querySelector('.song-notes')?.remove();
+  const layer = renderSongNotes(stage);
+  if (focusLast) layer.lastElementChild?.querySelector('.song-note-text')?.focus();
+}
+
+function addSongNote(x = null, y = null) {
+  // Header button: stagger fresh notes down the top-left so they never
+  // land exactly on top of each other.
+  const k = SONG.notes.length % 6;
+  const note = {
+    x: clamp(x ?? 0.03 + k * 0.025, 0, 0.9),
+    y: clamp(y ?? 0.04 + k * 0.05, 0, 0.9),
+    text: '',
+  };
+  SONG.notes.push(note);
+  refreshSongNotes({ focusLast: true });
+  scheduleHistoryCapture();
+}
+
+function removeSongNote(note) {
+  const i = SONG.notes.indexOf(note);
+  if (i < 0) return;
+  SONG.notes.splice(i, 1);
+  refreshSongNotes();
+  scheduleHistoryCapture();
+}
+
+function buildSongNote(note, stage) {
+  const el = document.createElement('div');
+  el.className = 'song-note';
+  const place = () => {
+    el.style.left = `${note.x * 100}%`;
+    el.style.top = `${note.y * 100}%`;
+  };
+  place();
+
+  const grip = document.createElement('div');
+  grip.className = 'song-note-grip';
+  const gripLabel = document.createElement('span');
+  gripLabel.textContent = 'note';
+  const rm = document.createElement('button');
+  rm.type = 'button';
+  rm.className = 'song-note-remove';
+  rm.textContent = '✕';
+  rm.title = 'Delete note';
+  rm.addEventListener('click', () => removeSongNote(note));
+  grip.append(gripLabel, rm);
+
+  // Drag by the grip; the note follows the pointer as stage fractions and is
+  // kept fully inside the stage. The global pointerup history capture lands
+  // the move as one undo step.
+  grip.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target === rm) return;
+    e.preventDefault();
+    const rect = stage.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const offX = e.clientX - rect.left - note.x * rect.width;
+    const offY = e.clientY - rect.top - note.y * rect.height;
+    const maxX = Math.max(0, 1 - el.offsetWidth / rect.width);
+    const maxY = Math.max(0, 1 - el.offsetHeight / rect.height);
+    el.classList.add('dragging');
+    grip.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      note.x = clamp((ev.clientX - rect.left - offX) / rect.width, 0, maxX);
+      note.y = clamp((ev.clientY - rect.top - offY) / rect.height, 0, maxY);
+      place();
+    };
+    const up = () => {
+      grip.removeEventListener('pointermove', move);
+      grip.removeEventListener('pointerup', up);
+      grip.removeEventListener('pointercancel', up);
+      el.classList.remove('dragging');
+    };
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', up);
+    grip.addEventListener('pointercancel', up);
+  });
+
+  const ta = document.createElement('textarea');
+  ta.className = 'song-note-text';
+  ta.value = note.text;
+  ta.placeholder = 'write…';
+  ta.rows = 2;
+  ta.spellcheck = false;
+  const fit = () => {
+    ta.style.height = 'auto';
+    ta.style.height = `${ta.scrollHeight}px`;
+  };
+  ta.addEventListener('input', () => {
+    note.text = ta.value;
+    fit();
+  });
+  // Keys belong to the note: no panel shortcuts, and Esc leaves the field
+  // instead of leaving the song view.
+  ta.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') ta.blur();
+  });
+  requestAnimationFrame(fit);
+
+  el.append(grip, ta);
+  return el;
 }
 
 // Detail: the selected block's controls live in the circle's center — the
@@ -11851,11 +11980,21 @@ function renderSongOrbitDetail() {
   const idx = SONG.entries.findIndex((e) => e.id === songOrbitSelectedId);
   if (idx < 0) {
     pane.classList.add('idle');
-    const hint = document.createElement('span');
+    const hint = document.createElement('div');
     hint.className = 'song-empty-hint';
-    hint.textContent = SONG.entries.length
-      ? 'click a block to edit · drag to reorder · double-click opens its loop'
-      : 'empty — press + on the circle to add loops';
+    const tips = SONG.entries.length
+      ? [
+          'click a block to edit',
+          'drag to reorder',
+          'double-click opens its loop',
+          'double-click empty space for a note',
+        ]
+      : ['empty — press + on the circle to add loops'];
+    tips.forEach((tip) => {
+      const line = document.createElement('div');
+      line.textContent = tip;
+      hint.appendChild(line);
+    });
     pane.appendChild(hint);
     return;
   }
@@ -12010,7 +12149,13 @@ function renderSongExpanded() {
     SONG.follow = !SONG.follow;
     renderSongLane();
   });
-  optRow.append(cycleBtn, followBtn);
+  const noteBtn = document.createElement('button');
+  noteBtn.type = 'button';
+  noteBtn.className = 'song-opt-btn';
+  noteBtn.textContent = '+ note';
+  noteBtn.title = 'Add a sticky note to the song view (or double-click empty space)';
+  noteBtn.addEventListener('click', () => addSongNote());
+  optRow.append(cycleBtn, followBtn, noteBtn);
   header.appendChild(optRow);
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
@@ -16619,6 +16764,7 @@ function capturePreset() {
       loop: SONG.loop,
       follow: SONG.follow,
       mode: PLAY.mode,
+      notes: SONG.notes.map(({ x, y, text }) => ({ x, y, text })),
     },
     fxByBus: JSON.parse(JSON.stringify(fxStates)),
     fxOrderByBus: JSON.parse(JSON.stringify(fxOrders)),
@@ -16861,6 +17007,13 @@ function applyPreset(preset, { resetSources = true } = {}) {
   }
   SONG.loop = preset.song?.loop !== false;
   SONG.follow = preset.song?.follow !== false;
+  SONG.notes = (Array.isArray(preset.song?.notes) ? preset.song.notes : [])
+    .filter((n) => n && typeof n.text === 'string')
+    .map((n) => ({
+      x: clamp(Number.isFinite(n.x) ? n.x : 0, 0, 1),
+      y: clamp(Number.isFinite(n.y) ? n.y : 0, 0, 1),
+      text: n.text,
+    }));
   SONG.runtime.clear();
   SONG.lastJump = null;
   SONG.cursor.entryIdx = 0;

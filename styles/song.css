@@ -329,6 +329,82 @@
   height: 100%;
 }
 
+/* ── Song notes ── sticky annotations over the stage. The layer itself is
+   click-through so the orbit and card underneath keep working. */
+.song-notes {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.song-note {
+  position: absolute;
+  width: 168px;
+  display: flex;
+  flex-direction: column;
+  pointer-events: auto;
+  background: color-mix(in srgb, #d9b24c 16%, var(--surface));
+  border: 1px solid color-mix(in srgb, #d9b24c 45%, var(--border));
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+
+.song-note.dragging {
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+}
+
+.song-note-grip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 2px 2px 7px;
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, #d9b24c 70%, var(--muted));
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.song-note.dragging .song-note-grip {
+  cursor: grabbing;
+}
+
+.song-note-remove {
+  padding: 0 5px;
+  font-size: 8px;
+  line-height: 14px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-radius: 3px;
+}
+
+.song-note-remove:hover {
+  color: #e05858;
+}
+
+.song-note-text {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 40px;
+  padding: 3px 7px 7px;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.4;
+  overflow: hidden;
+}
+
+.song-note-text::placeholder {
+  color: var(--muted);
+}
+
 .song-orbit-rim {
   fill: none;
   stroke: var(--border);
@@ -586,11 +662,12 @@
 }
 
 .song-empty-hint {
-  font-size: 8px;
+  font-size: 10px;
   color: var(--muted);
   letter-spacing: 0.05em;
   padding: 0 4px;
   white-space: nowrap;
+  line-height: 2;
 }
 
 /* ── Song block context menu ── */

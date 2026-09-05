@@ -26,6 +26,9 @@ export const SONG = {
   entryCounter: 0,
   runtime: new Map(), // entry id → { visits, jumpsTaken }, playback counters
   lastJump: null, // { from, to } entry ids of the latest jump taken (lane viz)
+  // Free-floating annotations on the song view: [{ x, y, text }], x/y as
+  // fractions of the orbit stage so they keep their spot at any size.
+  notes: [],
 };
 
 export const SONG_REPEAT_CYCLE = [1, 2, 4, 8, 16];
