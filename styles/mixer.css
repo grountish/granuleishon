@@ -716,6 +716,12 @@
   filter: blur(4px);
 }
 
+.back-wire.inverted,
+.back-wire-shadow.inverted,
+.back-wire-glow.inverted {
+  stroke-dasharray: 10 7;
+}
+
 .back-wire.src-0 {
   --route-color: #56d6f5;
   stroke: #56d6f5;
@@ -1059,7 +1065,7 @@
 .back-param-row {
   position: relative;
   display: grid;
-  grid-template-columns: 16px 1fr auto;
+  grid-template-columns: 16px minmax(54px, 1fr) auto auto;
   gap: 10px;
   align-items: center;
   min-height: 16px;
@@ -1102,7 +1108,8 @@
 }
 
 .back-param-row.mapped .back-param-label,
-.back-param-row.mapped .back-param-value {
+.back-param-row.mapped .back-param-value,
+.back-param-row.mapped .back-route-amount {
   color: #d7e0d6;
 }
 
@@ -1137,6 +1144,14 @@
   font-size: 8px;
   color: #7d897f;
   font-variant-numeric: tabular-nums;
+}
+
+.back-route-amount {
+  min-width: 27px;
+  color: #66716a;
+  font-size: 7px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .patch-jack {

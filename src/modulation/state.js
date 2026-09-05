@@ -48,6 +48,7 @@ export const BACK_PANEL = {
   targetJacks: new Map(),
   targetRows: new Map(),
   targetValues: new Map(),
+  targetAmounts: new Map(),
   routeLayer: null,
   patchfieldEl: null,
   built: false,

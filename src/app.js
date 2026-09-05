@@ -2179,14 +2179,14 @@ function getEffectiveGeneratorParams(genIdx, base = state[genIdx]) {
   if (effective.densitySync)
     effective.density = 1 / beatsToSeconds(getGrainSyncStep(effective.densitySyncIndex).beats);
   if (lfoMappings.size > 0) {
-    lfoMappings.forEach(({ genIdx: gi, key, sourceIdx }) => {
+    lfoMappings.forEach(({ genIdx: gi, key, sourceIdx, amount }) => {
       if (gi !== genIdx) return;
       const paramDef = getParamBounds(genIdx, key);
       const scaled = getModSourceScaledValue(sourceIdx);
       if (!paramDef || scaled === null) return;
       effective[key] = Math.max(
         paramDef.min,
-        Math.min(paramDef.max, effective[key] + getModOffset(sourceIdx, scaled, paramDef)),
+        Math.min(paramDef.max, effective[key] + getModOffset(sourceIdx, scaled, paramDef, amount)),
       );
     });
   }
@@ -2228,26 +2228,27 @@ function getEffectiveGen3Params(base = getGen3SoundState()) {
     sustain: base.sustain,
   };
   if (lfoMappings.size > 0) {
-    lfoMappings.forEach(({ genIdx, key, sourceIdx }) => {
+    lfoMappings.forEach(({ genIdx, key, sourceIdx, amount }) => {
       if (genIdx !== 2) return;
       const paramDef = getGen3ParamBounds(key);
       const scaled = getModSourceScaledValue(sourceIdx);
       if (!paramDef || scaled === null) return;
       effective[key] = Math.max(
         paramDef.min,
-        Math.min(paramDef.max, effective[key] + getModOffset(sourceIdx, scaled, paramDef)),
+        Math.min(paramDef.max, effective[key] + getModOffset(sourceIdx, scaled, paramDef, amount)),
       );
     });
   }
   return effective;
 }
 
-// Offset a mapping contributes: sources are bipolar −1..1 over half the param
-// range — except SEQ 1 into a semitone param, where the seq's 1/12 levels map
-// one-to-one to semitones (a +7 step moves the pitch a fifth).
-function getModOffset(sourceIdx, scaled, paramDef) {
-  if (sourceIdx === 2 && paramDef?.unit === 'st') return Math.round(scaled * 12);
-  return scaled * ((paramDef.max - paramDef.min) * 0.5);
+// Each cable scales and can invert its source independently. An amount of 1
+// preserves the old mapping depth: bipolar full scale spans half the target's
+// range either side of its base value. Seq → semitones remains quantized.
+function getModOffset(sourceIdx, scaled, paramDef, amount = 1) {
+  const depth = Number.isFinite(amount) ? clamp(amount, -1, 1) : 1;
+  if (sourceIdx === 2 && paramDef?.unit === 'st') return Math.round(scaled * 12 * depth);
+  return scaled * depth * ((paramDef.max - paramDef.min) * 0.5);
 }
 
 function getModSourceScaledValue(sourceIdx) {
@@ -2314,7 +2315,10 @@ function getEffectiveFxValue(id, key, busId = BUS.active) {
   if (scaled === null) return base;
   return Math.max(
     paramDef.min,
-    Math.min(paramDef.max, base + getModOffset(mapping.sourceIdx, scaled, paramDef)),
+    Math.min(
+      paramDef.max,
+      base + getModOffset(mapping.sourceIdx, scaled, paramDef, mapping.amount),
+    ),
   );
 }
 
@@ -2327,7 +2331,7 @@ function getEffectiveMixerPan(busId) {
   const scaled = getModSourceScaledValue(mapping.sourceIdx);
   if (scaled === null) return base;
   return clamp(
-    base + getModOffset(mapping.sourceIdx, scaled, MIXER_PAN_PARAM),
+    base + getModOffset(mapping.sourceIdx, scaled, MIXER_PAN_PARAM, mapping.amount),
     MIXER_PAN_PARAM.min,
     MIXER_PAN_PARAM.max,
   );
@@ -2597,33 +2601,33 @@ function setLFOLedState(led, sourceIdx) {
   led.classList.remove('active', 'lfo-1', 'lfo-2', 'lfo-seq', 'lfo-sc', 'lfo-trig');
   led.dataset.lfo = '';
   led.textContent = '';
-  led.title = 'Map: unset';
+  led.title = 'Map: unset · click cycles · right-click for source and cable depth';
   if (sourceIdx === null) return;
   if (sourceIdx === 2) {
     led.classList.add('active', 'lfo-seq');
     led.dataset.lfo = 'S';
     led.textContent = 'S';
-    led.title = 'Map: Seq';
+    led.title = 'Map: Seq · right-click for source and cable depth';
     return;
   }
   if (sourceIdx === 3) {
     led.classList.add('active', 'lfo-sc');
     led.dataset.lfo = 'K';
     led.textContent = 'K';
-    led.title = 'Map: Kick SC';
+    led.title = 'Map: Kick SC · right-click for source and cable depth';
     return;
   }
   if (sourceIdx === 4) {
     led.classList.add('active', 'lfo-trig');
     led.dataset.lfo = 'T';
     led.textContent = 'T';
-    led.title = 'Map: Trig SC';
+    led.title = 'Map: Trig SC · right-click for source and cable depth';
     return;
   }
   led.classList.add('active', `lfo-${sourceIdx + 1}`);
   led.dataset.lfo = `${sourceIdx + 1}`;
   led.textContent = `${sourceIdx + 1}`;
-  led.title = `Map: LFO ${sourceIdx + 1}`;
+  led.title = `Map: LFO ${sourceIdx + 1} · right-click for source and cable depth`;
 }
 
 function makeControlRow(p, initialValue, onInput, lfoTarget = null, contextTarget = lfoTarget) {
@@ -2679,7 +2683,7 @@ function makeControlRow(p, initialValue, onInput, lfoTarget = null, contextTarge
     led.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      openModSourceMenu(lfoTarget, led, e.clientX, e.clientY);
+      openModSourceMenu({ ...lfoTarget, label: p.label }, led, e.clientX, e.clientY);
     });
     row.append(knob, led, label, valueEl);
   } else {
@@ -6139,13 +6143,18 @@ function applyGen4KitPreset(presetIndex) {
   // (clean slate, like the pattern). Non-drum routes are left alone.
   [...lfoMappings.keys()].filter((k) => k.startsWith('4:')).forEach((k) => lfoMappings.delete(k));
   const KIT_MOD_SOURCES = { lfo1: 0, lfo2: 1, seq: 2, kick: 3, trig: 4 };
-  (kit.mods || []).forEach(({ target, source }) => {
+  (kit.mods || []).forEach(({ target, source, amount = 1 }) => {
     const sourceIdx = KIT_MOD_SOURCES[source];
     const match = typeof target === 'string' && target.match(/^4:([a-z]+):(\w+)$/);
     if (sourceIdx === undefined || !match) return;
     const def = GEN4_DEFS.find((d) => d.id === match[1]);
     if (!def?.paramDefs.some((p) => p.key === match[2])) return;
-    lfoMappings.set(target, { genIdx: 4, key: `${match[1]}:${match[2]}`, sourceIdx });
+    lfoMappings.set(target, {
+      genIdx: 4,
+      key: `${match[1]}:${match[2]}`,
+      sourceIdx,
+      amount: clamp(amount, -1, 1),
+    });
   });
   rebuildBackWireSVG();
   refreshLFOMappingUI();
@@ -6598,7 +6607,10 @@ function getEffectiveGen4Params(ci, locks = null) {
     if (scaled === null) return;
     effective[pd.key] = Math.max(
       pd.min,
-      Math.min(pd.max, effective[pd.key] + getModOffset(mapping.sourceIdx, scaled, pd)),
+      Math.min(
+        pd.max,
+        effective[pd.key] + getModOffset(mapping.sourceIdx, scaled, pd, mapping.amount),
+      ),
     );
   });
   return effective;
@@ -12537,7 +12549,7 @@ function cycleLFOMap(genIdx, key) {
   const mapping = lfoMappings.get(mapKey);
   let nextSourceIdx = null;
   if (!mapping) {
-    lfoMappings.set(mapKey, { genIdx, key, sourceIdx: 0 });
+    lfoMappings.set(mapKey, { genIdx, key, sourceIdx: 0, amount: 1 });
     nextSourceIdx = 0;
   } else if (mapping.sourceIdx === 0) {
     mapping.sourceIdx = 1;
@@ -12569,7 +12581,15 @@ function cycleLFOMap(genIdx, key) {
 function setLFOMapSource(genIdx, key, sourceIdx) {
   const mapKey = `${genIdx}:${key}`;
   if (sourceIdx === null) lfoMappings.delete(mapKey);
-  else lfoMappings.set(mapKey, { genIdx, key, sourceIdx });
+  else {
+    const amount = lfoMappings.get(mapKey)?.amount;
+    lfoMappings.set(mapKey, {
+      genIdx,
+      key,
+      sourceIdx,
+      amount: Number.isFinite(amount) ? clamp(amount, -1, 1) : 1,
+    });
+  }
   if (genIdx === 2) applyGen3Modulation();
   else if (genIdx === 3) applyFxModulation();
   else if (genIdx === 4) applyGen4Modulation();
@@ -12580,6 +12600,22 @@ function setLFOMapSource(genIdx, key, sourceIdx) {
   refreshModulationVisuals();
   refreshMixerMappingUI();
   return sourceIdx;
+}
+
+function formatModAmount(amount) {
+  const percent = Math.round((Number.isFinite(amount) ? clamp(amount, -1, 1) : 1) * 100);
+  return `${percent > 0 ? '+' : ''}${percent}%`;
+}
+
+function setLFOMapAmount(genIdx, key, amount) {
+  const mapping = lfoMappings.get(`${genIdx}:${key}`);
+  if (!mapping) return null;
+  mapping.amount = clamp(Number.isFinite(amount) ? amount : 1, -1, 1);
+  applyModulationTargetUpdate(genIdx);
+  rebuildBackWireSVG();
+  refreshModulationVisuals();
+  emit('state');
+  return mapping.amount;
 }
 
 // ── Knob context menu ──
@@ -12714,7 +12750,8 @@ function getModSourceOptions() {
 function openModSourceMenu(target, led, x, y) {
   closeKnobContextMenu();
   closeModSourceMenu();
-  const current = lfoMappings.get(`${target.genIdx}:${target.key}`)?.sourceIdx ?? null;
+  const mapKey = `${target.genIdx}:${target.key}`;
+  let current = lfoMappings.get(mapKey)?.sourceIdx ?? null;
 
   const menu = document.createElement('div');
   menu.className = 'mod-source-menu';
@@ -12722,9 +12759,12 @@ function openModSourceMenu(target, led, x, y) {
 
   const title = document.createElement('div');
   title.className = 'mod-source-menu-title';
-  title.textContent = 'Mod source';
+  title.textContent = target.label ? `Mod · ${target.label}` : 'Mod source';
   menu.appendChild(title);
 
+  const sourceButtons = [];
+  let depthInput = null;
+  let depthValue = null;
   getModSourceOptions().forEach((opt) => {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -12750,11 +12790,54 @@ function openModSourceMenu(target, led, x, y) {
     btn.append(dot, lbl);
     btn.addEventListener('click', () => {
       setLFOMapSource(target.genIdx, target.key, opt.idx);
-      setLFOLedState(led, opt.idx);
-      closeModSourceMenu();
+      current = opt.idx;
+      sourceButtons.forEach(({ button, sourceIdx }) => {
+        button.classList.toggle('active', sourceIdx === current);
+      });
+      if (led) setLFOLedState(led, opt.idx);
+      else refreshLFOMappingUI();
+      const mapping = lfoMappings.get(mapKey);
+      if (depthInput) {
+        depthInput.disabled = !mapping;
+        depthInput.value = `${mapping?.amount ?? 1}`;
+      }
+      if (depthValue) depthValue.textContent = formatModAmount(mapping?.amount ?? 1);
     });
+    sourceButtons.push({ button: btn, sourceIdx: opt.idx });
     menu.appendChild(btn);
   });
+
+  const depth = document.createElement('label');
+  depth.className = 'mod-depth-control';
+  const depthHeader = document.createElement('span');
+  depthHeader.className = 'mod-depth-header';
+  const depthLabel = document.createElement('span');
+  depthLabel.textContent = 'Cable depth';
+  depthValue = document.createElement('output');
+  const mapping = lfoMappings.get(mapKey);
+  depthValue.textContent = formatModAmount(mapping?.amount ?? 1);
+  depthHeader.append(depthLabel, depthValue);
+  depthInput = document.createElement('input');
+  depthInput.type = 'range';
+  depthInput.min = '-1';
+  depthInput.max = '1';
+  depthInput.step = '0.01';
+  depthInput.value = `${mapping?.amount ?? 1}`;
+  depthInput.disabled = !mapping;
+  depthInput.setAttribute('aria-label', 'Modulation cable depth and polarity');
+  depthInput.title = 'Negative values invert this cable · double-click to reset to +100%';
+  depthInput.addEventListener('input', () => {
+    const amount = setLFOMapAmount(target.genIdx, target.key, Number(depthInput.value));
+    if (amount !== null) depthValue.textContent = formatModAmount(amount);
+  });
+  depthInput.addEventListener('dblclick', (event) => {
+    event.preventDefault();
+    depthInput.value = '1';
+    const amount = setLFOMapAmount(target.genIdx, target.key, 1);
+    if (amount !== null) depthValue.textContent = formatModAmount(amount);
+  });
+  depth.append(depthHeader, depthInput);
+  menu.appendChild(depth);
 
   mountMenuAtPointer(menu, x, y);
 }
@@ -13078,6 +13161,7 @@ function patchBackPanelRoute(routeKey) {
       genIdx: parsed.genIdx,
       key: parsed.key,
       sourceIdx: BACK_PANEL.selectedSourceIdx,
+      amount: Number.isFinite(existing?.amount) ? existing.amount : 1,
     });
   }
   applyModulationTargetUpdate(parsed.genIdx);
@@ -13096,6 +13180,7 @@ function buildBackPanel() {
   BACK_PANEL.targetJacks.clear();
   BACK_PANEL.targetRows.clear();
   BACK_PANEL.targetValues.clear();
+  BACK_PANEL.targetAmounts.clear();
 
   const board = document.createElement('div');
   board.className = 'back-board';
@@ -13513,7 +13598,9 @@ function buildBackPanel() {
       const valueEl = document.createElement('span');
       valueEl.className = 'back-param-value';
       valueEl.textContent = '...';
-      row.append(jack, labelEl, valueEl);
+      const amountEl = document.createElement('span');
+      amountEl.className = 'back-route-amount';
+      row.append(jack, labelEl, amountEl, valueEl);
       const handlePatch = (event) => {
         event.stopPropagation();
         if (BACK_PANEL.selectedSourceIdx === null) {
@@ -13527,10 +13614,18 @@ function buildBackPanel() {
       };
       row.addEventListener('click', handlePatch);
       jack.addEventListener('click', handlePatch);
+      row.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const parsed = parseBackRouteKey(routeKey);
+        if (!parsed) return;
+        openModSourceMenu({ ...parsed, label }, null, event.clientX, event.clientY);
+      });
       list.appendChild(row);
       BACK_PANEL.targetJacks.set(routeKey, jack);
       BACK_PANEL.targetRows.set(routeKey, row);
       BACK_PANEL.targetValues.set(routeKey, valueEl);
+      BACK_PANEL.targetAmounts.set(routeKey, amountEl);
     });
     module.append(titleEl, subtitleEl, list);
     destGrid.appendChild(module);
@@ -13622,7 +13717,7 @@ function rebuildBackWireSVG() {
     return `${a.key}`.localeCompare(`${b.key}`);
   });
 
-  routes.forEach(({ genIdx, key, sourceIdx }, routeIdx) => {
+  routes.forEach(({ genIdx, key, sourceIdx, amount }, routeIdx) => {
     const sourceJack = BACK_PANEL.sourceJacks.get(sourceIdx);
     const targetJack = BACK_PANEL.targetJacks.get(`${genIdx}:${key}`);
     if (!sourceJack || !targetJack) return;
@@ -13641,21 +13736,27 @@ function rebuildBackWireSVG() {
     const c2y = ty + drop - spread * 0.35;
     const d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${tx.toFixed(1)} ${ty.toFixed(1)}`;
     const rk = `${genIdx}:${key}`;
+    const cableAmount = Number.isFinite(amount) ? clamp(amount, -1, 1) : 1;
+    const depth = Math.abs(cableAmount);
+    const polarityClass = cableAmount < 0 ? ' inverted' : '';
 
     const shadow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     shadow.setAttribute('d', d);
-    shadow.setAttribute('class', 'back-wire-shadow');
+    shadow.setAttribute('class', `back-wire-shadow${polarityClass}`);
+    shadow.style.strokeWidth = `${5.2 + depth * 2.4}`;
     svg.appendChild(shadow);
 
     const glow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     glow.setAttribute('d', d);
-    glow.setAttribute('class', `back-wire-glow src-${sourceIdx}`);
+    glow.setAttribute('class', `back-wire-glow src-${sourceIdx}${polarityClass}`);
+    glow.style.strokeWidth = `${6 + depth * 5}`;
     svg.appendChild(glow);
     BACK_PANEL.wireGlowEls.set(rk, glow);
 
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', d);
-    path.setAttribute('class', `back-wire src-${sourceIdx}`);
+    path.setAttribute('class', `back-wire src-${sourceIdx}${polarityClass}`);
+    path.style.strokeWidth = `${2.2 + depth * 2.4}`;
     svg.appendChild(path);
     BACK_PANEL.wireEls.set(rk, path);
 
@@ -13693,8 +13794,9 @@ function renderBackPanelConnections() {
   if (!BACK_PANEL.built || !BACK_PANEL.routeLayer || UI_VIEW.mode !== 'back') return;
 
   // ── Update wire glow opacity (no layout reads — just CSS vars) ──
-  lfoMappings.forEach(({ genIdx, key, sourceIdx }) => {
-    const activity = Math.abs(getModSourceScaledValue(sourceIdx) || 0);
+  lfoMappings.forEach(({ genIdx, key, sourceIdx, amount }) => {
+    const depth = Number.isFinite(amount) ? Math.abs(amount) : 1;
+    const activity = Math.abs(getModSourceScaledValue(sourceIdx) || 0) * depth;
     const rk = `${genIdx}:${key}`;
     BACK_PANEL.wireGlowEls
       ?.get(rk)
@@ -13907,9 +14009,24 @@ function refreshBackPanelState() {
   BACK_PANEL.targetValues.forEach((valueEl, routeKey) => {
     valueEl.textContent = getBackTargetValue(routeKey);
   });
+  BACK_PANEL.targetAmounts.forEach((amountEl, routeKey) => {
+    const mapping = lfoMappings.get(routeKey);
+    amountEl.textContent = mapping ? formatModAmount(mapping.amount) : '';
+    amountEl.title = mapping
+      ? 'Modulation cable depth · right-click this row to edit'
+      : 'Right-click to choose a source and cable depth';
+  });
 
   BACK_PANEL.targetRows.forEach((row) => {
-    row.classList.remove('mapped', 'src-0', 'src-1', 'src-2', 'patch-ready');
+    row.classList.remove(
+      'mapped',
+      'src-0',
+      'src-1',
+      'src-2',
+      'src-3',
+      'src-4',
+      'patch-ready',
+    );
     row.classList.toggle('patch-ready', BACK_PANEL.selectedSourceIdx !== null);
   });
   lfoMappings.forEach(({ genIdx, key, sourceIdx }) => {
@@ -16842,10 +16959,11 @@ function capturePreset() {
     scale: { root: GEN4_SCALE.root, scale: GEN4_SCALE.scale },
     harmonizer: { root: HARMONIZER.root, scale: HARMONIZER.scale },
     mastering: JSON.parse(JSON.stringify(MASTERING.params)),
-    mappings: [...lfoMappings.values()].map(({ genIdx, key, sourceIdx }) => ({
+    mappings: [...lfoMappings.values()].map(({ genIdx, key, sourceIdx, amount }) => ({
       genIdx,
       key,
       sourceIdx,
+      amount: Number.isFinite(amount) ? clamp(amount, -1, 1) : 1,
     })),
   };
 }
@@ -17159,7 +17277,7 @@ function applyPreset(preset, { resetSources = true } = {}) {
   refreshHarmonizerUI();
 
   lfoMappings.clear();
-  preset.mappings?.forEach(({ genIdx, key, lfoIdx, sourceIdx }) => {
+  preset.mappings?.forEach(({ genIdx, key, lfoIdx, sourceIdx, amount }) => {
     const isGranularParam = genIdx < 2 && PARAMS.some((p) => p.key === key);
     const isGen3Param = genIdx === 2 && GEN3_LFO_PARAMS.some((p) => p.key === key);
     const [fxId, fxKey] = typeof key === 'string' ? key.split(':') : [];
@@ -17182,7 +17300,12 @@ function applyPreset(preset, { resetSources = true } = {}) {
       modSourceIdx >= 0 &&
       modSourceIdx <= 4
     ) {
-      lfoMappings.set(`${genIdx}:${key}`, { genIdx, key, sourceIdx: modSourceIdx });
+      lfoMappings.set(`${genIdx}:${key}`, {
+        genIdx,
+        key,
+        sourceIdx: modSourceIdx,
+        amount: Number.isFinite(amount) ? clamp(amount, -1, 1) : 1,
+      });
     }
   });
   rebuildBackWireSVG();

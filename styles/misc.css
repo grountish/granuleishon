@@ -3,7 +3,7 @@
 .mod-source-menu {
   position: fixed;
   z-index: 80;
-  width: 132px;
+  width: 168px;
   padding: 6px;
   display: flex;
   flex-direction: column;
@@ -35,6 +35,38 @@
 .mod-source-option.active {
   border-color: var(--accent-0);
   color: var(--accent-0);
+}
+
+.mod-depth-control {
+  display: grid;
+  gap: 4px;
+  margin-top: 5px;
+  padding: 6px 4px 2px;
+  border-top: 1px solid var(--border);
+}
+
+.mod-depth-header {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.mod-depth-header output {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.mod-depth-control input {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--accent-0);
+}
+
+.mod-depth-control input:disabled {
+  opacity: 0.35;
 }
 
 .knob-context-menu {
