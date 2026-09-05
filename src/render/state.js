@@ -21,6 +21,7 @@ export const BOUNCE = {
   capSeconds: 0,
   renderedSeconds: 0,
   tailStartedAt: 0,
+  stems: false,
   prevMode: 'loop',
   prevSongLoop: true,
   prevScheduleAheadTime: 0.15,

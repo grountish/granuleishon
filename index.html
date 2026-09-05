@@ -168,6 +168,9 @@
                 <option value="1200">Max 20 min</option>
               </select>
             </label>
+            <p class="bounce-focus-note" role="note">
+              <strong>Important:</strong> Keep this tab visible and focused while bouncing. Background tabs can pause automation and change the rendered audio.
+            </p>
             <label class="gate-box" for="tooltipsEnable">
               <input id="tooltipsEnable" class="gate-enable" type="checkbox" checked />
               <span class="gate-label">Tooltips</span>
@@ -206,7 +209,7 @@
         <button id="recordBtn" class="record-btn" type="button" title="Start recording"
           aria-label="Start recording" aria-pressed="false">&#9679;</button>
         <button id="bounceBtn" class="bounce-btn"
-          title="Bounce song to WAV — silent one-pass render of the arrangement">&#10515;</button>
+          title="Bounce song to WAV — keep this tab visible and focused until rendering finishes">&#10515;</button>
         <div id="bounceProgress" class="bounce-progress" role="progressbar"
           aria-label="Bounce progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
           <span id="bounceProgressFill" class="bounce-progress-fill"></span>
@@ -226,6 +229,27 @@
     <div id="songPanel" class="song-panel-view hidden-panel"></div>
     <div id="masterPanel" class="master-panel hidden-panel"></div>
   </main>
+
+  <dialog id="bounceDialog" class="settings-modal bounce-render-modal"
+    aria-labelledby="bounceDialogTitle">
+    <div id="bounceDialogTitle" class="bounce-render-title">Rendering audio</div>
+    <div id="bounceDialogPhase" class="bounce-render-phase">Preparing audio engine…</div>
+    <div id="bounceDialogProgress" class="bounce-progress" role="progressbar"
+      aria-label="Render progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <span class="bounce-progress-fill"></span>
+      <span class="bounce-progress-label">0%</span>
+    </div>
+    <div class="bounce-render-estimate">
+      <span>Estimated remaining</span>
+      <strong id="bounceDialogEstimate" aria-live="polite">Calculating…</strong>
+    </div>
+    <p class="bounce-focus-note" role="alert">
+      <strong>Keep this tab visible and focused.</strong> Background tabs can pause automation and change the rendered audio.
+    </p>
+    <div class="bounce-render-actions">
+      <button id="bounceDialogCancel" type="button">Cancel render</button>
+    </div>
+  </dialog>
 
   <dialog id="confirmDialog" class="confirm-modal">
     <div id="confirmDialogMsg" class="confirm-msg"></div>

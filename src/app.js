@@ -1183,6 +1183,11 @@ function formatSongClock(seconds) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
+function formatRemainingClock(seconds) {
+  const s = Math.max(0, Math.ceil(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
 // Approximate song length for the header/bounce readouts. Expected weighs
 // each entry by its probability and drops entries whose condition skips the
 // first visit; jumps are flagged as open-ended rather than modeled.
@@ -1206,9 +1211,12 @@ function getSongLengthEstimate() {
 function setBounceProgress(progress) {
   const normalized = clamp(progress, 0, 1);
   const percent = Math.round(normalized * 100);
-  // Two bars: the transport strip's, and the master toolbar's (the strip is
-  // hidden in master view, where bounces are also triggered).
-  [document.getElementById('bounceProgress'), MASTERING.els.bounceProgress].forEach((wrap) => {
+  // Keep the transport strip, master toolbar and render overlay in sync.
+  [
+    document.getElementById('bounceProgress'),
+    MASTERING.els.bounceProgress,
+    document.getElementById('bounceDialogProgress'),
+  ].forEach((wrap) => {
     if (!wrap) return;
     wrap.hidden = !BOUNCE.active;
     wrap.setAttribute('aria-valuenow', String(percent));
@@ -1220,19 +1228,33 @@ function setBounceProgress(progress) {
 }
 
 function refreshBounceProgress() {
+  const phaseEl = document.getElementById('bounceDialogPhase');
+  const estimateEl = document.getElementById('bounceDialogEstimate');
   if (!BOUNCE.active) {
     setBounceProgress(0);
+    if (phaseEl) phaseEl.textContent = 'Preparing audio engine…';
+    if (estimateEl) estimateEl.textContent = 'Calculating…';
     return;
   }
   const tailSeconds = BOUNCE_TAIL_MS / 1000;
   if (BOUNCE.phase === 'preparing') {
     setBounceProgress(0);
+    if (phaseEl) {
+      phaseEl.textContent = BOUNCE.stems
+        ? 'Preparing master + instrument stems…'
+        : 'Preparing master render…';
+    }
+    if (estimateEl) estimateEl.textContent = 'Calculating…';
     return;
   }
   if (BOUNCE.phase === 'tail') {
     const done = BOUNCE.renderedSeconds;
     const total = Math.max(0.001, done + tailSeconds);
     const tailElapsed = Math.max(0, performance.now() - BOUNCE.tailStartedAt) / 1000;
+    if (phaseEl) phaseEl.textContent = 'Capturing effects tail…';
+    if (estimateEl) {
+      estimateEl.textContent = `≈ ${formatRemainingClock(tailSeconds - tailElapsed)}`;
+    }
     setBounceProgress(
       (done + clamp(tailElapsed, 0, tailSeconds)) / total,
     );
@@ -1241,11 +1263,21 @@ function refreshBounceProgress() {
   // elapsed / (elapsed + live remaining): honest under jumps — the bar dips
   // when a jump throws the song backward instead of pinning at 100%.
   const elapsed = engine.ctx ? REC.sampleCount / engine.ctx.sampleRate : 0;
+  if (phaseEl) {
+    phaseEl.textContent = BOUNCE.stems
+      ? 'Rendering master + instrument stems…'
+      : 'Rendering master…';
+  }
   if (BOUNCE.prevSongLoop) {
+    if (estimateEl) {
+      estimateEl.textContent = `≈ ${formatRemainingClock(BOUNCE.capSeconds - elapsed)}`;
+    }
     setBounceProgress(elapsed / Math.max(0.001, BOUNCE.capSeconds));
     return;
   }
-  const total = Math.max(0.001, elapsed + getBounceRemainingSeconds() + tailSeconds);
+  const remaining = getBounceRemainingSeconds() + tailSeconds;
+  if (estimateEl) estimateEl.textContent = `≈ ${formatRemainingClock(remaining)}`;
+  const total = Math.max(0.001, elapsed + remaining);
   setBounceProgress(clamp(elapsed / total, 0, 1));
 }
 
@@ -1275,6 +1307,7 @@ async function bounceSong(opts = {}) {
   if (engine.ctx?.state === 'running') await stopTransport();
   BOUNCE.prevMode = PLAY.mode;
   BOUNCE.prevSongLoop = SONG.loop;
+  BOUNCE.stems = stems;
   BOUNCE.prevScheduleAheadTime = GEN4.scheduleAheadTime;
   BOUNCE.active = true;
   BOUNCE.phase = 'preparing';
@@ -1295,9 +1328,25 @@ async function bounceSong(opts = {}) {
     setPlayMode('song');
     SONG.loop = BOUNCE.prevSongLoop;
     await ensureTransportEngine();
+    if (!BOUNCE.active) {
+      await stopTransport();
+      return;
+    }
     muteBounceOutput();
     if (!engine.started) await start();
+    if (!BOUNCE.active) {
+      await stopTransport();
+      return;
+    }
     await startRecording({ bufferSize: BOUNCE_CAPTURE_BUFFER_SIZE });
+    if (!BOUNCE.active) {
+      REC.left = [];
+      REC.right = [];
+      REC.sampleCount = 0;
+      if (REC.isRecording) stopRecording();
+      await stopTransport();
+      return;
+    }
     if (stems) startStemTaps({ bufferSize: BOUNCE_CAPTURE_BUFFER_SIZE });
     startGen4Sequencer();
     if (!GEN4.playing) {
@@ -1309,8 +1358,8 @@ async function bounceSong(opts = {}) {
     refreshBounceProgress();
     setStatus(
       BOUNCE.prevSongLoop
-        ? `loop → max ${formatSongClock(BOUNCE.capSeconds)}`
-        : `bounce ≈${formatSongClock(BOUNCE.songSeconds)} · max ${formatSongClock(BOUNCE.capSeconds)}`,
+        ? `keep tab focused · loop → max ${formatSongClock(BOUNCE.capSeconds)}`
+        : `keep tab focused · bounce ≈${formatSongClock(BOUNCE.songSeconds)} · max ${formatSongClock(BOUNCE.capSeconds)}`,
     );
     BOUNCE.pollTimer = setInterval(() => {
       const elapsed = engine.ctx ? REC.sampleCount / engine.ctx.sampleRate : 0;
@@ -1388,10 +1437,24 @@ function refreshBounceUI() {
   const btn = document.getElementById('bounceBtn');
   if (!btn) return;
   btn.classList.toggle('active', BOUNCE.active);
+  document.getElementById('status')?.classList.toggle('bounce-warning', BOUNCE.active);
+  const dialog = document.getElementById('bounceDialog');
+  if (BOUNCE.active && dialog && !dialog.open) dialog.showModal();
+  if (!BOUNCE.active && dialog?.open) dialog.close();
   btn.title = BOUNCE.active
     ? 'Cancel bounce'
-    : `Bounce song to WAV — ${BOUNCE_RENDER.stems ? 'engine.master + per-instrument stems' : 'engine.master only'} (set in ⚙ options; ⇧-click for the other mode)`;
+    : `Bounce song to WAV — ${BOUNCE_RENDER.stems ? 'engine.master + per-instrument stems' : 'engine.master only'}; keep this tab visible and focused until rendering finishes (set in ⚙ options; ⇧-click for the other mode)`;
   refreshBounceProgress();
+}
+
+function initBounceDialog() {
+  const dialog = document.getElementById('bounceDialog');
+  document.getElementById('bounceDialogCancel')?.addEventListener('click', () => {
+    if (BOUNCE.active) finishBounce('bounce cancelled', { save: false });
+  });
+  // Closing the modal while a render continues would hide the focus warning
+  // and its only cancel control, so Escape leaves it open.
+  dialog?.addEventListener('cancel', (event) => event.preventDefault());
 }
 
 // ─── Visualizer (per-generator) ────────────────────────────────────────────
@@ -18756,6 +18819,7 @@ renderSongLane();
 initModeToggle();
 initStripPlayBtn();
 initSettingsMenu();
+initBounceDialog();
 initConfirmDialog();
 // The back panel (hundreds of DOM nodes) is built lazily on first entry to
 // the back view — see setUIView. State restores don't need its DOM anymore.
