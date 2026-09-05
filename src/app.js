@@ -1947,6 +1947,9 @@ const GEN3_LFO_PARAMS = [
   { key: 'sustain', min: 0, max: 1, step: 0.01, unit: '' },
 ];
 const FX_LFO_PARAMS = [
+  // Beat Repeat stores Grid in ms/free or division indices/sync, but its
+  // AudioParam and modulation path both operate in seconds.
+  { id: 'beatrepeat', key: 'grid', min: 0.005, max: 1, unit: 's' },
   { id: 'beatrepeat', key: 'gate', min: 1, max: 32 },
   { id: 'beatrepeat', key: 'pitch', min: -24, max: 24, unit: 'st' },
   { id: 'beatrepeat', key: 'decay', min: 0, max: 1 },
@@ -2494,8 +2497,17 @@ function refreshModulationVisuals() {
       control?.setModValue(null);
       return;
     }
-    if (id === 'delay' && key === 'time' && BUS.fx.delay.sync) {
+    if (
+      (id === 'delay' && key === 'time' && BUS.fx.delay.sync) ||
+      (id === 'beatrepeat' && key === 'grid' && BUS.fx.beatrepeat.gridSync)
+    ) {
+      // The knob addresses a division index in sync mode, while modulation
+      // operates on the resulting time in seconds, so no shared ring scale exists.
       control?.setModValue(null);
+      return;
+    }
+    if (id === 'beatrepeat' && key === 'grid') {
+      control?.setModValue(getEffectiveFxValue(id, key) * 1000);
       return;
     }
     if (id === 'resonator' && key === 'freq' && BUS.fx.resonator.noteMode) {
@@ -13100,7 +13112,8 @@ function getBackTargetValue(routeKey) {
   }
   if (group === '3') {
     const spec = getFxParamDef(a, b);
-    return formatBackValue(spec, getEffectiveFxValue(a, b));
+    const effective = getEffectiveFxValue(a, b);
+    return formatBackValue(spec, a === 'beatrepeat' && b === 'grid' ? effective * 1000 : effective);
   }
   if (group === '5' && b === 'pan' && FX_BUS_IDS.includes(a)) {
     return formatMixerPan(getEffectiveMixerPan(a));
@@ -13514,7 +13527,7 @@ function buildBackPanel() {
     {
       title: 'Beat Rpt',
       subtitle: 'Stutter engine',
-      params: ['gate', 'pitch', 'decay', 'chance', 'mix'].map((key) => ({
+      params: ['grid', 'gate', 'pitch', 'decay', 'chance', 'mix'].map((key) => ({
         routeKey: `3:beatrepeat:${key}`,
         label: getFxParamDef('beatrepeat', key)?.label || key,
       })),
@@ -18123,7 +18136,8 @@ function renderActiveBusFx() {
             } else {
               BUS.fx.beatrepeat.grid = v;
             }
-            applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
+            if (isMappable) applyFxModulation();
+            else applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
             refreshModulationVisuals();
             emit('state');
             return;
@@ -18218,7 +18232,8 @@ function renderActiveBusFx() {
           markFxPresetCustom(def.id);
           BUS.fx.beatrepeat.gridSync = mode === 'sync';
           refreshBeatRepeatGridUI();
-          applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
+          if (isMappable) applyFxModulation();
+          else applyFx('beatrepeat', 'grid', getBaseFxValue('beatrepeat', 'grid'));
           refreshModulationVisuals();
           emit('state');
         });
