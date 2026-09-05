@@ -5081,16 +5081,25 @@ let gen3ArpDirectionSelect = null;
 let gen3ArpOctaveSelect = null;
 let gen3ArpGateSelect = null;
 
+// The keys grid shows the edited loop's chord. Sounding-note highlights only
+// belong on it while what sounds is that loop — during Song playback of a
+// different loop they would sit on top of the notes being edited and hide
+// every toggle.
+function gen3KeysShowSounding() {
+  return !(PLAY.mode === 'song' && GEN4.playing) || getAudibleLoop() === getEditLoop();
+}
+
 function setGen3NoteActive(midi, active) {
   const el = gen3NoteEls.get(midi);
   if (!el) return;
-  el.classList.toggle('active', active);
+  el.classList.toggle('active', active && gen3KeysShowSounding());
   el.classList.toggle('locked', GEN3.lockedMidis.has(midi));
 }
 
 function refreshGen3KeyStates() {
+  const showSounding = gen3KeysShowSounding();
   gen3NoteEls.forEach((el, midi) => {
-    el.classList.toggle('active', GEN3.activeNotes.has(midi));
+    el.classList.toggle('active', showSounding && GEN3.activeNotes.has(midi));
     el.classList.toggle('locked', GEN3.lockedMidis.has(midi));
   });
 }
@@ -10330,6 +10339,8 @@ function updateSongPlayhead(audible) {
         stopAllGen3Notes();
       }
     }
+    // The block change may have moved the sound onto or off the edited loop.
+    refreshGen3KeyStates();
   }
   updateSongOrbitProgress(audible);
   renderSongPlayhead(audible.repeat);

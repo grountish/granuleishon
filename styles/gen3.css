@@ -110,15 +110,18 @@
   border-color: rgba(64, 184, 208, 0.45);
 }
 
+/* In this loop's chord: solid, whether or not it is sounding right now. */
 .piano-cell.locked {
-  background: rgba(64, 184, 208, 0.22) !important;
-  border-color: rgba(64, 184, 208, 0.55) !important;
-}
-
-.piano-cell.active {
   background: #40b8d0 !important;
   border-color: #40b8d0 !important;
   color: #061820 !important;
+}
+
+/* Sounding but not held by this loop (e.g. a played-in note): a tint only.
+   On a locked key the sounding cue is the ring in misc.css. */
+.piano-cell.active {
+  background: rgba(64, 184, 208, 0.22);
+  border-color: rgba(64, 184, 208, 0.55);
 }
 
 /* ── Osc shape selector (in Gen 3 header) ────────────────────── */
