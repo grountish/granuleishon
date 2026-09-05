@@ -1,16 +1,30 @@
-// The face view's FX rack: the app's own saturation, delay and reverb units
-// (src/fx/units) built through the registry's wet/dry scaffold on the
-// island's private AudioContext. Same code, same sound, same params as the
-// main rack — only the order and the state live here, and the chain
-// re-splices when a card is dragged or powered off.
+// The face view's FX rack: shared app units plus its stereo flanger, all built
+// through the registry's wet/dry scaffold on the island's private
+// AudioContext. Only the order and state live here, and the chain re-splices
+// when a card is dragged or powered off.
 
 import { buildUnitNodes } from '../fx/registry.js';
 import sat from '../fx/units/sat.js';
+import pitchtrem from '../fx/units/pitchtrem.js';
 import delay from '../fx/units/delay.js';
 import reverb from '../fx/units/reverb.js';
 import { formatControlValue } from '../core/util.js';
+import flanger from './flanger.js';
 
-export const FACE_FX_UNITS = [sat, delay, reverb];
+// The main rack calls this Pitch + Auto Pan. In the face instrument the pitch
+// sweep is the headline, so keep the DSP but give its card a more direct name.
+const pitchmod = {
+  ...pitchtrem,
+  label: 'Pitch Modulator',
+  params: pitchtrem.params.map((param) => ({
+    ...param,
+    label:
+      { pitch: 'Center', pitchDepth: 'Sweep', rate: 'Rate', depth: 'Pan' }[param.key] ||
+      param.label,
+  })),
+};
+
+export const FACE_FX_UNITS = [sat, flanger, pitchmod, delay, reverb];
 
 // The sliders draw their own fill: --p is the value as a percentage of the
 // track, read by the stylesheet's track gradient.
@@ -22,15 +36,39 @@ export function paintRange(input) {
 }
 const BY_ID = new Map(FACE_FX_UNITS.map((u) => [u.id, u]));
 
-// Starting points tuned by ear: light drive, a long filtered echo, a wet
-// hall — the chords hang in the air.
+// The captured psychedelic starting patch shown when the view first opens.
 export function makeFaceFxState() {
   return {
-    order: ['sat', 'delay', 'reverb'],
+    order: ['sat', 'delay', 'flanger', 'pitchtrem', 'reverb'],
     states: {
-      sat: { ...sat.defaults(), drive: 0.13, mix: 0.49 },
-      delay: { ...delay.defaults(), time: 0.38, feedback: 0.53, hp: 480, mix: 0.55 },
-      reverb: { ...reverb.defaults(), size: 2.8, decay: 4.2, predelay: 0.025, damping: 0.45, mix: 0.75 },
+      sat: { ...sat.defaults(), drive: 0.09, mix: 0.61 },
+      flanger: flanger.defaults(),
+      pitchtrem: {
+        ...pitchtrem.defaults(),
+        pitch: 0,
+        pitchDepth: 1,
+        fine: 0,
+        rate: 3.45,
+        depth: 0,
+        shape: 'sine',
+        mix: 0.14,
+      },
+      delay: {
+        ...delay.defaults(),
+        mode: 'stereo',
+        time: 0.38,
+        feedback: 0.72,
+        hp: 990,
+        mix: 0.71,
+      },
+      reverb: {
+        ...reverb.defaults(),
+        size: 3.7,
+        decay: 6.6,
+        predelay: 0.025,
+        damping: 0.45,
+        mix: 0.75,
+      },
     },
   };
 }

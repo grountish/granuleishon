@@ -48,9 +48,8 @@ const FACE = {
   seventh: true,
   volume: 0.9,
   patch: { waveA: 'sawtooth', waveB: 'square', octaveB: -1, detune: 10 },
-  // Own root and scale, independent of the harmonizer. G# phrygian: dark,
-  // and every degree of it has a chord worth landing on.
-  scale: { root: 8, id: 'phrygian' },
+  // Own root and scale, independent of the harmonizer.
+  scale: { root: 8, id: 'major' },
   fx: makeFaceFxState(),
   rack: null,
   calib: {},
@@ -68,6 +67,8 @@ const FACE = {
   showMesh: false,
   analyser: null,
   levelBuf: null,
+  workletPromise: null,
+  workletCtx: null,
   vis: { face: 0, hue: 0, flash: 0, level: 0, cutoff: 0 },
 };
 
@@ -190,6 +191,29 @@ function ensureAudioContext() {
   return FACE.ctx;
 }
 
+function workletUrl(file) {
+  return `worklets/${file}?v=${Date.now()}`;
+}
+
+// AudioWorklet modules belong to one AudioContext. Face closes its private
+// context when stopped, so a fresh context must load the pitch processor too.
+function ensureFaceWorklets() {
+  const ctx = ensureAudioContext();
+  if (!ctx.audioWorklet?.addModule) {
+    return Promise.reject(new Error('audio worklets are unavailable in this browser'));
+  }
+  if (FACE.workletCtx !== ctx || !FACE.workletPromise) {
+    FACE.workletCtx = ctx;
+    FACE.workletPromise = ctx.audioWorklet
+      .addModule(workletUrl('pitch-autopan-processor.js'))
+      .catch((err) => {
+        if (FACE.workletCtx === ctx) FACE.workletPromise = null;
+        throw err;
+      });
+  }
+  return FACE.workletPromise;
+}
+
 // If the context is still not running once everything is up, the next click
 // anywhere on the page resumes it.
 function armAudioUnlock() {
@@ -218,17 +242,26 @@ function ensureSynth() {
   return FACE.synth;
 }
 
-function testTone() {
-  const synth = ensureSynth();
-  synth.set({ cutoff: 2500, resonance: 1.5, pan: 0 });
-  synth.setChord(buildChord(0, 0), { retrigger: true });
-  setTimeout(() => {
-    if (!FACE.synth) return;
-    if (FACE.running && FACE.chord.length) FACE.synth.setChord(FACE.chord);
-    else FACE.synth.allOff();
-  }, 700);
-  armAudioUnlock();
-  if (FACE.ctx.state === 'running') setStatus(`test chord · ctx ${FACE.ctx.state}`);
+async function testTone() {
+  const ctx = ensureAudioContext();
+  try {
+    setStatus('loading audio fx…');
+    await ensureFaceWorklets();
+    if (!FACE.host || FACE.ctx !== ctx) return;
+    const synth = ensureSynth();
+    synth.set({ cutoff: 2500, resonance: 1.5, pan: 0 });
+    synth.setChord(buildChord(0, 0), { retrigger: true });
+    setTimeout(() => {
+      if (!FACE.synth) return;
+      if (FACE.running && FACE.chord.length) FACE.synth.setChord(FACE.chord);
+      else FACE.synth.allOff();
+    }, 700);
+    armAudioUnlock();
+    if (FACE.ctx.state === 'running') setStatus(`test chord · ctx ${FACE.ctx.state}`);
+  } catch (err) {
+    console.error('[face] audio fx', err);
+    setStatus(`audio fx failed: ${err.message}`);
+  }
 }
 
 async function start() {
@@ -237,8 +270,8 @@ async function start() {
   FACE.els.startBtn.disabled = true;
   ensureAudioContext();
   try {
-    setStatus('loading ml5…');
-    const ml5 = await loadMl5();
+    setStatus('loading ml5 + audio fx…');
+    const [ml5] = await Promise.all([loadMl5(), ensureFaceWorklets()]);
     if (!FACE.host) return;
     setStatus('opening camera…');
     FACE.stream = await navigator.mediaDevices.getUserMedia({
@@ -300,6 +333,8 @@ function stop() {
   FACE.rack = null;
   if (rack) setTimeout(() => rack.dispose(), 200);
   FACE.analyser = null;
+  FACE.workletPromise = null;
+  FACE.workletCtx = null;
   FACE.kp = null;
   const ctx = FACE.ctx;
   FACE.ctx = null;

@@ -147,7 +147,7 @@ all of it is torn down again when you leave the view. Video never leaves the
 machine. The transport stops on entry; here your face is the instrument.
 
 A two-oscillator paraphonic synth plays chords of the view's own **root**
-and **scale** (G# phrygian to start): **turning** your head picks the
+and **scale** (G# major to start): **turning** your head picks the
 degree, I to vii, **tilting** it picks the inversion, **opening your mouth**
 sweeps the filter cutoff, **brows** add resonance, **mouth width** blends
 osc A into osc B, **roll** pans, a **blink** moves the root up a fifth, around the circle. The
@@ -156,9 +156,9 @@ octave and **7th** for four-note chords. The camera image is never shown:
 the stage is a WebGL kaleidoscope that answers the same gestures, with the
 chord picking the palette and the audio level pulsing the rings (**Mesh**
 overlays the tracked points if you want to check the camera has you). Under
-it sits a small FX rack, the app's own saturation, delay and reverb units on the view's private
-audio context: drag a card by its grip to reorder the chain, ⏻ takes one
-out. Press **Calibrate** with a relaxed face looking straight at the camera
+it sits a small FX rack: saturation, stereo flanger, pitch modulation, delay
+and reverb on the view's private audio context. Drag a card by its grip to
+reorder the chain; ⏻ takes one out. Press **Calibrate** with a relaxed face looking straight at the camera
 so the ranges fit you. The fps cap keeps the model's cost in check.
 
 ## Ideas to extend later

@@ -463,19 +463,21 @@
   margin-right: 4px;
 }
 
-/* ── FX ── three print blocks: vermilion, magenta, cyan. Drag by the dots. */
+/* ── FX ── five clashing print blocks. Drag by the dots. */
 
 .face-fx {
   display: flex;
   gap: 16px;
   flex-shrink: 0;
+  overflow-x: auto;
+  padding: 0 6px 8px 0;
 }
 
 .face-fx-card {
   --paper: var(--cream);
   --shadow: var(--magenta);
-  flex: 1;
-  min-width: 0;
+  flex: 1 0 220px;
+  min-width: 220px;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -490,6 +492,16 @@
 .face-fx-card[data-id='sat'] {
   --paper: var(--vermilion);
   --shadow: var(--yellow);
+}
+
+.face-fx-card[data-id='flanger'] {
+  --paper: var(--yellow);
+  --shadow: var(--cyan);
+}
+
+.face-fx-card[data-id='pitchtrem'] {
+  --paper: var(--cream);
+  --shadow: var(--magenta);
 }
 
 .face-fx-card[data-id='delay'] {
@@ -621,11 +633,5 @@
   }
   .face-numeral {
     font-size: 56px;
-  }
-  .face-fx {
-    flex-wrap: wrap;
-  }
-  .face-fx-card {
-    flex-basis: 45%;
   }
 }
