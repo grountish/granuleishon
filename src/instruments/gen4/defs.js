@@ -11,7 +11,7 @@ export const GEN4_DEFS = [
       { key: 'tune', label: 'Tune', min: 30, max: 120, step: 1, value: 70, unit: 'Hz' },
       { key: 'decay', label: 'Decay', min: 0.05, max: 1.0, step: 0.01, value: 0.85, unit: 's' },
       { key: 'punch', label: 'Punch', min: 0, max: 1, step: 0.01, value: 0.36, unit: '' },
-      { key: 'drive', label: 'Drive', min: 0, max: 1, step: 0.01, value: 0, unit: '' },
+      { key: 'drive', label: 'Drive', min: 0, max: 0.15, step: 0.01, value: 0, unit: '' },
       { key: 'gain', label: 'Gain', min: 0, max: 1, step: 0.01, value: 1, unit: '' },
     ],
   },
@@ -101,7 +101,7 @@ export const GEN4_PRESETS = {
     { name: 'Default', values: { tune: 70, decay: 0.85, punch: 0.36, drive: 0, gain: 1 } },
     { name: 'Deep', values: { tune: 48, decay: 0.72, punch: 0.62, drive: 0.08, gain: 0.95 } },
     { name: 'Tight', values: { tune: 82, decay: 0.18, punch: 0.78, drive: 0.05, gain: 0.9 } },
-    { name: 'Driven', values: { tune: 58, decay: 0.5, punch: 0.72, drive: 0.8, gain: 0.82 } },
+    { name: 'Driven', values: { tune: 58, decay: 0.5, punch: 0.72, drive: 0.15, gain: 0.82 } },
   ],
   snare: [
     { name: 'Default', values: { tune: 360, decay: 0.09, snap: 1, gain: 0.96 } },
