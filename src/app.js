@@ -16492,7 +16492,7 @@ async function enterFaceView() {
 function leaveFaceView() {
   faceViewModule?.unmount();
 }
-const TAB_PANEL_VIEWS = ['front', 'back', 'mixer', 'song'];
+const TAB_PANEL_VIEWS = ['front', 'song'];
 
 function setPanelView(mode) {
   UI_VIEW.mode = mode;

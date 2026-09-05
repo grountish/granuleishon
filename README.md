@@ -165,5 +165,4 @@ so the ranges fit you. The fps cap keeps the model's cost in check.
 
 - Sampler: waveform playhead, drag the region on the waveform, velocity from LFO
 - Grain envelope shape selection (Hann / Tukey / triangular)
-- Per-loop scene recall of sound parameters (kit / FX snapshots)
 - Song-position export markers in recordings
