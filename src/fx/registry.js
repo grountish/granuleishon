@@ -11,7 +11,6 @@ import beatrepeat from './units/beatrepeat.js';
 import grainarp from './units/grainarp.js';
 import pitchtrem from './units/pitchtrem.js';
 import autotune from './units/autotune.js';
-import vocoder from './units/vocoder.js';
 import delay from './units/delay.js';
 import filter from './units/filter.js';
 import resonator from './units/resonator.js';
@@ -27,7 +26,6 @@ export const FX_UNITS = [
   grainarp,
   pitchtrem,
   autotune,
-  vocoder,
   delay,
   filter,
   resonator,
@@ -47,7 +45,6 @@ export const DEFAULT_FX_ORDER = [
   'bitreduce',
   'pitchtrem',
   'autotune',
-  'vocoder',
   'delay',
   'beatrepeat',
   'grainarp',

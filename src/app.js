@@ -244,7 +244,6 @@ let resonatorModulePromise = null;
 let grainArpModulePromise = null;
 let pitchTremoloModulePromise = null;
 let autotuneModulePromise = null;
-let vocoderModulePromise = null;
 const LIVE_SOURCE_SECONDS = 10;
 
 // dB <-> linear amplitude helper for the gate.
@@ -837,7 +836,6 @@ async function restartAudioEngineForLatency() {
   grainArpModulePromise = null;
   pitchTremoloModulePromise = null;
   autotuneModulePromise = null;
-  vocoderModulePromise = null;
   engine.started = false;
 
   try {
@@ -970,9 +968,6 @@ async function ensureFxModules() {
   if (!autotuneModulePromise) {
     autotuneModulePromise = engine.ctx.audioWorklet.addModule(workletUrl('autotune-processor.js'));
   }
-  if (!vocoderModulePromise) {
-    vocoderModulePromise = engine.ctx.audioWorklet.addModule(workletUrl('vocoder-processor.js'));
-  }
   await Promise.all([
     bitReducerModulePromise,
     beatRepeatModulePromise,
@@ -980,7 +975,6 @@ async function ensureFxModules() {
     grainArpModulePromise,
     pitchTremoloModulePromise,
     autotuneModulePromise,
-    vocoderModulePromise,
   ]);
 }
 
@@ -16341,16 +16335,8 @@ function buildBusFx(busId) {
   const st = fxStates[busId];
 
   // Stable entry/exit nodes: the generator connects to `input` once, movable
-  // effects run from `chain` to `mixerIn`, then channel EQ → pan → gain feeds
-  // the master. `tap` is a pre-FX copy of the input that other buses may
-  // listen to (the vocoder borrows its carrier there): it sits upstream of
-  // everything, so two buses listening to each other can never form a
-  // cycle, and the chain re-splice never touches it.
+  // effects end at `mixerIn`, then channel EQ → pan → gain feeds the master.
   const chainIn = ac.createGain();
-  const chainStart = ac.createGain();
-  const tap = ac.createGain();
-  chainIn.connect(chainStart);
-  chainIn.connect(tap);
   const mixerIn = ac.createGain();
   const mixLow = ac.createBiquadFilter();
   mixLow.type = 'lowshelf';
@@ -16409,8 +16395,6 @@ function buildBusFx(busId) {
 
   fxBuses[busId] = {
     input: chainIn,
-    chain: chainStart,
-    tap,
     mixerIn,
     output: busOut,
     mixer: {
@@ -16438,12 +16422,6 @@ function buildBusFx(busId) {
 function buildFxNodes() {
   buildMaster();
   FX_BUS_IDS.forEach((busId) => buildBusFx(busId));
-  // A unit that listens to another bus (the vocoder's carrier tap) could not
-  // wire itself while that bus was still unbuilt — push unit state once more
-  // now that every bus exists.
-  FX_BUS_IDS.forEach((busId) =>
-    FX_UNITS.forEach((u) => u.applyAll && applyUnitState(u.id, busId)),
-  );
   applyInstrumentMixState();
   applyFxModulation();
 }
@@ -16482,10 +16460,10 @@ function reconcileFxIdleSplices() {
 function reconnectFxChain(busId = BUS.active) {
   const bus = fxBuses[busId];
   if (!bus) return;
-  bus.chain.disconnect();
+  bus.input.disconnect();
   fxOrders[busId].forEach((id) => bus[id]?.out.disconnect());
   fxPlugged[busId].clear();
-  let prev = bus.chain;
+  let prev = bus.input;
   fxOrders[busId].forEach((id) => {
     const eff = bus[id];
     // Powered-off units are left out, and so are stateless units whose mix is
@@ -16499,14 +16477,11 @@ function reconnectFxChain(busId = BUS.active) {
 }
 
 // Push a unit's non-param state (filter type, delay mode, arp pattern/hold,
-// tremolo shape, autotune mask, vocoder carrier) to its nodes. The unit owns
-// what that means; `buses` lets one listen to another bus's tap.
+// tremolo shape, autotune mask) to its nodes. The unit owns what that means.
 function applyUnitState(id, busId = BUS.active) {
   const nodes = fxBuses[busId]?.[id];
   const unit = FX_UNITS_BY_ID.get(id);
-  if (nodes && unit?.applyAll) {
-    unit.applyAll(nodes, { ac: engine.ctx, state: fxStates[busId][id], buses: fxBuses, busId });
-  }
+  if (nodes && unit?.applyAll) unit.applyAll(nodes, { ac: engine.ctx, state: fxStates[busId][id] });
 }
 
 function applyFx(id, key, val, busId = BUS.active) {
@@ -18329,7 +18304,6 @@ function stop() {
   grainArpModulePromise = null;
   pitchTremoloModulePromise = null;
   autotuneModulePromise = null;
-  vocoderModulePromise = null;
   engine.started = false;
 
   // Reset freeze state for both generators.
