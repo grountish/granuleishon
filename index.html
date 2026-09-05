@@ -100,6 +100,15 @@
             <circle cx="6" cy="6" r="1.5" fill="currentColor" stroke="none"/>
           </svg>
         </button>
+        <button type="button" class="view-btn" data-view="face"
+          title="Face — sing a synth with your face (experimental, loads on entry)">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6" cy="6" r="4.8"/>
+            <circle cx="4.2" cy="4.8" r="0.7" fill="currentColor" stroke="none"/>
+            <circle cx="7.8" cy="4.8" r="0.7" fill="currentColor" stroke="none"/>
+            <path d="M3.9 7.6 Q6 9.6 8.1 7.6"/>
+          </svg>
+        </button>
         <button type="button" class="view-btn" data-view="master"
           title="Master — polish the bounced audio">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round">
@@ -228,6 +237,7 @@
     <div id="mixerPanel" class="mixer-panel hidden-panel"></div>
     <div id="songPanel" class="song-panel-view hidden-panel"></div>
     <div id="masterPanel" class="master-panel hidden-panel"></div>
+    <div id="facePanel" class="face-panel hidden-panel"></div>
   </main>
 
   <dialog id="bounceDialog" class="settings-modal bounce-render-modal"

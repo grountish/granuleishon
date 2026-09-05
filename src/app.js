@@ -16468,7 +16468,30 @@ function leaveMasteringView() {
   MASTERING.ctx?.suspend?.();
 }
 
-const PANEL_VIEWS = ['front', 'back', 'mixer', 'song', 'visual', 'master'];
+const PANEL_VIEWS = ['front', 'back', 'mixer', 'song', 'visual', 'master', 'face'];
+
+// ── Face view ── an island (src/face/). Pulled in by dynamic import the
+// first time it opens; mount() builds its panel, unmount() tears everything
+// down (camera, model loop, its own AudioContext) so no other view pays for
+// it. The transport stops on entry: in this view your face is the instrument.
+let faceViewModule = null;
+
+async function enterFaceView() {
+  if (isTransportOn()) await stopTransport();
+  const host = document.getElementById('facePanel');
+  if (!host) return;
+  try {
+    faceViewModule = faceViewModule || (await import('./face/index.js'));
+    if (UI_VIEW.mode === 'face') faceViewModule.mount(host);
+  } catch (err) {
+    setStatus(`face view failed to load: ${err.message}`);
+    console.error(err);
+  }
+}
+
+function leaveFaceView() {
+  faceViewModule?.unmount();
+}
 const TAB_PANEL_VIEWS = ['front', 'back', 'mixer', 'song'];
 
 function setPanelView(mode) {
@@ -16489,6 +16512,7 @@ function setPanelView(mode) {
   document.getElementById('mixerPanel')?.classList.toggle('hidden-panel', mode !== 'mixer');
   document.getElementById('songPanel')?.classList.toggle('hidden-panel', mode !== 'song');
   document.getElementById('masterPanel')?.classList.toggle('hidden-panel', mode !== 'master');
+  document.getElementById('facePanel')?.classList.toggle('hidden-panel', mode !== 'face');
   // Master view swaps the header's transport for the mastering toolbar
   // (settings gear stays) — see body.view-master CSS.
   document.body.classList.toggle('view-master', mode === 'master');
@@ -16499,6 +16523,8 @@ function setPanelView(mode) {
   // render tool like mastering.
   if (mode === 'song') enterSongView();
   else leaveSongView();
+  if (mode === 'face') enterFaceView();
+  else leaveFaceView();
   // Self-heal the audible state: entering mastering suspends the main
   // context, which can freeze bus/channel gain ramps mid-flight — re-assert
   // the mix on every view change so nothing stays stuck half-silent.

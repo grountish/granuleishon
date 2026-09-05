@@ -1,0 +1,631 @@
+/* ── Face view ── a poster, not a panel. After Kiyoshi Awazu: flat clashing
+   inks on a halftone ground, concentric rings wherever a value lives, thick
+   outlines, print misregistration, one heavy display face. The kaleidoscope
+   is the hero; everything else is the caption band around it. */
+
+.face-panel {
+  --ink: #0a0508;
+  --plum: #1a0a16;
+  --magenta: #ff2e88;
+  --vermilion: #ff5a1f;
+  --yellow: #ffd21f;
+  --cyan: #19d3e6;
+  --cream: #f6e9c8;
+  --display: 'Dela Gothic One', 'Arial Black', Impact, sans-serif;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  color: var(--cream);
+  background-color: var(--plum);
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(246, 233, 200, 0.07) 1px, transparent 1.6px),
+    radial-gradient(circle at 92% 8%, transparent 0 130px, rgba(255, 46, 136, 0.08) 130px 136px,
+      transparent 136px 172px, rgba(25, 211, 230, 0.07) 172px 178px, transparent 178px 220px,
+      rgba(255, 210, 31, 0.06) 220px 226px, transparent 226px);
+  background-size: 6px 6px, auto;
+}
+
+.face-root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px 16px;
+}
+
+.face-panel button,
+.face-panel select,
+.face-panel label {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.face-panel :focus-visible {
+  outline: 3px solid var(--yellow);
+  outline-offset: 2px;
+}
+
+/* ── Masthead ── title, emblem, the three verbs, status. */
+
+.face-mast {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 48px;
+}
+
+.face-emblem {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--ink);
+  box-shadow:
+    inset 0 0 0 4px var(--magenta),
+    inset 0 0 0 8px var(--ink),
+    inset 0 0 0 12px var(--yellow),
+    inset 0 0 0 15px var(--ink),
+    0 0 0 3px var(--ink),
+    4px 4px 0 0 var(--cyan);
+  flex-shrink: 0;
+}
+
+.face-emblem.live {
+  box-shadow:
+    inset 0 0 0 4px var(--yellow),
+    inset 0 0 0 8px var(--ink),
+    inset 0 0 0 12px var(--magenta),
+    inset 0 0 0 15px var(--ink),
+    0 0 0 3px var(--ink),
+    4px 4px 0 0 var(--vermilion);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .face-emblem.live {
+    animation: face-emblem-breathe 2.4s ease-in-out infinite;
+  }
+}
+
+@keyframes face-emblem-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.12) rotate(6deg); }
+}
+
+.face-title {
+  font-family: var(--display);
+  font-size: 34px;
+  line-height: 1;
+  color: var(--yellow);
+  text-shadow:
+    3px 0 0 var(--magenta),
+    -3px 0 0 var(--cyan);
+  margin-right: 6px;
+}
+
+.face-btn {
+  font-family: var(--display);
+  font-size: 12px;
+  line-height: 1;
+  padding: 9px 16px;
+  border-radius: 999px;
+  border: 3px solid var(--ink);
+  background: var(--cream);
+  color: var(--ink);
+  box-shadow: 3px 3px 0 0 var(--magenta);
+  transition: transform 0.08s, box-shadow 0.08s;
+}
+
+.face-btn:hover:not(:disabled) {
+  background: var(--yellow);
+  border-color: var(--ink);
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 0 var(--magenta);
+}
+
+.face-btn:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 0 var(--magenta);
+}
+
+.face-btn.active {
+  background: var(--magenta);
+  color: var(--cream);
+  box-shadow: 3px 3px 0 0 var(--cyan);
+}
+
+.face-btn:disabled {
+  opacity: 0.4;
+}
+
+.face-start {
+  background: var(--vermilion);
+  color: var(--ink);
+}
+
+.face-status {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--cream);
+  opacity: 0.75;
+}
+
+/* ── Patch band ── one ink band of selects and sliders. */
+
+.face-band {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 10px 14px;
+  background: var(--ink);
+  border: 3px solid var(--ink);
+  border-radius: 14px;
+  box-shadow: 5px 5px 0 0 var(--vermilion);
+}
+
+.face-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--cream);
+}
+
+.face-field > span {
+  opacity: 0.7;
+}
+
+.face-field select {
+  appearance: none;
+  -webkit-appearance: none;
+  font-family: var(--display);
+  font-size: 11px;
+  line-height: 1;
+  padding: 6px 24px 6px 10px;
+  border-radius: 999px;
+  border: 2px solid var(--yellow);
+  background: var(--ink)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0h10L5 6z' fill='%23ffd21f'/%3E%3C/svg%3E")
+    no-repeat right 9px center;
+  color: var(--yellow);
+  cursor: pointer;
+}
+
+.face-field select:hover {
+  background-color: #1f0f1c;
+}
+
+/* Sliders: an ink groove filled with colour up to the value, a ringed knob.
+   --p is the fill percentage, painted from JS on input. */
+.face-panel input[type='range'] {
+  --p: 50%;
+  --fill: var(--yellow);
+  appearance: none;
+  -webkit-appearance: none;
+  width: 110px;
+  height: 22px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.face-panel input[type='range']::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 999px;
+  border: 2px solid var(--cream);
+  background: linear-gradient(90deg, var(--fill) var(--p), var(--ink) var(--p));
+}
+
+.face-panel input[type='range']::-moz-range-track {
+  height: 8px;
+  border-radius: 999px;
+  border: 2px solid var(--cream);
+  background: linear-gradient(90deg, var(--fill) var(--p), var(--ink) var(--p));
+}
+
+.face-panel input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 20px;
+  height: 20px;
+  margin-top: -8px;
+  border-radius: 50%;
+  border: 3px solid var(--ink);
+  background: var(--cream);
+  box-shadow: inset 0 0 0 3px var(--magenta);
+}
+
+.face-panel input[type='range']::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 3px solid var(--ink);
+  background: var(--cream);
+  box-shadow: inset 0 0 0 3px var(--magenta);
+}
+
+/* ── Body ── the picture and its caption column. */
+
+.face-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 18px;
+}
+
+.face-stage {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+  border-radius: 28px;
+  background: var(--ink);
+  border: 4px solid var(--ink);
+  box-shadow:
+    0 0 0 4px var(--magenta),
+    0 0 0 8px var(--ink),
+    10px 10px 0 0 var(--cyan);
+}
+
+.face-stage video {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.face-stage canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.face-overlay {
+  pointer-events: none;
+}
+
+.face-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  max-width: calc(100% - 40px);
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 2px solid var(--ink);
+  background: var(--yellow);
+  color: var(--ink);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.face-side {
+  width: 292px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-right: 6px;
+}
+
+/* The chord: a giant numeral in yellow ink, printed once off-register. */
+.face-chord {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.face-numeral {
+  font-family: var(--display);
+  font-size: 74px;
+  line-height: 0.95;
+  color: var(--yellow);
+  text-shadow:
+    4px 0 0 var(--magenta),
+    -4px 0 0 var(--cyan);
+  min-height: 70px;
+}
+
+.face-numeral.off {
+  color: var(--cream);
+  opacity: 0.35;
+  text-shadow: none;
+}
+
+.face-names {
+  font-family: var(--display);
+  font-size: 20px;
+  line-height: 1.1;
+  color: var(--cream);
+  min-height: 22px;
+  letter-spacing: 0.08em;
+}
+
+/* Degrees: a row of eyes. The open one is the chord you are on. */
+.face-degrees {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.face-degree {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--display);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--cream);
+  background: var(--ink);
+  box-shadow:
+    inset 0 0 0 3px var(--ink),
+    inset 0 0 0 5px var(--magenta),
+    0 0 0 2px var(--ink);
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+
+.face-degree.active {
+  color: var(--ink);
+  background: var(--yellow);
+  transform: scale(1.18);
+  box-shadow:
+    inset 0 0 0 3px var(--ink),
+    inset 0 0 0 6px var(--cream),
+    0 0 0 3px var(--ink),
+    3px 3px 0 3px var(--cyan);
+}
+
+/* Meters: ring gauges. --a and --b are the arc's start and end in turns,
+   --c its colour; the ::after disc hollows the ring. */
+.face-meters {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+}
+
+.face-meter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  color: var(--cream);
+  text-align: center;
+}
+
+.face-meter > span:first-child {
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.face-meter-ring {
+  --a: 0;
+  --b: 0;
+  --c: var(--cyan);
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background:
+    conic-gradient(from calc(var(--a) * 1turn), var(--c) 0 calc((var(--b) - var(--a)) * 1turn), transparent 0),
+    var(--ink);
+  box-shadow: 0 0 0 2px var(--ink), 0 0 0 4px var(--c);
+}
+
+.face-meter-ring::after {
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background: var(--plum);
+  box-shadow: inset 0 0 0 2px var(--ink);
+}
+
+.face-meter.bipolar .face-meter-ring::before {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: 50%;
+  width: 2px;
+  height: 8px;
+  margin-left: -1px;
+  background: var(--cream);
+  z-index: 1;
+}
+
+.face-meter-val {
+  font-variant-numeric: tabular-nums;
+  color: var(--yellow);
+}
+
+.face-map {
+  font-size: 10px;
+  line-height: 1.75;
+  color: var(--cream);
+  opacity: 0.85;
+}
+
+.face-map b {
+  font-family: var(--display);
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--yellow);
+  margin-right: 4px;
+}
+
+/* ── FX ── three print blocks: vermilion, magenta, cyan. Drag by the dots. */
+
+.face-fx {
+  display: flex;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.face-fx-card {
+  --paper: var(--cream);
+  --shadow: var(--magenta);
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px 14px;
+  border: 4px solid var(--ink);
+  border-radius: 18px;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 6px 6px 0 0 var(--shadow);
+}
+
+.face-fx-card[data-id='sat'] {
+  --paper: var(--vermilion);
+  --shadow: var(--yellow);
+}
+
+.face-fx-card[data-id='delay'] {
+  --paper: var(--magenta);
+  --shadow: var(--cyan);
+}
+
+.face-fx-card[data-id='reverb'] {
+  --paper: var(--cyan);
+  --shadow: var(--vermilion);
+}
+
+.face-fx-card.dragging {
+  opacity: 0.5;
+}
+
+.face-fx-card.off {
+  --paper: var(--plum);
+  color: var(--cream);
+}
+
+.face-fx-card.off .face-fx-param,
+.face-fx-card.off .face-fx-modes {
+  opacity: 0.4;
+}
+
+.face-fx-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.face-fx-grip {
+  cursor: grab;
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 1px;
+  user-select: none;
+}
+
+.face-fx-label {
+  flex: 1;
+  font-family: var(--display);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.face-fx-power {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  border: 3px solid var(--ink);
+  background: var(--ink);
+  color: transparent;
+  box-shadow: inset 0 0 0 4px var(--cream);
+}
+
+.face-fx-power.active {
+  background: var(--yellow);
+  box-shadow: inset 0 0 0 4px var(--ink), inset 0 0 0 7px var(--yellow);
+}
+
+.face-fx-modes {
+  display: flex;
+  gap: 4px;
+}
+
+.face-fx-mode {
+  flex: 1;
+  padding: 5px 0;
+  font-family: var(--display);
+  font-size: 10px;
+  border-radius: 999px;
+  border: 2px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+}
+
+.face-fx-mode.active,
+.face-fx-mode:hover:not(:disabled) {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--cream);
+}
+
+.face-fx-param {
+  display: grid;
+  grid-template-columns: 62px 1fr 56px;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+}
+
+.face-fx-param input[type='range'] {
+  --fill: var(--ink);
+  width: 100%;
+  min-width: 0;
+}
+
+.face-fx-card input[type='range']::-webkit-slider-runnable-track {
+  border-color: var(--ink);
+  background: linear-gradient(90deg, var(--ink) var(--p), var(--paper) var(--p));
+}
+
+.face-fx-card input[type='range']::-moz-range-track {
+  border-color: var(--ink);
+  background: linear-gradient(90deg, var(--ink) var(--p), var(--paper) var(--p));
+}
+
+.face-fx-card input[type='range']::-webkit-slider-thumb {
+  background: var(--cream);
+  box-shadow: inset 0 0 0 3px var(--ink);
+}
+
+.face-fx-card input[type='range']::-moz-range-thumb {
+  background: var(--cream);
+  box-shadow: inset 0 0 0 3px var(--ink);
+}
+
+.face-fx-val {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 1100px) {
+  .face-side {
+    width: 240px;
+  }
+  .face-numeral {
+    font-size: 56px;
+  }
+  .face-fx {
+    flex-wrap: wrap;
+  }
+  .face-fx-card {
+    flex-basis: 45%;
+  }
+}

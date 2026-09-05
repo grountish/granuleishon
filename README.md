@@ -128,6 +128,39 @@ can be mapped to LFO 1/2, Seq 1, Kick SC, or Trig SC from its map dot or the
 Back patch panel. Mixer settings and mappings are included in autosave, named
 projects, project files, and undo/redo history.
 
+## Modulation
+
+LFO 1/2, Seq 1, Kick SC, and Trig SC can be mapped from a control's map dot or
+from the Back patch panel. Right-click a map dot—or a destination row on the
+Back—to choose the source and set that cable's own depth from -100% to +100%.
+Negative depth inverts only that route; on the Back, inverted cables are dashed
+and cable thickness follows depth. Existing projects load at +100%, preserving
+their previous sound.
+
+## Face (experimental)
+
+The **Face** view turns your webcam into a synth controller through
+[ml5 FaceMesh](https://docs.ml5js.org/#/reference/facemesh). It is an island:
+nothing loads until you open the view and press **Start camera** — then the
+ml5 script, the face model, the camera and a private AudioContext come up, and
+all of it is torn down again when you leave the view. Video never leaves the
+machine. The transport stops on entry; here your face is the instrument.
+
+A two-oscillator paraphonic synth plays chords of the view's own **root**
+and **scale** (G# phrygian to start): **turning** your head picks the
+degree, I to vii, **tilting** it picks the inversion, **opening your mouth**
+sweeps the filter cutoff, **brows** add resonance, **mouth width** blends
+osc A into osc B, **roll** pans, a **blink** moves the root up a fifth, around the circle. The
+header sets both oscillators' waves, osc B's octave and detune, the chord
+octave and **7th** for four-note chords. The camera image is never shown:
+the stage is a WebGL kaleidoscope that answers the same gestures, with the
+chord picking the palette and the audio level pulsing the rings (**Mesh**
+overlays the tracked points if you want to check the camera has you). Under
+it sits a small FX rack, the app's own saturation, delay and reverb units on the view's private
+audio context: drag a card by its grip to reorder the chain, ⏻ takes one
+out. Press **Calibrate** with a relaxed face looking straight at the camera
+so the ranges fit you. The fps cap keeps the model's cost in check.
+
 ## Ideas to extend later
 
 - Sampler: waveform playhead, drag the region on the waveform, velocity from LFO
