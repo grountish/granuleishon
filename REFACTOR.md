@@ -4,7 +4,7 @@
 
 - [x] **Phase 1 — ES modules.** `main.js` → `src/app.js` with `type="module"`;
       processors → `worklets/`; `serve.py` watches subdirectories. (`b57979b`)
-- [~] **Phase 2 — leaf modules.** `core/{util,theory,tempo,storage,dsp,input,events,engine}`,
+- [~] **Phase 2 — leaf modules.** `core/{util,theory,tempo,clock,storage,dsp,input,events,engine}`,
       `render/{wav,state}`, `ui/{status,view,popover}`, `visual/{vizgl,state}`,
       `master/{specs,state,eq-plot}`, `mixer/state`, `link/state`,
       `modulation/state`, `sequencing/state`, `instruments/*`.
@@ -157,6 +157,7 @@ src/
     events.js             on(evt, fn) / emit(evt, payload) — nothing else
     theory.js             midi↔hz, NOTE_NAMES, scales, snap helpers, harmonizer math
     tempo.js              TRANSPORT, TEMPO_SYNC_STEPS, beatsToSeconds, sync helpers
+    clock.js              AudioContext-backed musical time, origin and cursors
     format.js             formatNumericValue & friends
     storage.js            localStorage keys, IndexedDB audio db
     params.js             ParamDef type + bindParamControls() (see abstraction A)

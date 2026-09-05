@@ -36,6 +36,7 @@ export const STEP_SEQ = {
   sharedAcrossLoops: false,
   currentStep: 0,
   currentValue: 0,
+  originTime: 0,
   elapsed: 0,
 };
 

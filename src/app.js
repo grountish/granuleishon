@@ -24,6 +24,15 @@ import { LINK } from './link/state.js';
 import { MIXER } from './mixer/state.js';
 import { engine } from './core/engine.js';
 import {
+  bindMusicalClock,
+  unbindMusicalClock,
+  musicalNow,
+  resetMusicalClock,
+  createMusicalClockCursor,
+  resetMusicalClockCursor,
+  readMusicalClock,
+} from './core/clock.js';
+import {
   FX_BUS_IDS,
   FX_BUS_LABELS,
   fxStates,
@@ -920,6 +929,7 @@ function createGranularSourceState() {
 async function ensureAudioEngine() {
   if (!engine.ctx) {
     engine.ctx = createAudioContext();
+    bindMusicalClock(engine.ctx);
     await ensureFxModules();
     buildFxNodes();
     buildGen3Nodes();
@@ -928,6 +938,7 @@ async function ensureAudioEngine() {
     engine.master.output.connect(engine.ctx.destination);
     ensureVizAnalyser();
   }
+  bindMusicalClock(engine.ctx);
   if (engine.ctx.state === 'suspended') await engine.ctx.resume();
   if (!gen3ScopeFrame) startGen3Scope();
   if (!lfoAnimFrame) startLFOLoop();
@@ -2255,6 +2266,31 @@ function getModSourceScaledValue(sourceIdx) {
     return TRIG_SC.invert ? v : -v;
   }
   return null;
+}
+
+function scheduleSidechainEnvelope(sidechain, time) {
+  if (!Number.isFinite(time)) return;
+  sidechain.pending.push(time);
+}
+
+function resetSidechainEnvelope(sidechain) {
+  sidechain.pending.length = 0;
+  sidechain.triggeredAt = null;
+  sidechain.envelope = 0;
+}
+
+function updateSidechainEnvelope(sidechain, now) {
+  while (sidechain.pending.length && sidechain.pending[0] <= now) {
+    sidechain.triggeredAt = sidechain.pending.shift();
+  }
+  if (!Number.isFinite(sidechain.triggeredAt)) {
+    sidechain.envelope = 0;
+    return;
+  }
+  sidechain.envelope = Math.max(
+    0,
+    1 - (now - sidechain.triggeredAt) / Math.max(0.005, sidechain.release),
+  );
 }
 
 function getBaseFxValue(id, key, busId = BUS.active) {
@@ -5353,7 +5389,7 @@ function getGen3ArpNotes(sound) {
 
 function scheduleGen3ArpNote(time, midi, sound, stepDuration) {
   const session = GEN3_ARP_RUNTIME.session;
-  const delayMs = Math.max(0, time - engine.ctx.currentTime) * 1000;
+  const delayMs = Math.max(0, time - musicalNow()) * 1000;
   const gateMs = Math.max(8, stepDuration * clamp(sound.arpGate, 0.1, 1) * 1000);
   setTimeout(() => {
     if (!engine.ctx || !GEN4.playing || session !== GEN3_ARP_RUNTIME.session) return;
@@ -6283,7 +6319,7 @@ function gen4DistortionCurve(amount) {
 }
 
 function gen4TriggerKick(time, velocity, p, dest) {
-  KICK_SC.envelope = 1.0;
+  scheduleSidechainEnvelope(KICK_SC, time);
   const ac = engine.ctx;
   const osc = ac.createOscillator();
   osc.type = 'sine';
@@ -6421,7 +6457,7 @@ function gen4TriggerOsc(
   // Snapshot the chord now — in song mode the bound loop may change before the
   // scheduled timeout fires.
   const notes = [...midis];
-  const delayMs = Math.max(0, time - engine.ctx.currentTime) * 1000;
+  const delayMs = Math.max(0, time - musicalNow()) * 1000;
   setTimeout(() => {
     const oscChannel = GEN4.channels.find((channel) => channel.id === 'osc');
     if (!engine.ctx || oscChannel?.muted) return;
@@ -6595,7 +6631,7 @@ function applyGen4StepNote(ch, p, midi, locks = null) {
 function gen4FireChannel(ci, time, velocity, midi = null, loop = null, locks = null) {
   const ch = GEN4.channels[ci];
   if (ch.muted) return;
-  if (ch.id === TRIG_SC.source) TRIG_SC.envelope = 1.0;
+  if (ch.id === TRIG_SC.source) scheduleSidechainEnvelope(TRIG_SC, time);
   const p = getEffectiveGen4Params(ci, locks);
   applyGen4StepNote(ch, p, midi, locks);
   const sendToFx = locks && Object.hasOwn(locks, '_fxSend') ? locks._fxSend : ch.fxSend;
@@ -6633,10 +6669,13 @@ function gen4FireChannel(ci, time, velocity, midi = null, loop = null, locks = n
 
 function gen4ScheduleTick() {
   if (!engine.ctx || !GEN4.nodes || !GEN4.playing) return;
+  // The interval only wakes this lookahead pass. AudioContext time is the
+  // transport, so delayed/throttled callbacks never advance a second clock.
+  const now = musicalNow();
   const secPerStep = 60.0 / TRANSPORT.bpm / 4;
   const secPerOneTwentyEighth = 60.0 / TRANSPORT.bpm / 32;
   const scheduleHorizon = GEN4.scheduleAheadTime + secPerOneTwentyEighth * 8;
-  while (GEN4.nextStepTime < engine.ctx.currentTime + scheduleHorizon) {
+  while (GEN4.nextStepTime < now + scheduleHorizon) {
     // The pattern to schedule from: the edited loop in loop mode, the loop at
     // the song cursor in song mode. Resolved per step so a pattern boundary
     // can hand off to the next arrangement entry mid-lookahead.
@@ -6689,7 +6728,7 @@ function gen4ScheduleTick() {
       const count = pat.stutter[step];
       const timing = clamp(Math.round(pat.timing?.[step] || 0), -8, 8);
       const stepTime = Math.max(
-        engine.ctx.currentTime,
+        now,
         GEN4.nextStepTime + swingOffset + timing * secPerOneTwentyEighth,
       );
       for (let r = 0; r < count; r++) {
@@ -6807,7 +6846,7 @@ function gen4SetStepCount(n, { duplicateOnExpand = true } = {}) {
 function gen4DisplayTick() {
   gen4DisplayFrame = requestAnimationFrame(gen4DisplayTick);
   if (!engine.ctx || !GEN4.playing) return;
-  const now = engine.ctx.currentTime;
+  const now = musicalNow();
   let audible = null;
   for (let i = gen4Schedule.length - 1; i >= 0; i--) {
     if (gen4Schedule[i].time <= now) {
@@ -6838,6 +6877,8 @@ function startGen4Sequencer() {
   GEN4.cycleCount = 0;
   GEN4.condFired.fill(false);
   gen4Schedule.length = 0;
+  resetSidechainEnvelope(KICK_SC);
+  resetSidechainEnvelope(TRIG_SC);
   resetGen3ArpRuntime({ newSession: true });
   if (PLAY.mode === 'song') resetSongPlayback();
   else {
@@ -6856,7 +6897,6 @@ function startGen4Sequencer() {
     lfo.phase = 0;
     lfo.currentValue = getLFOValue(lfo);
   });
-  lfoLastTs = 0;
   FX_BUS_IDS.forEach((busId) => fxBuses[busId]?.beatrepeat.node.port.postMessage('reset'));
   if (!BOUNCE.active && LINK.active && !LINK.applyingRemote && !LINK.grid.playing) {
     // We start the linked session: anchor the shared grid slightly ahead so
@@ -6868,8 +6908,10 @@ function startGen4Sequencer() {
     LINK.stepAbs = linkJoinStep();
     GEN4.nextStepTime = linkStepAudioTime(LINK.stepAbs);
   } else {
-    GEN4.nextStepTime = engine.ctx.currentTime + 0.01;
+    GEN4.nextStepTime = musicalNow() + 0.01;
   }
+  resetMusicalClock(GEN4.nextStepTime);
+  STEP_SEQ.originTime = GEN4.nextStepTime;
   GEN4.schedulerTimer = setInterval(gen4ScheduleTick, GEN4.scheduleInterval);
   gen4ScheduleTick();
   if (!gen4DisplayFrame) gen4DisplayFrame = requestAnimationFrame(gen4DisplayTick);
@@ -6878,6 +6920,8 @@ function startGen4Sequencer() {
 
 function stopGen4Sequencer() {
   GEN4.playing = false;
+  resetSidechainEnvelope(KICK_SC);
+  resetSidechainEnvelope(TRIG_SC);
   resetGen3ArpRuntime({ newSession: true });
   releaseGen3SustainChord();
   applyGen3Modulation();
@@ -9220,9 +9264,10 @@ let seqBars = [];
 let seqSubdivisionSelect = null;
 let seqStepBeatSelect = null;
 let seqShareButton = null;
-// lfoMappings: 'genIdx:paramKey' → { genIdx, key, sourceIdx }
-let lfoLastTs = 0,
-  lfoAnimFrame = null;
+// lfoMappings: 'genIdx:paramKey' → { genIdx, key, sourceIdx, amount }
+// amount is per cable, bipolar −1..1; legacy routes default to +1.
+const lfoClockCursor = createMusicalClockCursor();
+let lfoAnimFrame = null;
 
 function getSeqActiveStepCountFor(seq) {
   return clamp(Math.round(seq.subdivision), 1, seq.steps.length);
@@ -10253,6 +10298,7 @@ function resetSongPlayback() {
   SONG.audibleEntryIdx = -1;
   STEP_SEQ.currentStep = 0;
   STEP_SEQ.elapsed = 0;
+  STEP_SEQ.originTime = musicalNow();
   const seq = getSchedulerLoop()?.seq;
   STEP_SEQ.currentValue = seq ? seq.steps[0] || 0 : 0;
   refreshSequencerUI();
@@ -10281,7 +10327,7 @@ function updateSongMorph(audible) {
       const stepCount = Math.max(1, loop.gen4?.stepCount || 16);
       const secPerStep = 60 / TRANSPORT.bpm / 4;
       const stepFrac = engine.ctx
-        ? clamp((engine.ctx.currentTime - audible.time) / secPerStep, 0, 1)
+        ? clamp((musicalNow() - audible.time) / secPerStep, 0, 1)
         : 0;
       const totalCycles = Math.max(1, entry.repeats);
       const cycles = Math.min(span, totalCycles);
@@ -10316,6 +10362,7 @@ function updateSongPlayhead(audible) {
     // stays phase-locked to the section.
     STEP_SEQ.currentStep = 0;
     STEP_SEQ.elapsed = 0;
+    STEP_SEQ.originTime = audible.time;
     const seq = getAudibleLoop()?.seq;
     STEP_SEQ.currentValue = seq ? seq.steps[0] || 0 : 0;
     refreshSequencerUI();
@@ -12022,7 +12069,7 @@ function updateSongOrbitProgress(audible) {
   // whole 16ths reads as lag.
   const secPerStep = 60 / TRANSPORT.bpm / 4;
   const stepFrac = engine.ctx
-    ? clamp((engine.ctx.currentTime - audible.time) / secPerStep, 0, 1)
+    ? clamp((musicalNow() - audible.time) / secPerStep, 0, 1)
     : 0;
   const cycleFrac = clamp((audible.step + stepFrac) / stepCount, 0, 1);
   const frac = clamp(
@@ -12392,52 +12439,44 @@ function getLFOValue(lfo) {
   }
 }
 
-function lfoStep(ts) {
-  const dt = lfoLastTs ? Math.min((ts - lfoLastTs) / 1000, 0.1) : 0;
-  lfoLastTs = ts;
+function lfoStep() {
+  const { now, delta: dt, reset } = readMusicalClock(lfoClockCursor);
   LFOS.forEach((lfo) => {
     const rateHz = getLfoRateHz(lfo);
     const prevPhase = lfo.phase;
     lfo.phase += rateHz * dt;
-    let wrapped = false;
-    while (lfo.phase >= 1) {
-      lfo.phase -= 1;
-      wrapped = true;
-    }
-    if (lfo.shape === 'samplehold' && (wrapped || (dt === 0 && prevPhase === 0))) {
+    const wraps = Math.floor(lfo.phase);
+    if (wraps > 0) lfo.phase -= wraps;
+    if (lfo.shape === 'samplehold' && (wraps > 0 || (reset && prevPhase === 0))) {
       lfo.holdValue = Math.random() * 2 - 1;
     }
     lfo.currentValue = getLFOValue(lfo);
   });
   {
-    // Pattern data comes from the audible loop (edited loop in loop mode, the
-    // sounding song entry in song mode); transport position stays on STEP_SEQ.
+    // Pattern data comes from the audible loop. Position is derived from the
+    // audio clock, never accumulated from display frames, and re-anchors at
+    // each song block through STEP_SEQ.originTime.
     const seq = getAudibleLoop()?.seq || STEP_SEQ;
     const stepDuration = getSeqStepDurationFor(seq);
-    let advanced = false;
-    STEP_SEQ.elapsed += dt;
-    while (STEP_SEQ.elapsed >= stepDuration) {
-      STEP_SEQ.elapsed -= stepDuration;
-      STEP_SEQ.currentStep = (STEP_SEQ.currentStep + 1) % getSeqActiveStepCountFor(seq);
-      advanced = true;
-    }
-    if (STEP_SEQ.currentStep >= getSeqActiveStepCountFor(seq)) STEP_SEQ.currentStep = 0;
+    const stepCount = getSeqActiveStepCountFor(seq);
+    const origin = Number.isFinite(STEP_SEQ.originTime) ? STEP_SEQ.originTime : now;
+    const elapsed = Math.max(0, now - origin);
+    const nextStep = Math.floor(elapsed / stepDuration) % stepCount;
+    const advanced = nextStep !== STEP_SEQ.currentStep;
+    STEP_SEQ.currentStep = nextStep;
+    STEP_SEQ.elapsed = elapsed % stepDuration;
     STEP_SEQ.currentValue = seq.steps[STEP_SEQ.currentStep] || 0;
-    if (advanced || dt === 0) refreshSequencerUI();
+    if (advanced || reset) refreshSequencerUI();
   }
-  if (KICK_SC.envelope > 0) {
-    KICK_SC.envelope = Math.max(0, KICK_SC.envelope - dt / Math.max(0.005, KICK_SC.release));
-  }
-  if (TRIG_SC.envelope > 0) {
-    TRIG_SC.envelope = Math.max(0, TRIG_SC.envelope - dt / Math.max(0.005, TRIG_SC.release));
-  }
+  updateSidechainEnvelope(KICK_SC, now);
+  updateSidechainEnvelope(TRIG_SC, now);
   applyMappedModulationTargets();
   lfoAnimFrame = requestAnimationFrame(lfoStep);
 }
 
 function startLFOLoop() {
   if (lfoAnimFrame) return;
-  lfoLastTs = 0;
+  resetMusicalClockCursor(lfoClockCursor);
   lfoAnimFrame = requestAnimationFrame(lfoStep);
 }
 
@@ -12446,6 +12485,7 @@ function stopLFOLoop() {
     cancelAnimationFrame(lfoAnimFrame);
     lfoAnimFrame = null;
   }
+  resetMusicalClockCursor(lfoClockCursor);
   LFOS.forEach((lfo) => {
     lfo.phase = 0;
     lfo.currentValue = 0;
@@ -12454,6 +12494,7 @@ function stopLFOLoop() {
   STEP_SEQ.currentStep = 0;
   STEP_SEQ.currentValue = STEP_SEQ.steps[0] || 0;
   STEP_SEQ.elapsed = 0;
+  STEP_SEQ.originTime = musicalNow();
   refreshSequencerUI();
   refreshModulationVisuals();
   emit('state');
@@ -12470,6 +12511,7 @@ function setSequencerSubdivision(subdivision) {
   STEP_SEQ.currentStep = Math.min(STEP_SEQ.currentStep, getSeqActiveStepCount() - 1);
   STEP_SEQ.currentValue = STEP_SEQ.steps[STEP_SEQ.currentStep] || 0;
   STEP_SEQ.elapsed = 0;
+  STEP_SEQ.originTime = musicalNow();
   refreshSequencerUI();
   emit('state');
   applyMappedModulationTargets();
@@ -12484,6 +12526,7 @@ function setSequencerStepBeats(stepBeats) {
     editLoop.seq.stepBeats = STEP_SEQ.stepBeats;
   }
   STEP_SEQ.elapsed = 0;
+  STEP_SEQ.originTime = musicalNow();
   refreshSequencerUI();
   emit('state');
   applyMappedModulationTargets();
@@ -18462,7 +18505,10 @@ function stop() {
   SMP.nodes = null;
   SMP.voice = null;
   disconnectGranularInput({ stopTracks: true });
-  if (engine.ctx) engine.ctx.close();
+  if (engine.ctx) {
+    unbindMusicalClock(engine.ctx);
+    engine.ctx.close();
+  }
   engine.ctx = engine.node = engine.master = null;
   FX_BUS_IDS.forEach((id) => (fxBuses[id] = null));
   granularModulePromise = null;

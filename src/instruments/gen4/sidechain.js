@@ -2,6 +2,8 @@
 
 export const KICK_SC = {
   envelope: 0,
+  pending: [],
+  triggeredAt: null,
   release: 0.2,
   amount: 1.0,
 };
@@ -12,6 +14,8 @@ export const KICK_SC = {
 // sidechain: the target only opens while the chosen lane is hitting).
 export const TRIG_SC = {
   envelope: 0,
+  pending: [],
+  triggeredAt: null,
   release: 0.2,
   amount: 1.0,
   source: 'fm',
